@@ -27,10 +27,10 @@ index 1d66528..c36ef7a 100644
      ReplaceName.h
 diff --git a/AfxHookSource2/MirvVr.cpp b/AfxHookSource2/MirvVr.cpp
 new file mode 100644
-index 0000000..34e7f06
+index 0000000..b65483c
 --- /dev/null
 +++ b/AfxHookSource2/MirvVr.cpp
-@@ -0,0 +1,271 @@
+@@ -0,0 +1,302 @@
 +#include "stdafx.h"
 +
 +#include "MirvVr.h"
@@ -73,6 +73,12 @@ index 0000000..34e7f06
 +bool g_FreeLook = false;
 +float g_YawOffset = 0.0f;   // added to the head's yaw so the room lines up with the map
 +float g_LastHeadYaw = 0.0f; // whatever the headset last reported, for Recenter
++
++// Where the viewer has moved to, relative to the demo camera. World space, units.
++float g_MoveOffset[3] = { 0.0f, 0.0f, 0.0f };
++// The yaw the last frame was actually composed with, so a stick move goes where the
++// viewer is looking rather than where the map's X axis points.
++float g_LastViewYaw = 0.0f;
 +
 +// Source's AngleVectors, for angles in degrees as (pitch, yaw, roll).
 +void AngleVectors(const float angles[3], float forward[3], float right[3], float up[3]) {
@@ -164,11 +170,14 @@ index 0000000..34e7f06
 +        g_LastHeadYaw = eye.dYaw;
 +    }
 +
++    g_LastViewYaw = angles[1];
++
 +    float forward[3], right[3], up[3];
 +    AngleVectors(angles, forward, right, up);
 +
 +    for (int i = 0; i < 3; i++) {
 +        pOrigin[i] = g_BaseOrigin[i]
++            + g_MoveOffset[i]
 +            + eye.right   * right[i]
 +            + eye.forward * forward[i]
 +            + eye.up      * up[i];
@@ -210,6 +219,28 @@ index 0000000..34e7f06
 +    // Make the direction the head is pointing now mean the direction the demo camera is
 +    // pointing now.
 +    g_YawOffset = g_BaseAngles[1] - g_LastHeadYaw;
++}
++
++void AfxVr_AddMove(float right, float forward, float up) {
++    // Move in the plane the viewer is facing. Deliberately horizontal: tilting the head
++    // down and pushing forward should not drive you into the floor.
++    const double d = M_PI / 180.0;
++    double sy = sin(g_LastViewYaw * d), cy = cos(g_LastViewYaw * d);
++
++    // Source: forward is (cos yaw, sin yaw, 0), right is (sin yaw, -cos yaw, 0).
++    g_MoveOffset[0] += (float)(forward * cy + right * sy);
++    g_MoveOffset[1] += (float)(forward * sy - right * cy);
++    g_MoveOffset[2] += up;
++}
++
++void AfxVr_AddYaw(float degrees) {
++    g_YawOffset += degrees;
++    while (g_YawOffset > 180.0f) g_YawOffset -= 360.0f;
++    while (g_YawOffset < -180.0f) g_YawOffset += 360.0f;
++}
++
++void AfxVr_ResetMove() {
++    g_MoveOffset[0] = g_MoveOffset[1] = g_MoveOffset[2] = 0.0f;
 +}
 +
 +CON_COMMAND(mirv_vr_freelook, "cs2-vr-spectator: follow a player's position but keep the head free.")
@@ -304,10 +335,10 @@ index 0000000..34e7f06
 +}
 diff --git a/AfxHookSource2/MirvVr.h b/AfxHookSource2/MirvVr.h
 new file mode 100644
-index 0000000..27ffd36
+index 0000000..b5bbc6a
 --- /dev/null
 +++ b/AfxHookSource2/MirvVr.h
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,66 @@
 +#pragma once
 +
 +// cs2-vr-spectator: per-eye camera for the render passes.
@@ -362,12 +393,24 @@ index 0000000..27ffd36
 +// Align the free-look forward direction with where the demo camera is currently facing,
 +// so "straight ahead" in the room means "straight ahead" in the map.
 +void AfxVr_Recenter();
++
++// Move the viewer relative to wherever the demo camera is. Offsets are in the viewer's
++// own frame - right, forward, up, in units - so "forward" means where they are looking.
++// This is what the controller sticks drive.
++void AfxVr_AddMove(float right, float forward, float up);
++
++// Turn the viewer. Only meaningful with free look on; when the demo camera owns the
++// orientation there is nothing to turn.
++void AfxVr_AddYaw(float degrees);
++
++// Put the viewer back on the demo camera.
++void AfxVr_ResetMove();
 diff --git a/AfxHookSource2/MirvVrXr.cpp b/AfxHookSource2/MirvVrXr.cpp
 new file mode 100644
-index 0000000..0bb52df
+index 0000000..10c411d
 --- /dev/null
 +++ b/AfxHookSource2/MirvVrXr.cpp
-@@ -0,0 +1,624 @@
+@@ -0,0 +1,806 @@
 +#include "stdafx.h"
 +
 +#include "MirvVrXr.h"
@@ -376,6 +419,8 @@ index 0000000..0bb52df
 +#include "WrpConsole.h"
 +
 +#include "../shared/AfxConsole.h"
++
++#include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
 +
 +#define _USE_MATH_DEFINES
 +#include <math.h>
@@ -391,6 +436,10 @@ index 0000000..0bb52df
 +// The game's D3D11 device, owned by RenderSystemDX11Hooks.cpp. The session is created on
 +// it, so an eye can be submitted with a plain CopyResource.
 +extern ID3D11Device * g_pDevice;
++
++// For dispatching a console command from a controller button, the way the rest of the
++// hook does it.
++extern SOURCESDK::CS2::ISource2EngineToClient * g_pEngineToClient;
 +
 +// 1 CS2 unit is 1 inch; OpenXR is in metres.
 +static const float kUnitsPerMetre = 39.3700787f;
@@ -427,6 +476,36 @@ index 0000000..0bb52df
 +bool g_FrameBegun = false;
 +int g_EyesCopied = 0;
 +bool g_ReportedFirstSubmit = false;
++
++// --- controller input -------------------------------------------------------------
++XrActionSet g_ActionSet = XR_NULL_HANDLE;
++XrAction g_MoveAction = XR_NULL_HANDLE;    // left stick:  strafe / forward
++XrAction g_TurnAction = XR_NULL_HANDLE;    // right stick: turn / rise
++XrAction g_RecenterAction = XR_NULL_HANDLE;
++XrAction g_FreeLookAction = XR_NULL_HANDLE;
++XrAction g_ResetAction = XR_NULL_HANDLE;
++XrAction g_PauseAction = XR_NULL_HANDLE;
++bool g_ActionsAttached = false;
++
++bool g_PrevRecenter = false, g_PrevFreeLook = false, g_PrevReset = false, g_PrevPause = false;
++ULONGLONG g_LastInputTick = 0;
++
++// Set on the render thread, executed on the engine thread - a console command must not
++// be dispatched from here.
++volatile long g_PendingTogglePause = 0;
++
++// Units per second, and degrees per second. A comfortable walking pace in a headset is
++// far slower than a mouse-driven spectator would ever use.
++float g_MoveSpeed = 120.0f;
++float g_TurnSpeed = 60.0f;
++
++const float kStickDeadzone = 0.18f;
++
++float ApplyDeadzone(float v) {
++    if (v > kStickDeadzone)  return (v - kStickDeadzone) / (1.0f - kStickDeadzone);
++    if (v < -kStickDeadzone) return (v + kStickDeadzone) / (1.0f - kStickDeadzone);
++    return 0.0f;
++}
 +XrCompositionLayerProjectionView g_ProjViews[2] = {};
 +
 +PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
@@ -440,7 +519,10 @@ index 0000000..0bb52df
 +    X(xrEnumerateSwapchainFormats) X(xrCreateSwapchain) X(xrDestroySwapchain) \
 +    X(xrEnumerateSwapchainImages) X(xrAcquireSwapchainImage) X(xrWaitSwapchainImage) \
 +    X(xrReleaseSwapchainImage) \
-+    X(xrWaitFrame) X(xrBeginFrame) X(xrEndFrame) X(xrLocateViews)
++    X(xrWaitFrame) X(xrBeginFrame) X(xrEndFrame) X(xrLocateViews) \
++    X(xrStringToPath) X(xrCreateActionSet) X(xrDestroyActionSet) X(xrCreateAction) \
++    X(xrSuggestInteractionProfileBindings) X(xrAttachSessionActionSets) \
++    X(xrSyncActions) X(xrGetActionStateVector2f) X(xrGetActionStateBoolean)
 +
 +#define AFXVR_DECL(name) PFN_##name name##_ = nullptr;
 +AFXVR_XR_FUNCS(AFXVR_DECL)
@@ -639,6 +721,139 @@ index 0000000..0bb52df
 +    g_SwapchainWidth = g_SwapchainHeight = 0;
 +}
 +
++XrPath Path(const char * s) {
++    XrPath p = XR_NULL_PATH;
++    xrStringToPath_(g_Instance, s, &p);
++    return p;
++}
++
++XrAction MakeAction(XrActionType type, const char * name, const char * localized) {
++    XrActionCreateInfo info = { XR_TYPE_ACTION_CREATE_INFO };
++    info.actionType = type;
++    strcpy_s(info.actionName, name);
++    strcpy_s(info.localizedActionName, localized);
++    XrAction action = XR_NULL_HANDLE;
++    if (!Check(xrCreateAction_(g_ActionSet, &info, &action), "xrCreateAction")) return XR_NULL_HANDLE;
++    return action;
++}
++
++bool CreateActions() {
++    if (XR_NULL_HANDLE != g_ActionSet) return true;
++
++    XrActionSetCreateInfo setInfo = { XR_TYPE_ACTION_SET_CREATE_INFO };
++    strcpy_s(setInfo.actionSetName, "spectator");
++    strcpy_s(setInfo.localizedActionSetName, "Spectator");
++    setInfo.priority = 0;
++    if (!Check(xrCreateActionSet_(g_Instance, &setInfo, &g_ActionSet), "xrCreateActionSet")) return false;
++
++    g_MoveAction     = MakeAction(XR_ACTION_TYPE_VECTOR2F_INPUT, "move", "Move");
++    g_TurnAction     = MakeAction(XR_ACTION_TYPE_VECTOR2F_INPUT, "turn", "Turn and rise");
++    g_RecenterAction = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "recenter", "Recenter");
++    g_FreeLookAction = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "freelook", "Toggle free look");
++    g_ResetAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "reset", "Return to the demo camera");
++    g_PauseAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "pause", "Pause the demo");
++
++    if (!g_MoveAction || !g_TurnAction || !g_RecenterAction || !g_FreeLookAction
++        || !g_ResetAction || !g_PauseAction) return false;
++
++    // Quest 3 controllers. Sticks for movement, the four face buttons for the things
++    // worth reaching for without taking the headset off.
++    XrActionSuggestedBinding bindings[] = {
++        { g_MoveAction,     Path("/user/hand/left/input/thumbstick") },
++        { g_TurnAction,     Path("/user/hand/right/input/thumbstick") },
++        { g_FreeLookAction, Path("/user/hand/left/input/x/click") },
++        { g_ResetAction,    Path("/user/hand/left/input/y/click") },
++        { g_PauseAction,    Path("/user/hand/right/input/a/click") },
++        { g_RecenterAction, Path("/user/hand/right/input/b/click") },
++    };
++
++    XrInteractionProfileSuggestedBinding suggested = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
++    suggested.interactionProfile = Path("/interaction_profiles/oculus/touch_controller");
++    suggested.countSuggestedBindings = _countof(bindings);
++    suggested.suggestedBindings = bindings;
++    if (!Check(xrSuggestInteractionProfileBindings_(g_Instance, &suggested),
++               "xrSuggestInteractionProfileBindings")) return false;
++
++    return true;
++}
++
++bool AttachActions() {
++    if (g_ActionsAttached) return true;
++    if (XR_NULL_HANDLE == g_ActionSet || XR_NULL_HANDLE == g_Session) return false;
++
++    XrSessionActionSetsAttachInfo attach = { XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
++    attach.countActionSets = 1;
++    attach.actionSets = &g_ActionSet;
++    if (!Check(xrAttachSessionActionSets_(g_Session, &attach), "xrAttachSessionActionSets")) return false;
++
++    g_ActionsAttached = true;
++    advancedfx::Message("AFXVR: controllers bound - sticks move and turn, X free look, Y recentre camera, A pause, B recenter view.\n");
++    return true;
++}
++
++bool GetVec2(XrAction action, float & x, float & y) {
++    XrActionStateGetInfo info = { XR_TYPE_ACTION_STATE_GET_INFO };
++    info.action = action;
++    XrActionStateVector2f state = { XR_TYPE_ACTION_STATE_VECTOR2F };
++    if (XR_FAILED(xrGetActionStateVector2f_(g_Session, &info, &state)) || !state.isActive) return false;
++    x = state.currentState.x;
++    y = state.currentState.y;
++    return true;
++}
++
++bool GetPressed(XrAction action) {
++    XrActionStateGetInfo info = { XR_TYPE_ACTION_STATE_GET_INFO };
++    info.action = action;
++    XrActionStateBoolean state = { XR_TYPE_ACTION_STATE_BOOLEAN };
++    if (XR_FAILED(xrGetActionStateBoolean_(g_Session, &info, &state)) || !state.isActive) return false;
++    return XR_TRUE == state.currentState;
++}
++
++void ProcessInput() {
++    if (!g_ActionsAttached || XR_SESSION_STATE_FOCUSED != g_State) return;
++
++    XrActiveActionSet active = { g_ActionSet, XR_NULL_PATH };
++    XrActionsSyncInfo sync = { XR_TYPE_ACTIONS_SYNC_INFO };
++    sync.countActiveActionSets = 1;
++    sync.activeActionSets = &active;
++    if (XR_FAILED(xrSyncActions_(g_Session, &sync))) return;
++
++    ULONGLONG now = GetTickCount64();
++    float dt = g_LastInputTick ? (float)(now - g_LastInputTick) / 1000.0f : 0.0f;
++    g_LastInputTick = now;
++    if (dt > 0.1f) dt = 0.1f; // a hitch must not teleport the viewer
++
++    float x = 0.0f, y = 0.0f;
++    if (GetVec2(g_MoveAction, x, y)) {
++        float r = ApplyDeadzone(x), f = ApplyDeadzone(y);
++        if (r || f) AfxVr_AddMove(r * g_MoveSpeed * dt, f * g_MoveSpeed * dt, 0.0f);
++    }
++    if (GetVec2(g_TurnAction, x, y)) {
++        float t = ApplyDeadzone(x), u = ApplyDeadzone(y);
++        if (t) AfxVr_AddYaw(-t * g_TurnSpeed * dt); // push right, turn right
++        if (u) AfxVr_AddMove(0.0f, 0.0f, u * g_MoveSpeed * dt);
++    }
++
++    // Edge triggered, or a single press would fire for as long as it is held.
++    bool b;
++
++    b = GetPressed(g_FreeLookAction);
++    if (b && !g_PrevFreeLook) { AfxVr_SetFreeLook(!AfxVr_GetFreeLook()); if (AfxVr_GetFreeLook()) AfxVr_Recenter(); }
++    g_PrevFreeLook = b;
++
++    b = GetPressed(g_RecenterAction);
++    if (b && !g_PrevRecenter) AfxVr_Recenter();
++    g_PrevRecenter = b;
++
++    b = GetPressed(g_ResetAction);
++    if (b && !g_PrevReset) AfxVr_ResetMove();
++    g_PrevReset = b;
++
++    b = GetPressed(g_PauseAction);
++    if (b && !g_PrevPause) InterlockedExchange(&g_PendingTogglePause, 1);
++    g_PrevPause = b;
++}
++
 +void PollEvents() {
 +    if (XR_NULL_HANDLE == g_Instance) return;
 +
@@ -795,6 +1010,8 @@ index 0000000..0bb52df
 +        return false;
 +    }
 +
++    if (CreateActions()) AttachActions();
++
 +    advancedfx::Message("AFXVR: session created; waiting for the runtime to make it ready.\n");
 +    return true;
 +}
@@ -821,6 +1038,12 @@ index 0000000..0bb52df
 +
 +void MirvVrXr_EngineThread_Frame() {
 +    PollEvents();
++
++    // A console command has to be dispatched from the engine thread, so the controller
++    // handler only raises a flag.
++    if (InterlockedExchange(&g_PendingTogglePause, 0) && g_pEngineToClient) {
++        g_pEngineToClient->ExecuteClientCmd(0, "demo_togglepause", true);
++    }
 +
 +    XrView views[2];
 +    {
@@ -864,6 +1087,8 @@ index 0000000..0bb52df
 +        XrFrameBeginInfo beginInfo = { XR_TYPE_FRAME_BEGIN_INFO };
 +        if (!Check(xrBeginFrame_(g_Session, &beginInfo), "xrBeginFrame")) return;
 +        g_FrameBegun = true;
++
++        ProcessInput();
 +
 +        // Locate for this frame; the engine thread picks these up for the next one.
 +        XrViewLocateInfo locate = { XR_TYPE_VIEW_LOCATE_INFO };
