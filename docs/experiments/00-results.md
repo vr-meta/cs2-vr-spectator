@@ -143,9 +143,9 @@ ships and is maintained.
 
 What has to be replaced is only the cheap part — shifting the camera between passes:
 
-- **`mirv_input` works.** Confirmed in [experiment 01](01-camera-control.md): it sets the
-  camera position exactly and repeatably on a paused demo. Still unverified: whether it
-  can be changed *per pass* rather than per frame, which is now the whole question.
+- **`mirv_input` works per frame** (experiment 01) but **not per pass** (experiment 03):
+  the view is already resolved before per-pass commands run. Closing that gap needs a
+  change inside the render path.
 - Failing that, a per-pass camera hook has to be added to HLAE's pass loop — more work,
   but in code that is MIT licensed and whose structure is already understood.
 

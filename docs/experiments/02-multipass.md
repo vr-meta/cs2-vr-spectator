@@ -34,7 +34,12 @@ works on the current build, and is MIT licensed.
 The passes differ, but only in what HLAE's own stream settings control. The camera is
 not among them.
 
-`beforeCommands` accepts **convars only**. Confirmed both ways:
+**Correction (experiment 03): this was wrong.** `beforeCommands` accepts concommands too -
+`ExecuteCommands` falls back to `FindCommand` and `DispatchConCommand`. The claim below
+came from reading only the first half of that function. See
+[`03-per-pass-camera.md`](03-per-pass-camera.md).
+
+The original, incorrect claim:
 
 - In the source, `CAfxStreams::ExecuteCommands` resolves each entry through `FindConVar`
   and assigns to the convar's value.

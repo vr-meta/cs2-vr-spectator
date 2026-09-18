@@ -78,13 +78,15 @@ against the released binary rather than rebuild, which is worse but not fatal.
 
 The one missing connection. Two candidate approaches, in order of preference:
 
-1. **Allow concommands in `beforeCommands`.** Currently `CAfxStreams::ExecuteCommands`
-   resolves every entry through `FindConVar` and assigns to a convar. Extending it to
-   dispatch real commands would make `mirv_input position` usable per pass immediately —
-   and is useful beyond this project, so it may be worth offering upstream.
-2. **Add a camera offset to stream settings.** A per-stream position/rotation delta
-   applied where the convar commands are applied today. More invasive, but does not
-   depend on command dispatch being safe to call inside the render path.
+**UPDATED after experiment 03.** Option 1 below is void: concommands are already
+accepted in `beforeCommands`, and putting `mirv_input position` there changes nothing,
+because the view is resolved before per-pass commands run. Only the deeper change
+remains:
+
+1. ~~Allow concommands in `beforeCommands`~~ — already supported, and ineffective.
+2. **Apply a per-stream camera offset inside the render path**, at the point where a
+   pass obtains its view, downstream of the `mirv_input` override. More invasive, and now
+   the only option.
 
 **Done when:** one paused frame produces two images that differ *only* by a camera
 translation, with correct parallax — near geometry shifting more than far.

@@ -18,6 +18,7 @@ Where it stands: CS2 own stereo hooks are dead ends - the demo eye-offset convar
 - [`docs/experiments/00-results.md`](docs/experiments/00-results.md) - CS2 own stereo hooks are dead: the demo eye-offset convar has no effect, and the multiview path is absent.
 - [`docs/experiments/01-camera-control.md`](docs/experiments/01-camera-control.md) - `mirv_input` moves the camera exactly and repeatably, replacing the dead convar.
 - [`docs/experiments/02-multipass.md`](docs/experiments/02-multipass.md) - confirmed: HLAE renders one frame twice with independent settings per pass. The expensive half of stereo already exists.
+- [`docs/experiments/03-per-pass-camera.md`](docs/experiments/03-per-pass-camera.md) - the camera cannot be changed per pass from config: the view is resolved before pass commands run. Needs a change inside the render path.
 
 - [`docs/04-plan.md`](docs/04-plan.md) - the plan from here: build HLAE, add a per-pass camera, prove a stereo pair on disk, then the VR bridge.
 
