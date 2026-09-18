@@ -1,0 +1,22 @@
+# Patches are byte-exact input to `git apply`, not text to be normalised. advancedfx's
+# tree mixes LF and CRLF, so a hunk's line endings have to survive a checkout on any
+# machine -- `core.autocrlf` rewriting them turns a clean apply into a rejected hunk, and
+# the error it produces says nothing about line endings.
+*.patch -text
+*.diff -text
+
+# Windows shells read these; keep CRLF so they behave the same when checked out anywhere.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# CS2 reads these; it is not fussy, but they are Windows files.
+*.cfg text eol=crlf
+
+# Our C++ is copied into the advancedfx tree, which is LF for these files.
+*.cpp text eol=lf
+*.h   text eol=lf
+
+*.md  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
