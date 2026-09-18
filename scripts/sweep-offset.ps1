@@ -61,7 +61,8 @@ $steps = @(
 
 foreach ($s in $steps) {
     Write-Host "-> $($s.Desc)" -ForegroundColor Cyan
-    [Keys]::Tap([ushort]$s.Key)
+    # PowerShell 5.1 has no [ushort] type accelerator; use the full type name.
+    [Keys]::Tap([System.UInt16]$s.Key)
     Start-Sleep -Milliseconds $SettleMs
     & "$PSScriptRoot\grab-cs2-window.ps1" -Name $s.Name -OutDir $OutDir
 }
