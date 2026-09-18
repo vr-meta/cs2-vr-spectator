@@ -17,6 +17,8 @@ param(
     [switch]$Fullscreen,
     [switch]$SelfBuilt,       # inject our own AfxHookSource2.dll instead of the release one
     [switch]$VrReady,         # square eye-sized window and a frame cap, for VR runtime work
+    [switch]$MetaRuntime,     # use Meta's OpenXR runtime for this launch only, not SteamVR
+    [string]$RuntimeJson,     # or name a runtime manifest explicitly
     [int]$Width  = 1280,
     [int]$Height = 720,
     [int]$FpsMax = 0,         # 0 leaves the game uncapped
@@ -43,6 +45,32 @@ foreach ($p in @($cs2, $hlae, $hook)) {
 
 if (-not (Get-Process steam -ErrorAction SilentlyContinue)) {
     throw 'Steam is not running. Start it first.'
+}
+
+# Which OpenXR runtime this launch gets.
+#
+# The registry key HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime picks one for the whole
+# machine, needs administrator rights, and changes it for every VR application installed.
+# The loader also honours XR_RUNTIME_JSON, which picks one for a single process -- no
+# registry, no elevation, nothing left behind when the process exits. That is what this
+# does, and it is why issue #6 does not need the system-wide change it proposed.
+#
+# Verified with tools/xr-probe: unset gives "SteamVR/OpenXR 2.17.10", set to Meta's
+# manifest gives "Oculus 1.207.0", in the same shell a second apart.
+$metaRuntimeJson = 'C:\Program Files\Meta Horizon\Support\oculus-runtime\oculus_openxr_64.json'
+
+if ($MetaRuntime -and $RuntimeJson) {
+    throw 'Pass -MetaRuntime or -RuntimeJson, not both.'
+}
+if ($MetaRuntime) { $RuntimeJson = $metaRuntimeJson }
+
+if ($RuntimeJson) {
+    if (-not (Test-Path $RuntimeJson)) { throw "Runtime manifest not found: $RuntimeJson" }
+    # Start-Process passes this shell's environment to HLAE, and HLAE passes it to CS2.
+    $env:XR_RUNTIME_JSON = $RuntimeJson
+} else {
+    # Not inherited by accident from an earlier run in the same shell.
+    Remove-Item Env:\XR_RUNTIME_JSON -ErrorAction SilentlyContinue
 }
 
 # Game arguments, passed through HLAE via -cmdLine.
@@ -99,6 +127,11 @@ $hlaeArgs = @(
 Write-Host 'Launching CS2 through HLAE' -ForegroundColor Cyan
 Write-Host "  hook:      $hook"
 Write-Host "  game args: $gameCmdLine"
+if ($RuntimeJson) {
+    Write-Host "  OpenXR:    $RuntimeJson (this process only)" -ForegroundColor Cyan
+} else {
+    Write-Host '  OpenXR:    whatever the registry says - pass -MetaRuntime to override'
+}
 Write-Host ''
 Write-Host 'In the console, FIRST of all:' -ForegroundColor Green
 Write-Host '  mirv_cvar_unhide_all'

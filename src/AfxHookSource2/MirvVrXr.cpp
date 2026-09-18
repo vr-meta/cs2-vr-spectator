@@ -220,6 +220,12 @@ AFXVR_XR_FUNCS(AFXVR_DECL)
 
 PFN_xrGetD3D11GraphicsRequirementsKHR xrGetD3D11GraphicsRequirementsKHR_ = nullptr;
 
+// Tried in order. AFXVR_OPENXR_LOADER comes first so an installation that is not this
+// machine's has somewhere to say so; the absolute path is this machine's and the bare name
+// is the last resort, which finds one only if it happens to sit next to the game.
+//
+// Note this is the *loader*, not the runtime. Which runtime the loader then picks is the
+// registry's business, or XR_RUNTIME_JSON's -- see scripts/openxr-runtime.ps1.
 const wchar_t * const kLoaderPaths[] = {
     L"D:\\Dev\\cs2-vr-tools\\openxr\\pkg\\native\\x64\\release\\bin\\openxr_loader.dll",
     L"openxr_loader.dll",
@@ -245,12 +251,22 @@ bool Check(XrResult r, const char * what) {
 bool LoadLoader() {
     if (g_hLoader) return true;
 
-    for (int i = 0; i < _countof(kLoaderPaths); i++) {
+    wchar_t fromEnvironment[MAX_PATH];
+    if (0 < GetEnvironmentVariableW(L"AFXVR_OPENXR_LOADER", fromEnvironment, MAX_PATH)) {
+        g_hLoader = LoadLibraryW(fromEnvironment);
+        if (!g_hLoader) {
+            advancedfx::Warning("AFXVR: AFXVR_OPENXR_LOADER is set to \"%ls\" but it would not load.\n",
+                fromEnvironment);
+        }
+    }
+
+    for (int i = 0; !g_hLoader && i < _countof(kLoaderPaths); i++) {
         g_hLoader = LoadLibraryW(kLoaderPaths[i]);
-        if (g_hLoader) break;
     }
     if (!g_hLoader) {
-        advancedfx::Warning("AFXVR: could not load openxr_loader.dll.\n");
+        advancedfx::Warning(
+            "AFXVR: could not load openxr_loader.dll. Set AFXVR_OPENXR_LOADER to its full\n"
+            "AFXVR: path before launching, or see docs/install.md.\n");
         return false;
     }
 

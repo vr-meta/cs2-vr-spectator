@@ -116,6 +116,13 @@ Start Steam. Put the headset on and start Link, so the runtime has a headset —
 then** start SteamVR. Without one it takes foreground focus, makes the desktop unusable,
 and gives nothing back.
 
+Or skip SteamVR. On a Quest over Link it is a translation layer with nothing to translate,
+and it is the source of nearly every operational problem this project has had. `-MetaRuntime`
+points CS2 at Meta's runtime **for that launch only**, through `XR_RUNTIME_JSON` — no
+registry edit, no administrator prompt, no change for any other VR application
+([experiment 12](experiments/12-openxr-runtime.md)). `tools/xr-probe` prints which runtime a
+process would actually get, and needs no headset to do it.
+
 ```powershell
 D:\Dev\cs2-vr-spectator\scripts\launch-cs2-experiment.ps1 -SelfBuilt -VrReady -ExecCfg vr `
     -Width 2528 -Height 2780 -Demo pro_mirage.dem
@@ -128,6 +135,8 @@ D:\Dev\cs2-vr-spectator\scripts\launch-cs2-experiment.ps1 -SelfBuilt -VrReady -E
   the window size is the eye size. The window may exceed the display.
 - `-ExecCfg vr` loads the key bindings at startup, because with a runtime up the game
   window stops taking typed input reliably.
+- `-MetaRuntime` uses Meta's OpenXR runtime for this launch instead of whatever the
+  machine is set to. Leave it off to keep SteamVR.
 
 HLAE exits immediately after injecting — that is normal. CS2 takes 40–60 s to appear.
 
