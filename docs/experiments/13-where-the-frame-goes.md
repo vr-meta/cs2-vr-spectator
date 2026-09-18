@@ -138,8 +138,10 @@ In order of expected return, revised:
 5. **Graphics settings.** Already at minimum. Nothing to do.
 
 The one thing that would beat all of these is not rendering the world twice — single-pass
-stereo instancing, `r_stereo_multiview_instancing`, which this project looked at on day one
-and set aside. Worth re-opening now that the traversal cost is known rather than assumed.
+stereo instancing. That door is shut and was shut before this project started:
+`r_stereo_multiview_instancing` **does not exist in build 2000908**, established by
+searching the running engine's own convar tables rather than a community list
+([00-results, finding 2](00-results.md)). Two traversals is the floor.
 
 ## Reproducing
 

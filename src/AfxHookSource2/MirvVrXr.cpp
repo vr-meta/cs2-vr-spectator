@@ -134,6 +134,45 @@ void ReportFrameSamples() {
         p95, p99, worst);
 }
 
+// --- where a submitted frame goes ----------------------------------------------------
+//
+// Experiment 13 established that three scene traversals are about 11 ms of a 21-26 ms VR
+// frame, so more than half the budget is the submission path and the runtime -- and
+// nothing measures that half. These do.
+//
+// xrWaitFrame is the one to watch. It is where the runtime paces the application, so time
+// spent in it is not necessarily time wasted: a fast application waits there on purpose.
+// Time in the copies and in xrEndFrame is, though.
+struct StageTimer {
+    double totalMs = 0.0;
+    double worstMs = 0.0;
+    int count = 0;
+
+    void Add(double ms) {
+        totalMs += ms;
+        if (ms > worstMs) worstMs = ms;
+        count++;
+    }
+    void Reset() { totalMs = 0.0; worstMs = 0.0; count = 0; }
+    double Mean() const { return count ? totalMs / count : 0.0; }
+};
+
+StageTimer g_StageWaitFrame, g_StageLocate, g_StageCopy, g_StageEndFrame;
+
+double SecondsSince(const LARGE_INTEGER & start) {
+    if (0 == g_PerfFrequency.QuadPart) QueryPerformanceFrequency(&g_PerfFrequency);
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)(now.QuadPart - start.QuadPart) / (double)g_PerfFrequency.QuadPart;
+}
+
+LARGE_INTEGER StageStart() {
+    if (0 == g_PerfFrequency.QuadPart) QueryPerformanceFrequency(&g_PerfFrequency);
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return now;
+}
+
 void SampleFrameTime() {
     if (!g_SamplingFrames) return;
 
@@ -1000,7 +1039,9 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
 
         g_FrameState = { XR_TYPE_FRAME_STATE };
         XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
+        LARGE_INTEGER waitStart = StageStart();
         if (!Check(xrWaitFrame_(g_Session, &waitInfo, &g_FrameState), "xrWaitFrame")) return;
+        g_StageWaitFrame.Add(1000.0 * SecondsSince(waitStart));
 
         XrFrameBeginInfo beginInfo = { XR_TYPE_FRAME_BEGIN_INFO };
         if (!Check(xrBeginFrame_(g_Session, &beginInfo), "xrBeginFrame")) return;
@@ -1017,7 +1058,10 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         XrViewState viewState = { XR_TYPE_VIEW_STATE };
         uint32_t got = 0;
         XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
-        if (XR_SUCCEEDED(xrLocateViews_(g_Session, &locate, &viewState, 2, &got, views)) && 2 == got
+        LARGE_INTEGER locateStart = StageStart();
+        XrResult locateResult = xrLocateViews_(g_Session, &locate, &viewState, 2, &got, views);
+        g_StageLocate.Add(1000.0 * SecondsSince(locateStart));
+        if (XR_SUCCEEDED(locateResult) && 2 == got
             && (viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)
             && (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
             std::lock_guard<std::mutex> lock(g_ViewMutex);
@@ -1066,6 +1110,7 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
     bool canCopy = g_FrameState.shouldRender && XR_NULL_HANDLE != g_Swapchain[eyeIndex];
 
     if (canCopy) {
+        LARGE_INTEGER copyStart = StageStart();
         uint32_t imageIndex = 0;
         XrSwapchainImageAcquireInfo acquire = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
         if (Check(xrAcquireSwapchainImage_(g_Swapchain[eyeIndex], &acquire, &imageIndex), "xrAcquireSwapchainImage")) {
@@ -1078,6 +1123,10 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             XrSwapchainImageReleaseInfo release = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
             xrReleaseSwapchainImage_(g_Swapchain[eyeIndex], &release);
         }
+        // Acquire, wait, copy and release together: the interesting quantity is what one
+        // eye costs to hand over, and splitting it further would only measure the D3D11
+        // driver's queueing rather than any work.
+        g_StageCopy.Add(1000.0 * SecondsSince(copyStart));
     }
 
     // A begun frame must always be ended, with or without a layer. Leaving one open is
@@ -1103,7 +1152,9 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         endInfo.layerCount = (2 == g_EyesCopied) ? 1 : 0;
         endInfo.layers = (2 == g_EyesCopied) ? layers : nullptr;
 
+        LARGE_INTEGER endStart = StageStart();
         Check(xrEndFrame_(g_Session, &endInfo), "xrEndFrame");
+        g_StageEndFrame.Add(1000.0 * SecondsSince(endStart));
         g_FrameBegun = false;
 
         ULONGLONG now = GetTickCount64();
@@ -1117,7 +1168,17 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
                 advancedfx::Message("AFXVR: %.1f frames/s submitted at %ux%u per eye (%.2f ms)\n",
                     g_SubmitFps, g_SwapchainWidth, g_SwapchainHeight,
                     g_SubmitFps > 0.0f ? 1000.0f / g_SubmitFps : 0.0f);
+                advancedfx::Message(
+                    "AFXVR:   xrWaitFrame %.2f ms (worst %.2f)  locate %.2f  copy %.2f x%i  xrEndFrame %.2f\n",
+                    g_StageWaitFrame.Mean(), g_StageWaitFrame.worstMs,
+                    g_StageLocate.Mean(), g_StageCopy.Mean(),
+                    g_StageCopy.count ? g_StageCopy.count / (g_StageWaitFrame.count ? g_StageWaitFrame.count : 1) : 0,
+                    g_StageEndFrame.Mean());
             }
+            g_StageWaitFrame.Reset();
+            g_StageLocate.Reset();
+            g_StageCopy.Reset();
+            g_StageEndFrame.Reset();
         }
 
         if (!g_ReportedFirstSubmit && 2 == g_EyesCopied) {
