@@ -89,10 +89,10 @@ index 73b7c00..d74c320 100644
              it->EngineThread_BeginFrame();
          }
 diff --git a/AfxHookSource2/main.cpp b/AfxHookSource2/main.cpp
-index efbea01..a9485b9 100644
+index efbea01..2c845d5 100644
 --- a/AfxHookSource2/main.cpp
 +++ b/AfxHookSource2/main.cpp
-@@ -634,6 +634,92 @@ extern bool g_b_on_c_view_render_setup_view;
+@@ -634,6 +634,115 @@ extern bool g_b_on_c_view_render_setup_view;
  
  extern bool MirvFovOverride(float &fov);
  
@@ -116,6 +116,8 @@ index efbea01..a9485b9 100644
 +static float g_AfxVrBaseOrigin[3] = {0.0f, 0.0f, 0.0f};
 +static float g_AfxVrBaseAngles[3] = {0.0f, 0.0f, 0.0f};
 +static bool g_AfxVrDirty = false; // an eye offset is currently sitting in the CViewSetup
++static float g_AfxVrBaseFov = 90.0f;
++static float g_AfxVrFovDelta = 0.0f; // added to pass 2's fov; a per-eye projection probe
 +
 +// Offset of a given pass along the view's right vector, in units.
 +// Pass 0 (the main pass) is never offset: it is what the player sees.
@@ -142,7 +144,18 @@ index efbea01..a9485b9 100644
 +
 +// Called from the render pass loop, once per extra pass, before that pass renders.
 +void AfxVr_OnBeginRenderPass(int passIndex) {
-+	if (nullptr == g_AfxVrViewSetup || 0.0f == g_AfxVrEyeSeparation) return;
++	if (nullptr == g_AfxVrViewSetup) return;
++
++	// Phase D probe: does changing the fov between passes reach the projection? If the
++	// projection is rebuilt inside OnClientOutput from this struct - which is what the
++	// camera result implies - then per-eye fov costs nothing beyond this.
++	if (0.0f != g_AfxVrFovDelta) {
++		float * pFov = (float*)((unsigned char *)g_AfxVrViewSetup + 0x498);
++		*pFov = (2 == passIndex) ? g_AfxVrBaseFov + g_AfxVrFovDelta : g_AfxVrBaseFov;
++		g_AfxVrDirty = true;
++	}
++
++	if (0.0f == g_AfxVrEyeSeparation) return;
 +
 +	// A zero offset still writes, so the main pass gets the base camera back rather
 +	// than whatever the previous frame's last eye left behind.
@@ -162,6 +175,16 @@ index efbea01..a9485b9 100644
 +			g_AfxVrFrameIndex, passIndex,
 +			pViewOrigin[0], pViewOrigin[1], pViewOrigin[2], g_AfxVrViewSetup);
 +	}
++}
++
++CON_COMMAND(mirv_vr_fovtest, "cs2-vr-spectator: add this many degrees to the right eye's fov (0 = off).") {
++	if (2 <= args->ArgC()) {
++		g_AfxVrFovDelta = (float)atof(args->ArgV(1));
++	}
++	advancedfx::Message(
++		"mirv_vr_fovtest <degrees> - probes whether the projection is rebuilt per pass.\n"
++		"Current value: %f\n",
++		g_AfxVrFovDelta);
 +}
 +
 +CON_COMMAND(mirv_vr_log, "cs2-vr-spectator: log view setup calls for N frames.") {
@@ -185,7 +208,7 @@ index efbea01..a9485b9 100644
  bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
  	if(!g_pEngineToClient) return false;
  
-@@ -649,6 +735,16 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
+@@ -649,6 +758,17 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
  	float *pViewOrigin = (float*)((unsigned char *)ThisCViewSetup + 0x4a0);
  	float *pViewAngles = (float*)((unsigned char *)ThisCViewSetup + 0x4b8);
  
@@ -196,13 +219,14 @@ index efbea01..a9485b9 100644
 +		pViewOrigin[0] = g_AfxVrBaseOrigin[0];
 +		pViewOrigin[1] = g_AfxVrBaseOrigin[1];
 +		pViewOrigin[2] = g_AfxVrBaseOrigin[2];
++		*pFov = g_AfxVrBaseFov;
 +		g_AfxVrDirty = false;
 +	}
 +
  	int width = *pWidth;
  	int height = *pHeight;
  	float Tx = pViewOrigin[0];
-@@ -745,6 +841,32 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
+@@ -745,6 +865,33 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
  		}		
  	}
  
@@ -223,6 +247,7 @@ index efbea01..a9485b9 100644
 +		g_AfxVrViewSetup = ThisCViewSetup;
 +		g_AfxVrBaseOrigin[0] = Tx; g_AfxVrBaseOrigin[1] = Ty; g_AfxVrBaseOrigin[2] = Tz;
 +		g_AfxVrBaseAngles[0] = Rx; g_AfxVrBaseAngles[1] = Ry; g_AfxVrBaseAngles[2] = Rz;
++		g_AfxVrBaseFov = Fov;
 +
 +		if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
 +			advancedfx::Message(
@@ -235,3 +260,19 @@ index efbea01..a9485b9 100644
  	if (g_S2CamIO.GetCamExport())
  	{
  		CamIO::CamData camData;
+@@ -978,6 +1125,15 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
+ 	g_WorldToScreenMatrix.m[3][2] = proj[4*3+2];
+ 	g_WorldToScreenMatrix.m[3][3] = proj[4*3+3];
+ 
++	// cs2-vr-spectator: is the projection rebuilt once per frame or once per pass, and is
++	// this the same object the view setup trampoline writes into?
++	if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
++		float * p = (float*)((unsigned char*)This + 0x218);
++		advancedfx::Message(
++			"AFXVR: frame=%i pass=%i MakeMatrix this=%p proj[0][0]=%f proj[1][1]=%f\n",
++			g_AfxVrFrameIndex, g_AfxVrPassIndex, This, p[0], p[5]);
++	}
++
+ 	g_CampathDrawer.OnEngineThread_SetupViewDone();
+ }
+ 

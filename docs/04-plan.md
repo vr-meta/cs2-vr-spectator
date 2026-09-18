@@ -143,7 +143,31 @@ is wrong here, it will be wrong there, and debugging it here is far cheaper.
 
 ## Phase D — VR bridge
 
-Only after phase C. Per note 03, the insertion point is where HLAE copies the back buffer
+**Step 1 done 2026-09-18:** per-eye field of view works, through the same write that
+carries the camera — see [`experiments/06-per-eye-projection.md`](experiments/06-per-eye-projection.md).
+That was taken first on purpose: a headset needs a different frustum per eye, and if the
+projection had been stuck per frame, everything below would have been built on sand.
+
+It also settles the shape of the frame submission. OpenXR's projection layer takes the
+frustum angles that were *actually rendered*, so a symmetric frustum enclosing the
+runtime's asymmetric recommendation is correct — wasted edge pixels, not a wrong image.
+One fov number per eye is therefore enough, and intercepting the projection in the
+constant buffer is not needed.
+
+Remaining, in order:
+
+1. **Per-pass angles** (`+0x4b8`, same struct). Same lever, unmeasured.
+2. **Calibrate the fov number** against the projection matrix at `CViewRender+0x218`, so
+   the angles reported to OpenXR match what was rendered.
+3. **Resolution.** Passes render at window size; a Quest 3 wants ~2064x2208 per eye.
+4. **OpenXR session** in the hook: instance, system, session on the game's D3D11 device,
+   swapchains, reference space, `xrWaitFrame`/`xrBeginFrame`/`xrEndFrame`, and
+   `xrLocateViews` at frame start feeding the per-pass camera.
+5. **Frame submission**: replace the staging copy in `CAfxCapture::OnBeforeGpuPresent`
+   with a `CopyResource` into the swapchain image. That function already receives both
+   the device context and the finished texture.
+
+Per note 03, the insertion point is where HLAE copies the back buffer
 into a staging texture for file writing; VR needs a GPU-to-GPU copy into an XR swapchain
 image instead.
 
