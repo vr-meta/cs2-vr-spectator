@@ -10,10 +10,12 @@ on:
   push:
     branches: [main]
     paths:
+      - 'src/**'
       - 'docs/patches/**'
       - '.github/workflows/build-hook.yml'
   pull_request:
     paths:
+      - 'src/**'
       - 'docs/patches/**'
       - '.github/workflows/build-hook.yml'
   workflow_dispatch:
@@ -43,10 +45,13 @@ jobs:
           path: advancedfx
           submodules: recursive
 
-      - name: Apply patches
+      - name: Copy in this project's sources and apply the patches
         working-directory: advancedfx
         shell: pwsh
         run: |
+          # Our own files are real sources in this repository; only the edits to
+          # advancedfx's own files are a patch.
+          Copy-Item ../cs2-vr-spectator/src/AfxHookSource2/* AfxHookSource2/ -Force
           # The tree is CRLF; git apply preserves it, unlike anything sed-shaped.
           git apply --verbose ../cs2-vr-spectator/docs/patches/001-vswhere-products.patch
           git apply --verbose ../cs2-vr-spectator/docs/patches/002-per-pass-camera.patch

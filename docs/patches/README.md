@@ -56,9 +56,13 @@ and measurements in experiments
 [06](../experiments/06-per-eye-projection.md) and
 [07](../experiments/07-eye-pose.md).
 
-Patch: [`002-per-pass-camera.patch`](002-per-pass-camera.patch). Adds
-`AfxHookSource2/MirvVr.{h,cpp}` and touches `main.cpp`,
-`RenderSystemDX11Hooks.cpp`, `RenderServiceHooks.cpp` and `AfxHookSource2/CMakeLists.txt`.
+**This patch contains only the edits to advancedfx's own files** — the hooks in
+`main.cpp`, `RenderSystemDX11Hooks.cpp`, `RenderServiceHooks.cpp`, and two `CMakeLists.txt`
+entries. The modules themselves (`MirvVr.{h,cpp}`, `MirvVrXr.{h,cpp}`) are normal sources
+in [`../../src/AfxHookSource2/`](../../src/AfxHookSource2/) and are copied into the tree
+before this is applied; see [`../install.md`](../install.md).
+
+Patch: [`002-per-pass-camera.patch`](002-per-pass-camera.patch).
 
 Three pieces:
 

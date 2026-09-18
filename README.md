@@ -16,6 +16,7 @@ Two things stand between this and something pleasant to use:
 
 **Everything two-dimensional.** The demo's timeline, menu and player name tags all assume one camera and a screen, so in stereo they are doubled, misplaced, and unreachable. The answer is an OpenXR quad layer fed from HLAE's own before-UI hook - see [`docs/06-vr-experience-plan.md`](docs/06-vr-experience-plan.md).
 
+- [`src/`](src/) - the C++ this project wrote: a camera pose per render pass, and the OpenXR session that consumes it.
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
 - [`docs/02-hlae-multipass-analysis.md`](docs/02-hlae-multipass-analysis.md) - HLAE already re-renders the CS2 scene several times per frame from one simulation state, which is the core of what stereo needs.

@@ -41,14 +41,20 @@ Download HLAE from <https://www.advancedfx.org/> and unpack it twice.
 
 ## 2. The hook
 
-Clone advancedfx (MIT) and apply this project's patch:
+Clone advancedfx (MIT), copy in this project's own sources, and apply the patches that
+edit advancedfx's files:
 
 ```powershell
 git clone https://github.com/advancedfx/advancedfx.git D:\Dev\cs2-vr-tools\advancedfx
 cd D:\Dev\cs2-vr-tools\advancedfx
+Copy-Item D:\Dev\cs2-vr-spectator\src\AfxHookSource2\* .\AfxHookSource2\ -Force
 git apply D:\Dev\cs2-vr-spectator\docs\patches\001-vswhere-products.patch
 git apply D:\Dev\cs2-vr-spectator\docs\patches\002-per-pass-camera.patch
 ```
+
+The split is deliberate: everything this project wrote is a normal source file in
+[`../src/`](../src/), and only the edits to someone else's code are a patch. A 900-line
+file is not reviewable as a diff.
 
 **Do not apply these with anything that rewrites line endings.** The tree is CRLF and a
 `sed -i` turned a two-line change into 262 insertions the first time.
