@@ -70,7 +70,7 @@ index cea3626..ad2a751 100644
          }
      }
 diff --git a/AfxHookSource2/RenderSystemDX11Hooks.cpp b/AfxHookSource2/RenderSystemDX11Hooks.cpp
-index 73b7c00..4f24381 100644
+index 73b7c00..eec70b0 100644
 --- a/AfxHookSource2/RenderSystemDX11Hooks.cpp
 +++ b/AfxHookSource2/RenderSystemDX11Hooks.cpp
 @@ -8,6 +8,8 @@
@@ -193,7 +193,7 @@ index 73b7c00..4f24381 100644
          auto it = m_RecordingExtraPassesIterator;
          while(it != m_RecordingExtraPasses.end()) {
              it->EngineThread_BeginFrame();
-@@ -3041,6 +3114,13 @@ public:
+@@ -3041,6 +3114,24 @@ public:
      }    
  
      void EngineThread_BeginMainRenderPass() {
@@ -204,10 +204,21 @@ index 73b7c00..4f24381 100644
 +        }
 +        AfxVr_OnBeginRenderPass(g_AfxVrPassIndex);
 +
++        // cs2-vr-spectator: the main pass is the one image that still has the HUD and the
++        // demo menu composited into it once the eyes stop taking them. It is what the quad
++        // layer carries, so hand it over at BeforePresent - after the UI, deliberately.
++        if (MirvVrXr_WantsPanel()) {
++            auto & pMainPassCommands = g_RenderCommands.EngineThread_GetCommands();
++            pMainPassCommands.BeforePresent.Push(
++                [](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
++                    MirvVrXr_RenderThread_SubmitPanel(pDeviceContext, pTexture);
++                });
++        }
++
          for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
              it->EngineThread_BeginFrame();
          }
-@@ -3563,6 +3643,10 @@ private:
+@@ -3563,6 +3654,10 @@ private:
      std::multiset<CStream,RenderPassCompare> m_RecordingExtraPasses;
      std::multiset<CStream,RenderPassCompare>::iterator m_RecordingExtraPassesIterator;
  

@@ -42,6 +42,16 @@ void MirvVrXr_EngineThread_Frame();
 // Render thread, from the pass's BeforeUi or BeforePresent command. eyeIndex is 0 or 1.
 void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture);
 
+// Render thread, from the MAIN pass's BeforePresent command. The main pass is the one
+// image that still has the HUD and the demo menu composited into it once the eyes have
+// stopped taking them, so it is what the quad layer carries. Does nothing unless the panel
+// is switched on with mirv_vr_panel.
+void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture);
+
+// True while the panel wants the main pass handed over. Asked by the pass loop so the
+// callback is not queued for nothing.
+bool MirvVrXr_WantsPanel();
+
 // Which of the two capture points the eyes are taken from.
 //
 // BeforeUi fires once per render pass, immediately before that pass's UI is composited -

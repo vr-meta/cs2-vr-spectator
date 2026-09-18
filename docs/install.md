@@ -206,6 +206,49 @@ visible:
 Snap turning is the default because smooth rotation the body did not ask for is the main
 cause of sickness in VR. Smooth is there because some people prefer it.
 
+## The menu
+
+The demo's timeline, scoreboard and speed controls are a flat overlay the game draws at
+screen depth. Copied into each eye that is doubled, at the wrong distance, and unreadable.
+Two switches, meant to be used together:
+
+```
+mirv_vr_xr ui out     take the HUD and menu out of the eyes
+mirv_vr_panel on      put the menu on a flat panel in space
+```
+
+The panel is world-locked: it stays where it was placed, so it can be looked away from.
+`mirv_vr_panel place` moves it in front of you, `size <m>` and `distance <m>` adjust it.
+
+Both are off by default, and `ui out` on its own removes the menu from the headset
+entirely — so turn the panel on first, or turn neither on.
+
+Neither has been worn yet. [Issue
+#2](https://github.com/vr-meta/cs2-vr-spectator/issues/2) is where they are tracked, along
+with the part that is still missing: a controller ray to click the timeline with.
+
+## Two things to try, both unmeasured
+
+```
+mirv_vr_xr latency low    locate the head on the engine thread, a frame earlier
+-MetaRuntime              Meta's OpenXR runtime instead of SteamVR, for this launch only
+```
+
+The first removes a frame of head latency and is the arrangement OpenXR is designed
+around; it has not been worn, and `mirv_vr_xr stop` then `latency safe` puts it back. The
+second is worth a try because more than half a VR frame turns out to be the submission
+path rather than rendering ([experiment
+13](experiments/13-where-the-frame-goes.md)); `mirv_vr_xr fps 1` prints where the time
+goes.
+
+## When the game updates
+
+`mirv_vr_selftest`. The camera offsets are measured against one CS2 build, and the hook
+compares the build number at startup and checks that what it reads back still looks like a
+camera. If it stops looking like one it refuses to write rather than corrupting whatever is
+there — so a silent update shows up as "the VR view stopped moving", with an explanation in
+`console.log`.
+
 ## Shutting down, in this order
 
 1. **F5** — stop the session.

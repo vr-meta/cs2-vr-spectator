@@ -43,8 +43,14 @@ XrSpace g_Space = XR_NULL_HANDLE;
 XrSessionState g_State = XR_SESSION_STATE_UNKNOWN;
 bool g_SessionRunning = false;
 
-XrSwapchain g_Swapchain[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };
-std::vector<ID3D11Texture2D*> g_SwapchainImages[2];
+// 0 and 1 are the eyes. 2 is the panel: the main pass's image, which still has the HUD and
+// the demo menu composited into it, carried as a flat quad in space rather than smeared
+// across both eyes at screen depth. See MirvVrXr_RenderThread_SubmitPanel.
+const int kSwapchainCount = 3;
+const int kPanelSwapchain = 2;
+
+XrSwapchain g_Swapchain[kSwapchainCount] = { XR_NULL_HANDLE, XR_NULL_HANDLE, XR_NULL_HANDLE };
+std::vector<ID3D11Texture2D*> g_SwapchainImages[kSwapchainCount];
 uint32_t g_SwapchainWidth = 0, g_SwapchainHeight = 0;
 DXGI_FORMAT g_SwapchainFormat = DXGI_FORMAT_UNKNOWN;
 
@@ -354,6 +360,27 @@ float ShapeStick(float v) {
 }
 XrCompositionLayerProjectionView g_ProjViews[2] = {};
 
+// --- the panel ------------------------------------------------------------------------
+//
+// The demo's timeline, scoreboard and speed controls are a flat Panorama overlay drawn at
+// screen depth. Copied into each eye that is doubled, placed at the wrong distance, and
+// unreadable; issue #2. A quad layer is what a flat panel wants to be in a headset.
+//
+// It carries the main pass, which is the one image that still has the UI in it once
+// `mirv_vr_xr ui out` has taken it out of the eyes. So the two switches are meant to be
+// used together: clean world in stereo, menu on a panel.
+//
+// World-locked rather than head-locked. Head-locked is easier and worse: a panel that
+// follows the eyes cannot be looked away from, and looking away from the menu is most of
+// what a viewer does. It is placed in front of wherever the viewer was when it was turned
+// on, and stays there until it is placed again.
+bool g_PanelEnabled = false;
+bool g_PanelCopied = false;
+bool g_PanelPlaced = false;
+XrPosef g_PanelPose = {};
+float g_PanelWidthMetres = 1.6f;
+float g_PanelDistanceMetres = 1.8f;
+
 PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
 
 #define AFXVR_XR_FUNCS(X) \
@@ -541,7 +568,7 @@ bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
         return false;
     }
 
-    for (int eye = 0; eye < 2; eye++) {
+    for (int eye = 0; eye < kSwapchainCount; eye++) {
         XrSwapchainCreateInfo info = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
         info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         info.format = (int64_t)chosen;
@@ -569,13 +596,13 @@ bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
     g_SwapchainHeight = desc.Height;
     g_SwapchainFormat = chosen;
 
-    advancedfx::Message("AFXVR: swapchains %ux%u, back buffer format %i -> swapchain %i, %u images per eye.\n",
+    advancedfx::Message("AFXVR: swapchains %ux%u, back buffer format %i -> swapchain %i, %u images each (two eyes and a panel).\n",
         desc.Width, desc.Height, (int)desc.Format, (int)chosen, (unsigned)g_SwapchainImages[0].size());
     return true;
 }
 
 void DestroySwapchains() {
-    for (int eye = 0; eye < 2; eye++) {
+    for (int eye = 0; eye < kSwapchainCount; eye++) {
         if (g_Swapchain[eye] != XR_NULL_HANDLE && xrDestroySwapchain_) xrDestroySwapchain_(g_Swapchain[eye]);
         g_Swapchain[eye] = XR_NULL_HANDLE;
         g_SwapchainImages[eye].clear();
@@ -803,6 +830,29 @@ void ProcessInput() {
     g_PrevSeekBack = b;
 }
 
+// Put the panel in front of a head pose, upright, at the configured distance. Only the
+// yaw is taken: a panel that inherits the pitch and roll of whatever angle someone happened
+// to be looking at when they pressed the button is a panel nobody can read.
+void PlacePanelFrom(const XrPosef & head) {
+    const XrQuaternionf & q = head.orientation;
+    double yaw = atan2(2.0 * (q.w * q.y + q.z * q.x), 1.0 - 2.0 * (q.x * q.x + q.y * q.y));
+
+    // OpenXR looks down -Z, so forward is (-sin yaw, 0, -cos yaw).
+    float fx = -(float)sin(yaw);
+    float fz = -(float)cos(yaw);
+
+    g_PanelPose.position.x = head.position.x + fx * g_PanelDistanceMetres;
+    g_PanelPose.position.y = head.position.y;
+    g_PanelPose.position.z = head.position.z + fz * g_PanelDistanceMetres;
+
+    g_PanelPose.orientation.x = 0.0f;
+    g_PanelPose.orientation.y = (float)sin(yaw * 0.5);
+    g_PanelPose.orientation.z = 0.0f;
+    g_PanelPose.orientation.w = (float)cos(yaw * 0.5);
+
+    g_PanelPlaced = true;
+}
+
 // Locate both eyes for a display time and publish them. Shared by the two threading
 // arrangements, so they cannot drift apart.
 void LocateViews(XrTime displayTime) {
@@ -894,6 +944,10 @@ bool MirvVrXr_IsRunning() {
 
 bool MirvVrXr_CaptureBeforeUi() {
     return g_CaptureBeforeUi;
+}
+
+bool MirvVrXr_WantsPanel() {
+    return g_PanelEnabled && g_SessionRunning;
 }
 
 bool MirvVrXr_WantsPasses() {
@@ -1126,6 +1180,31 @@ void MirvVrXr_EngineThread_Frame() {
     }
 }
 
+void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
+    if (!g_PanelEnabled || !pContext || !pTexture) return;
+    if (!g_SessionRunning) return;
+    if (XR_NULL_HANDLE == g_Swapchain[kPanelSwapchain]) return; // first frame, not made yet
+
+    // This runs during the main pass, which comes before the eyes and therefore before
+    // xrBeginFrame. That is allowed: acquiring, waiting on and releasing a swapchain image
+    // is not scoped to a frame, only referencing it at xrEndFrame is - and by then it has
+    // been released.
+    uint32_t imageIndex = 0;
+    XrSwapchainImageAcquireInfo acquire = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    if (!Check(xrAcquireSwapchainImage_(g_Swapchain[kPanelSwapchain], &acquire, &imageIndex),
+               "xrAcquireSwapchainImage (panel)")) return;
+
+    XrSwapchainImageWaitInfo wait = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wait.timeout = XR_INFINITE_DURATION;
+    if (Check(xrWaitSwapchainImage_(g_Swapchain[kPanelSwapchain], &wait), "xrWaitSwapchainImage (panel)")) {
+        pContext->CopyResource(g_SwapchainImages[kPanelSwapchain][imageIndex], pTexture);
+        g_PanelCopied = true;
+    }
+
+    XrSwapchainImageReleaseInfo release = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    xrReleaseSwapchainImage_(g_Swapchain[kPanelSwapchain], &release);
+}
+
 void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
     if (eyeIndex < 0 || eyeIndex > 1) return;
     if (!pContext || !pTexture) return;
@@ -1235,14 +1314,42 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         layer.viewCount = 2;
         layer.views = g_ProjViews;
 
-        const XrCompositionLayerBaseHeader * layers[] = { (XrCompositionLayerBaseHeader*)&layer };
+        // The panel goes on top of the world, so it comes second: the runtime composites
+        // layers in the order given.
+        XrCompositionLayerQuad panel = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        panel.space = g_Space;
+        panel.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        panel.pose = g_PanelPose;
+        panel.subImage.swapchain = g_Swapchain[kPanelSwapchain];
+        panel.subImage.imageRect.offset = { 0, 0 };
+        panel.subImage.imageRect.extent = { (int32_t)g_SwapchainWidth, (int32_t)g_SwapchainHeight };
+        panel.subImage.imageArrayIndex = 0;
+        panel.size.width = g_PanelWidthMetres;
+        // Keep the source aspect, whatever it happens to be. The window is the eye size,
+        // so on this machine the panel is taller than it is wide -- ugly, but honest, and
+        // stretching text is worse than an odd shape.
+        panel.size.height = (g_SwapchainWidth > 0)
+            ? g_PanelWidthMetres * (float)g_SwapchainHeight / (float)g_SwapchainWidth
+            : g_PanelWidthMetres;
+
+        const XrCompositionLayerBaseHeader * layers[2] = {
+            (XrCompositionLayerBaseHeader*)&layer,
+            (XrCompositionLayerBaseHeader*)&panel,
+        };
 
         XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
         endInfo.displayTime = g_FrameState.predictedDisplayTime;
         endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        bool haveLayer = (2 == g_EyesCopied) && g_ProjViewsValid;
-        endInfo.layerCount = haveLayer ? 1 : 0;
-        endInfo.layers = haveLayer ? layers : nullptr;
+
+        bool haveWorld = (2 == g_EyesCopied) && g_ProjViewsValid;
+        bool havePanel = g_PanelEnabled && g_PanelCopied && g_PanelPlaced
+            && XR_NULL_HANDLE != g_Swapchain[kPanelSwapchain];
+
+        if (haveWorld && havePanel)      { endInfo.layerCount = 2; endInfo.layers = layers; }
+        else if (haveWorld)              { endInfo.layerCount = 1; endInfo.layers = layers; }
+        else                             { endInfo.layerCount = 0; endInfo.layers = nullptr; }
+
+        g_PanelCopied = false;
 
         LARGE_INTEGER endStart = StageStart();
         Check(xrEndFrame_(g_Session, &endInfo), "xrEndFrame");
@@ -1542,4 +1649,80 @@ CON_COMMAND(mirv_vr_frametime, "cs2-vr-spectator: sample frame times and report 
         "\n"
         "Measured around the whole engine frame, so it works with no session and no\n"
         "headset -- which is what makes the graphics settings comparable at a desk.\n");
+}
+
+CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in space, instead of smeared across both eyes.")
+{
+    int argc = args->ArgC();
+
+    if (2 <= argc) {
+        const char * arg1 = args->ArgV(1);
+
+        if (!_stricmp(arg1, "on") || !_stricmp(arg1, "1")) {
+            g_PanelEnabled = true;
+            // Place it where the viewer is looking now, rather than wherever it was left.
+            {
+                std::lock_guard<std::mutex> lock(g_ViewMutex);
+                if (g_ViewsValid) PlacePanelFrom(g_Views[0].pose);
+            }
+            advancedfx::Message(
+                "mirv_vr_panel: on, %.2f m wide at %.2f m.\n"
+                "  Pair it with mirv_vr_xr ui out, or the menu is on the panel AND in both eyes.\n",
+                g_PanelWidthMetres, g_PanelDistanceMetres);
+            return;
+        }
+        if (!_stricmp(arg1, "off") || !_stricmp(arg1, "0")) {
+            g_PanelEnabled = false;
+            advancedfx::Message("mirv_vr_panel: off.\n");
+            return;
+        }
+        if (!_stricmp(arg1, "place")) {
+            std::lock_guard<std::mutex> lock(g_ViewMutex);
+            if (g_ViewsValid) {
+                PlacePanelFrom(g_Views[0].pose);
+                advancedfx::Message("mirv_vr_panel: placed in front of you.\n");
+            } else {
+                advancedfx::Warning("mirv_vr_panel: no head pose yet; start the session first.\n");
+            }
+            return;
+        }
+        if (!_stricmp(arg1, "size") && 3 <= argc) {
+            g_PanelWidthMetres = (float)atof(args->ArgV(2));
+            if (g_PanelWidthMetres < 0.1f) g_PanelWidthMetres = 0.1f;
+            if (g_PanelWidthMetres > 20.0f) g_PanelWidthMetres = 20.0f;
+            advancedfx::Message("mirv_vr_panel: %.2f m wide.\n", g_PanelWidthMetres);
+            return;
+        }
+        if (!_stricmp(arg1, "distance") && 3 <= argc) {
+            g_PanelDistanceMetres = (float)atof(args->ArgV(2));
+            if (g_PanelDistanceMetres < 0.3f) g_PanelDistanceMetres = 0.3f;
+            if (g_PanelDistanceMetres > 20.0f) g_PanelDistanceMetres = 20.0f;
+            advancedfx::Message("mirv_vr_panel: %.2f m away. Use 'place' to move it there.\n",
+                g_PanelDistanceMetres);
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "mirv_vr_panel on|off      - the demo menu as a flat panel in space.\n"
+        "mirv_vr_panel place       - put it in front of where you are looking now.\n"
+        "mirv_vr_panel size <m>    - how wide, in metres.\n"
+        "mirv_vr_panel distance <m>- how far away the next 'place' puts it.\n"
+        "\n"
+        "The timeline, the scoreboard and the speed controls are a flat overlay the game\n"
+        "draws at screen depth. Copied into each eye, that is doubled, at the wrong\n"
+        "distance, and unreadable. A quad layer is what a flat panel wants to be in a\n"
+        "headset, and the runtime composites it properly.\n"
+        "\n"
+        "It carries the main pass - the one image that still has the UI in it once\n"
+        "mirv_vr_xr ui out has taken it out of the eyes. Use the two together.\n"
+        "\n"
+        "World-locked, not head-locked. A panel that follows your eyes cannot be looked\n"
+        "away from, and looking away from the menu is most of what a viewer does.\n"
+        "\n"
+        "Current: %s, %.2f m wide, placed %s. Session %s.\n",
+        g_PanelEnabled ? "on" : "off",
+        g_PanelWidthMetres,
+        g_PanelPlaced ? "yes" : "not yet",
+        g_SessionRunning ? "running" : "not running");
 }
