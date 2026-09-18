@@ -4,17 +4,17 @@ Watch Counter-Strike 2 match replays from inside the map using a Meta Quest 3 co
 
 ## Status
 
-**CS2 renders into a Meta Quest 3.** Stereo, head tracked, at the runtime's full recommended 2528x2780 per eye, from a demo playing inside the real game. The feasibility question this project existed to answer is answered. There is no installable build yet, and performance is still unmeasured.
+**CS2 renders into a Meta Quest 3.** Stereo, head tracked, at the runtime's full recommended 2528x2780 per eye, from a demo playing inside the real game, with the controllers flying the viewer around the map. The feasibility question this project existed to answer is answered. There is no installable build yet.
 
-Milestone 1 is done, and **stereo rendering inside CS2 now works**: one paused frame renders twice from two camera positions, with correct parallax. That was the main feasibility question. What remains between here and a headset is plumbing and performance, not an unknown.
+How it works: CS2's own stereo hooks are dead ends - the demo eye-offset convar has no effect, the multiview path is absent. Stereo comes instead from HLAE's multi-pass rendering, which re-renders one frame several times, plus a change of ours that gives each pass its own camera. The engine resolves the camera once per frame, outside the pass loop - but the object holding it is persistent and re-read by every pass, so rewriting it between passes separates the eyes. Position, orientation and field of view all go through that one lever.
 
-How it stands: CS2's own stereo hooks are dead ends - the demo eye-offset convar has no effect, the multiview path is absent. Stereo instead comes from HLAE's multi-pass rendering, which re-renders one frame several times, plus a change of ours that gives each pass its own camera. The camera turned out to be resolved once per frame, outside the pass loop - but the object holding it is persistent and re-read by every pass, so rewriting it between passes separates the eyes.
+The pair is verified: at a real 63 mm interpupillary distance it differs only by viewpoint, and with the separation set to zero on a playing demo with live smoke the two eyes stay identical - so the simulation does not advance between passes, which is the error that would be unbearable in a headset. [Look at the pair](https://claude.ai/artifact/3iESVvwPKZjiEDLX9eAC8x).
 
-The pair is also verified: at a real 63 mm interpupillary distance it differs only by viewpoint, and with the separation set to zero on a playing demo with live smoke the two eyes stay identical - so the simulation does not advance between passes, which is the error that would be unbearable in a headset. [Look at the pair](https://claude.ai/artifact/3iESVvwPKZjiEDLX9eAC8x).
+Two things stand between this and something pleasant to use:
 
-The bridge is built: an OpenXR session on the game's own D3D11 device, swapchains matching the back buffer, head poses driving the per-pass camera, and each eye submitted with a `CopyResource`. Two viewing modes work - sit in a player and see what they see, or ride along and look where you like.
+**Frame rate.** 38-48 frames/s where the headset wants 72, so SteamVR is reprojecting to fill the gap. The game's graphics settings have never been touched and are the obvious first lever.
 
-Next: the frame budget. Four scene traversals per stereo frame against 13.9 ms at 72 Hz, entirely unmeasured, and the pass loop still starts one pass more than it uses. That is now the project's only remaining risk.
+**Everything two-dimensional.** The demo's timeline, menu and player name tags all assume one camera and a screen, so in stereo they are doubled, misplaced, and unreachable. The answer is an OpenXR quad layer fed from HLAE's own before-UI hook - see [`docs/06-vr-experience-plan.md`](docs/06-vr-experience-plan.md).
 
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
@@ -33,8 +33,13 @@ Next: the frame budget. Four scene traversals per stereo frame against 13.9 ms a
 
 - [`docs/workflow.md`](docs/workflow.md) - how experiments are run here: division of labour, launch, capture, and the rules that earned their place.
 - [`docs/05-view-setup-point.md`](docs/05-view-setup-point.md) - the exact function where a per-pass camera must be applied, and why the config route failed.
-- [`docs/04-plan.md`](docs/04-plan.md) - the plan from here. Phases A, B and C are done and D has started; what remains of D is the OpenXR session and frame submission, then E (performance).
+- [`docs/experiments/09-frames-in-the-headset.md`](docs/experiments/09-frames-in-the-headset.md) - **frames reach the headset.** The session, the swapchains, and the two problems only a headset reveals: the world swimming when the head turns, and a followed player's aim dragging your head with it.
+- [`docs/experiments/10-frame-budget.md`](docs/experiments/10-frame-budget.md) - what it costs: 38-48 frames/s against the 72 the headset wants, and a wasted render pass removed.
+- [`docs/06-vr-experience-plan.md`](docs/06-vr-experience-plan.md) - the plan for making it usable: the menu, the timeline, the controls, and why they all need to leave the back buffer.
+- [`docs/04-plan.md`](docs/04-plan.md) - the original plan, phases A to E. All of it is done; 06 is what comes next.
 - [`docs/patches/README.md`](docs/patches/README.md) - the changes made to HLAE, kept so they survive a re-clone: the build fix, and the per-pass camera itself.
+
+- [`docs/install.md`](docs/install.md) - how to get from a clean machine to CS2 rendering into a headset: build the hook, lay out the files, launch, the controls, and the shutdown order that avoids an unkillable process.
 
 Run [`scripts/check-toolchain.ps1`](scripts/check-toolchain.ps1) to see what the machine is missing; [`scripts/install-toolchain.ps1`](scripts/install-toolchain.ps1) installs it.
 

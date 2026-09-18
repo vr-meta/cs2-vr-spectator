@@ -1,0 +1,111 @@
+name: Build hook
+
+# Builds AfxHookSource2 with this project's patches applied, so a broken patch is caught
+# here rather than on the one machine that has the toolchain.
+#
+# Nothing Valve owns is fetched or published: the job builds HLAE's hook from advancedfx
+# (MIT) and uploads only that DLL.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/patches/**'
+      - '.github/workflows/build-hook.yml'
+  pull_request:
+    paths:
+      - 'docs/patches/**'
+      - '.github/workflows/build-hook.yml'
+  workflow_dispatch:
+
+env:
+  # The upstream revision the patches are written against. Bump deliberately: the patch
+  # carries hard-coded field offsets for a specific CS2 build and will not survive a
+  # careless update.
+  ADVANCEDFX_REF: v2.192.2
+  OPENXR_VERSION: 1.1.63
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          path: cs2-vr-spectator
+
+      - name: Check out advancedfx
+        uses: actions/checkout@v4
+        with:
+          repository: advancedfx/advancedfx
+          ref: ${{ env.ADVANCEDFX_REF }}
+          path: advancedfx
+          submodules: recursive
+
+      - name: Apply patches
+        working-directory: advancedfx
+        shell: pwsh
+        run: |
+          # The tree is CRLF; git apply preserves it, unlike anything sed-shaped.
+          git apply --verbose ../cs2-vr-spectator/docs/patches/001-vswhere-products.patch
+          git apply --verbose ../cs2-vr-spectator/docs/patches/002-per-pass-camera.patch
+
+      - name: Fetch the OpenXR headers
+        shell: pwsh
+        run: |
+          # Only the headers are needed: the loader is opened by path at runtime, never
+          # linked, so the hook still loads in a process that knows nothing about OpenXR.
+          New-Item -ItemType Directory -Force openxr | Out-Null
+          $url = "https://github.com/KhronosGroup/OpenXR-SDK/releases/download/release-$env:OPENXR_VERSION/OpenXR.Loader.$env:OPENXR_VERSION.nupkg"
+          Invoke-WebRequest $url -OutFile openxr/openxr.zip
+          Expand-Archive openxr/openxr.zip -DestinationPath openxr/pkg
+          if (-not (Test-Path openxr/pkg/include/openxr/openxr.h)) { throw "OpenXR headers not where expected" }
+
+      - name: Install the .NET Framework 4.6.2 targeting pack
+        shell: pwsh
+        run: |
+          # AfxHookSource2 depends on ShaderBuilder, which is a C# project. Without this
+          # the build fails with MSB3644, which does not say what is actually missing.
+          choco install netfx-4.6.2-devpack -y --no-progress
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          # AfxHookSource2 binds to Rust components through Corrosion.
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-pc-windows-msvc
+          rustc --version
+
+      - name: Configure
+        working-directory: advancedfx
+        shell: pwsh
+        run: |
+          cmake --preset x64-release -DAFXVR_OPENXR_DIR="${{ github.workspace }}/openxr/pkg"
+
+      - name: Build
+        working-directory: advancedfx
+        shell: pwsh
+        run: |
+          # ShaderBuilder is invoked by bare name from the hook's CMakeLists, so its output
+          # directory has to be on PATH first. Exit code 9009 here means "not found", not a
+          # shader problem.
+          cmake --build --preset x64-release --target shaderbuilder
+          $env:Path = "${{ github.workspace }}/advancedfx/build/x64-release/ShaderBuilder;$env:Path"
+          cmake --build --preset x64-release --target AfxHookSource2
+
+      - name: Check the DLL exists
+        shell: pwsh
+        run: |
+          $dll = "advancedfx/build/x64-release/AfxHookSource2/Release/AfxHookSource2.dll"
+          if (-not (Test-Path $dll)) { throw "AfxHookSource2.dll was not produced" }
+          "{0:N2} MB" -f ((Get-Item $dll).Length / 1MB)
+
+      - name: Upload the hook
+        uses: actions/upload-artifact@v4
+        with:
+          name: AfxHookSource2
+          path: |
+            advancedfx/build/x64-release/AfxHookSource2/Release/AfxHookSource2.dll
+            advancedfx/build/x64-release/AfxHookSource2/Release/AfxHookSource2.pdb
+          if-no-files-found: error
