@@ -27,10 +27,10 @@ index 1d66528..c36ef7a 100644
      ReplaceName.h
 diff --git a/AfxHookSource2/MirvVr.cpp b/AfxHookSource2/MirvVr.cpp
 new file mode 100644
-index 0000000..b65483c
+index 0000000..c3310f0
 --- /dev/null
 +++ b/AfxHookSource2/MirvVr.cpp
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,305 @@
 +#include "stdafx.h"
 +
 +#include "MirvVr.h"
@@ -164,8 +164,10 @@ index 0000000..b65483c
 +        angles[2] = eye.dRoll;
 +        g_LastHeadYaw = eye.dYaw;
 +    } else {
++        // The yaw offset applies here too, or turning with the stick would silently do
++        // nothing whenever the demo camera owns the orientation.
 +        angles[0] = g_BaseAngles[0] + eye.dPitch;
-+        angles[1] = g_BaseAngles[1] + eye.dYaw;
++        angles[1] = g_BaseAngles[1] + eye.dYaw + g_YawOffset;
 +        angles[2] = g_BaseAngles[2] + eye.dRoll;
 +        g_LastHeadYaw = eye.dYaw;
 +    }
@@ -241,6 +243,7 @@ index 0000000..b65483c
 +
 +void AfxVr_ResetMove() {
 +    g_MoveOffset[0] = g_MoveOffset[1] = g_MoveOffset[2] = 0.0f;
++    if (!g_FreeLook) g_YawOffset = 0.0f; // back to exactly what the demo camera sees
 +}
 +
 +CON_COMMAND(mirv_vr_freelook, "cs2-vr-spectator: follow a player's position but keep the head free.")
@@ -407,10 +410,10 @@ index 0000000..b5bbc6a
 +void AfxVr_ResetMove();
 diff --git a/AfxHookSource2/MirvVrXr.cpp b/AfxHookSource2/MirvVrXr.cpp
 new file mode 100644
-index 0000000..10c411d
+index 0000000..3e242d3
 --- /dev/null
 +++ b/AfxHookSource2/MirvVrXr.cpp
-@@ -0,0 +1,806 @@
+@@ -0,0 +1,880 @@
 +#include "stdafx.h"
 +
 +#include "MirvVrXr.h"
@@ -477,6 +480,13 @@ index 0000000..10c411d
 +int g_EyesCopied = 0;
 +bool g_ReportedFirstSubmit = false;
 +
++// Submitted frames per second, measured where it matters - at xrEndFrame, not at the
++// game's own frame counter, which also counts frames the headset never sees.
++ULONGLONG g_FpsWindowStart = 0;
++int g_FpsFrames = 0;
++float g_SubmitFps = 0.0f;
++bool g_LogFps = false;
++
 +// --- controller input -------------------------------------------------------------
 +XrActionSet g_ActionSet = XR_NULL_HANDLE;
 +XrAction g_MoveAction = XR_NULL_HANDLE;    // left stick:  strafe / forward
@@ -485,14 +495,24 @@ index 0000000..10c411d
 +XrAction g_FreeLookAction = XR_NULL_HANDLE;
 +XrAction g_ResetAction = XR_NULL_HANDLE;
 +XrAction g_PauseAction = XR_NULL_HANDLE;
++XrAction g_NextAction = XR_NULL_HANDLE;   // right trigger: next player
++XrAction g_PrevAction = XR_NULL_HANDLE;   // left trigger: previous player
++XrAction g_ModeAction = XR_NULL_HANDLE;   // right grip: cycle first/third person
 +bool g_ActionsAttached = false;
 +
 +bool g_PrevRecenter = false, g_PrevFreeLook = false, g_PrevReset = false, g_PrevPause = false;
++bool g_PrevNext = false, g_PrevPrev = false, g_PrevMode = false;
 +ULONGLONG g_LastInputTick = 0;
 +
-+// Set on the render thread, executed on the engine thread - a console command must not
-+// be dispatched from here.
-+volatile long g_PendingTogglePause = 0;
++// Console commands raised by a controller button. They cannot be dispatched from the
++// render thread where the input is read, so the engine thread drains this.
++std::mutex g_CmdMutex;
++std::vector<std::string> g_PendingCommands;
++
++void QueueCommand(const char * cmd) {
++    std::lock_guard<std::mutex> lock(g_CmdMutex);
++    if (g_PendingCommands.size() < 8) g_PendingCommands.push_back(cmd);
++}
 +
 +// Units per second, and degrees per second. A comfortable walking pace in a headset is
 +// far slower than a mouse-driven spectator would ever use.
@@ -752,9 +772,13 @@ index 0000000..10c411d
 +    g_FreeLookAction = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "freelook", "Toggle free look");
 +    g_ResetAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "reset", "Return to the demo camera");
 +    g_PauseAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "pause", "Pause the demo");
++    g_NextAction     = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "nextplayer", "Next player");
++    g_PrevAction     = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "prevplayer", "Previous player");
++    g_ModeAction     = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "specmode", "First or third person");
 +
 +    if (!g_MoveAction || !g_TurnAction || !g_RecenterAction || !g_FreeLookAction
-+        || !g_ResetAction || !g_PauseAction) return false;
++        || !g_ResetAction || !g_PauseAction || !g_NextAction || !g_PrevAction
++        || !g_ModeAction) return false;
 +
 +    // Quest 3 controllers. Sticks for movement, the four face buttons for the things
 +    // worth reaching for without taking the headset off.
@@ -765,6 +789,10 @@ index 0000000..10c411d
 +        { g_ResetAction,    Path("/user/hand/left/input/y/click") },
 +        { g_PauseAction,    Path("/user/hand/right/input/a/click") },
 +        { g_RecenterAction, Path("/user/hand/right/input/b/click") },
++        // Boolean actions bound to analogue inputs; the runtime picks the threshold.
++        { g_NextAction,     Path("/user/hand/right/input/trigger/value") },
++        { g_PrevAction,     Path("/user/hand/left/input/trigger/value") },
++        { g_ModeAction,     Path("/user/hand/right/input/squeeze/value") },
 +    };
 +
 +    XrInteractionProfileSuggestedBinding suggested = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
@@ -787,7 +815,12 @@ index 0000000..10c411d
 +    if (!Check(xrAttachSessionActionSets_(g_Session, &attach), "xrAttachSessionActionSets")) return false;
 +
 +    g_ActionsAttached = true;
-+    advancedfx::Message("AFXVR: controllers bound - sticks move and turn, X free look, Y recentre camera, A pause, B recenter view.\n");
++    advancedfx::Message(
++        "AFXVR: controllers bound.\n"
++        "  left stick   walk, right stick  turn and rise\n"
++        "  triggers     previous / next player\n"
++        "  right grip   first or third person\n"
++        "  X free look  Y back to the player  A pause  B recenter\n");
 +    return true;
 +}
 +
@@ -850,8 +883,22 @@ index 0000000..10c411d
 +    g_PrevReset = b;
 +
 +    b = GetPressed(g_PauseAction);
-+    if (b && !g_PrevPause) InterlockedExchange(&g_PendingTogglePause, 1);
++    if (b && !g_PrevPause) QueueCommand("demo_togglepause");
 +    g_PrevPause = b;
++
++    // Switching players puts the viewer back on that player rather than wherever the
++    // sticks had wandered to - otherwise you follow someone from across the map.
++    b = GetPressed(g_NextAction);
++    if (b && !g_PrevNext) { QueueCommand("spec_next"); AfxVr_ResetMove(); }
++    g_PrevNext = b;
++
++    b = GetPressed(g_PrevAction);
++    if (b && !g_PrevPrev) { QueueCommand("spec_prev"); AfxVr_ResetMove(); }
++    g_PrevPrev = b;
++
++    b = GetPressed(g_ModeAction);
++    if (b && !g_PrevMode) QueueCommand("spec_mode");
++    g_PrevMode = b;
 +}
 +
 +void PollEvents() {
@@ -1041,8 +1088,15 @@ index 0000000..10c411d
 +
 +    // A console command has to be dispatched from the engine thread, so the controller
 +    // handler only raises a flag.
-+    if (InterlockedExchange(&g_PendingTogglePause, 0) && g_pEngineToClient) {
-+        g_pEngineToClient->ExecuteClientCmd(0, "demo_togglepause", true);
++    {
++        std::vector<std::string> commands;
++        {
++            std::lock_guard<std::mutex> lock(g_CmdMutex);
++            commands.swap(g_PendingCommands);
++        }
++        for (size_t i = 0; i < commands.size(); i++) {
++            if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, commands[i].c_str(), true);
++        }
 +    }
 +
 +    XrView views[2];
@@ -1188,6 +1242,20 @@ index 0000000..10c411d
 +        Check(xrEndFrame_(g_Session, &endInfo), "xrEndFrame");
 +        g_FrameBegun = false;
 +
++        ULONGLONG now = GetTickCount64();
++        if (0 == g_FpsWindowStart) g_FpsWindowStart = now;
++        g_FpsFrames++;
++        if (now - g_FpsWindowStart >= 2000) {
++            g_SubmitFps = 1000.0f * g_FpsFrames / (float)(now - g_FpsWindowStart);
++            g_FpsWindowStart = now;
++            g_FpsFrames = 0;
++            if (g_LogFps) {
++                advancedfx::Message("AFXVR: %.1f frames/s submitted at %ux%u per eye (%.2f ms)\n",
++                    g_SubmitFps, g_SwapchainWidth, g_SwapchainHeight,
++                    g_SubmitFps > 0.0f ? 1000.0f / g_SubmitFps : 0.0f);
++            }
++        }
++
 +        if (!g_ReportedFirstSubmit && 2 == g_EyesCopied) {
 +            g_ReportedFirstSubmit = true;
 +            advancedfx::Message("AFXVR: submitting frames to the headset.\n");
@@ -1203,6 +1271,12 @@ index 0000000..10c411d
 +        if (!_stricmp(arg1, "start"))   { MirvVrXr_SessionStart(); return; }
 +        if (!_stricmp(arg1, "stop"))    { MirvVrXr_SessionStop(); AfxVr_SetEye(1,false,0,0,0,0,0,0,0); AfxVr_SetEye(2,false,0,0,0,0,0,0,0); advancedfx::Message("AFXVR: session stopped.\n"); return; }
 +        if (!_stricmp(arg1, "quit"))    { MirvVrXr_Stop(); advancedfx::Message("AFXVR: disconnected.\n"); return; }
++        if (!_stricmp(arg1, "fps")) {
++            g_LogFps = (3 <= args->ArgC()) ? (0 != atoi(args->ArgV(2))) : !g_LogFps;
++            advancedfx::Message("AFXVR: frame logging %s. Last measured: %.1f frames/s at %ux%u per eye.\n",
++                g_LogFps ? "on" : "off", g_SubmitFps, g_SwapchainWidth, g_SwapchainHeight);
++            return;
++        }
 +    }
 +
 +    advancedfx::Message(
@@ -1210,12 +1284,15 @@ index 0000000..10c411d
 +        "mirv_vr_xr start - create the session and start sending frames to the headset.\n"
 +        "mirv_vr_xr stop  - stop sending frames, keep the connection.\n"
 +        "mirv_vr_xr quit  - disconnect entirely.\n"
++        "mirv_vr_xr fps [0|1] - log submitted frames per second.\n"
 +        "\n"
-+        "Instance: %s, session: %s, state %i, submitting: %s\n",
++        "Instance: %s, session: %s, state %i, submitting: %s\n"
++        "Last measured: %.1f frames/s at %ux%u per eye.\n",
 +        MirvVrXr_IsRunning() ? "up" : "down",
 +        (XR_NULL_HANDLE != g_Session) ? "created" : "none",
 +        (int)g_State,
-+        MirvVrXr_WantsPasses() ? "yes" : "no");
++        MirvVrXr_WantsPasses() ? "yes" : "no",
++        g_SubmitFps, g_SwapchainWidth, g_SwapchainHeight);
 +}
 diff --git a/AfxHookSource2/MirvVrXr.h b/AfxHookSource2/MirvVrXr.h
 new file mode 100644
@@ -1302,7 +1379,7 @@ index cea3626..ad2a751 100644
          }
      }
 diff --git a/AfxHookSource2/RenderSystemDX11Hooks.cpp b/AfxHookSource2/RenderSystemDX11Hooks.cpp
-index 73b7c00..7a4ede8 100644
+index 73b7c00..d3ea691 100644
 --- a/AfxHookSource2/RenderSystemDX11Hooks.cpp
 +++ b/AfxHookSource2/RenderSystemDX11Hooks.cpp
 @@ -8,6 +8,8 @@
@@ -1340,7 +1417,7 @@ index 73b7c00..7a4ede8 100644
          if (m_Recording) {
              if (m_AutoForceFullReSmoke) {
                  if (!m_Restore_smoke_volume_lod_ratio_change) {
-@@ -3012,10 +3026,29 @@ public:
+@@ -3012,10 +3026,36 @@ public:
      }
  
      bool EngineThread_HasNextRenderPass() {
@@ -1359,8 +1436,15 @@ index 73b7c00..7a4ede8 100644
 +        // cs2-vr-spectator: passes 1 and 2 are the eyes. Their finished back buffer
 +        // arrives at BeforePresent, on the render thread, which is where it is copied
 +        // into the OpenXR swapchain.
++        //
++        // The count is advanced HERE rather than in EndNextRenderPass, which is what the
++        // recording path does. Advancing at the end means HasNextRenderPass is still true
++        // when the last eye has been begun but not yet ended, so the loop starts one more
++        // pass that renders the whole scene and throws it away - a quarter of the frame's
++        // work. The final pass is still ended properly, by the scene system hook.
 +        if (m_VrPassesDone < m_VrPassesWanted) {
 +            int eyeIndex = m_VrPassesDone;
++            m_VrPassesDone++;
 +            auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
 +            pRenderPassCommands.BeforePresent.Push(
 +                [eyeIndex](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
@@ -1371,16 +1455,7 @@ index 73b7c00..7a4ede8 100644
          auto it = m_RecordingExtraPassesIterator;
          while(it != m_RecordingExtraPasses.end()) {
              it->EngineThread_BeginFrame();
-@@ -3028,6 +3061,8 @@ public:
-     }
- 
-     void EngineThread_EndNextRenderPass() {
-+        if (m_VrPassesDone < m_VrPassesWanted) m_VrPassesDone++;
-+
-         while(m_RecordingExtraPassesIterator != m_RecordingExtraPasses.end()) {
-             m_RecordingExtraPassesIterator->EngineThread_EndFrame();
- 
-@@ -3041,6 +3076,13 @@ public:
+@@ -3041,6 +3081,13 @@ public:
      }    
  
      void EngineThread_BeginMainRenderPass() {
@@ -1394,7 +1469,7 @@ index 73b7c00..7a4ede8 100644
          for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
              it->EngineThread_BeginFrame();
          }
-@@ -3563,6 +3605,10 @@ private:
+@@ -3563,6 +3610,10 @@ private:
      std::multiset<CStream,RenderPassCompare> m_RecordingExtraPasses;
      std::multiset<CStream,RenderPassCompare>::iterator m_RecordingExtraPassesIterator;
  
