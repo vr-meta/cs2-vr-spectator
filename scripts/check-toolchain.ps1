@@ -11,14 +11,33 @@ if (Test-Path $vswhere) {
     Write-Host '  MSVC x64      : MISSING (no vswhere)' -ForegroundColor Red
 }
 
+# A freshly installed tool is on the User PATH but absent from an already-running
+# shell, so fall back to searching the registry PATH before reporting it missing.
+$userPath = ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') | Where-Object { $_ }
+
 foreach ($tool in 'cmake', 'ninja', 'git', 'gh') {
     $cmd = Get-Command $tool -ErrorAction SilentlyContinue
-    if ($cmd) { Write-Host ("  {0,-14}: {1}" -f $tool, $cmd.Source) }
-    else      { Write-Host ("  {0,-14}: MISSING" -f $tool) -ForegroundColor Red }
+    if ($cmd) {
+        Write-Host ("  {0,-14}: {1}" -f $tool, $cmd.Source)
+        continue
+    }
+
+    $found = $null
+    foreach ($dir in $userPath) {
+        $candidate = Join-Path $dir "$tool.exe"
+        if (Test-Path $candidate) { $found = $candidate; break }
+    }
+
+    if ($found) {
+        Write-Host ("  {0,-14}: {1}" -f $tool, $found)
+        Write-Host ("  {0,-14}  (on the User PATH but not in this shell - open a new one)" -f '') -ForegroundColor Yellow
+    } else {
+        Write-Host ("  {0,-14}: MISSING" -f $tool) -ForegroundColor Red
+    }
 }
 
 if ($env:VULKAN_SDK) { Write-Host "  Vulkan SDK    : $env:VULKAN_SDK" }
-else                 { Write-Host '  Vulkan SDK    : not set (optional for CS2, which is D3D11)' -ForegroundColor Yellow }
+else                 { Write-Host '  Vulkan SDK    : not set (only needed if the Vulkan backend is pursued)' -ForegroundColor Yellow }
 
 Write-Host ''
 Write-Host '=== VR runtimes ===' -ForegroundColor Cyan

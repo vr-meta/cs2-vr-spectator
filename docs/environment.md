@@ -40,10 +40,25 @@ measuring once a baseline exists. Registry key: `HKLM\SOFTWARE\Khronos\OpenXR\1`
 | Item | Value |
 | --- | --- |
 | CS2 | app 730, `D:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive` |
-| Install state | downloading as of 2026-09-18 (StateFlags 1026, ~60 GB total) |
-| Build id | TBD — record from `version` in-game once installed |
+| Install state | installed 2026-09-18 (StateFlags 4), 67 GB on disk |
+| ClientVersion | 2000908 |
+| PatchVersion | 1.41.8.1 |
+| SourceRevision | 10981323 |
+| Version date | Sep 09 2026, 15:23:58 |
 
-Free space on `D:` was 77 GB against a 59.8 GB download. Tight but sufficient.
+From `game/csgo/steam.inf`. Every result recorded against this build must cite it —
+Source 2 plugins and offset-based hooks break on patches.
+
+Render backends present in `game/bin/win64/`:
+
+```
+rendersystemdx11.dll     4.5 MB
+rendersystemvulkan.dll   6.1 MB
+rendersystemempty.dll    1.7 MB
+```
+
+A Vulkan backend does ship, contrary to what note 01 first assumed from the community
+module dump. Whether it can actually be selected is untested.
 
 **Not yet obtained:** `.dem` files. Milestone 2 cannot be validated without at least
 one local demo on a known map.

@@ -25,9 +25,11 @@ views and the head tracking come from.
 
 CS2 removes that lever:
 
-- Source 2, x64, and the only render backend module present is `rendersystemdx11`.
-  There is no Vulkan backend to translate into, so the DXVK approach has nothing to
-  attach to.
+- Source 2 and x64, against Source 1 and x86. The reference mod is built around a 32-bit
+  D3D9 interface that does not exist here.
+- CS2 ships **three** render backends: `rendersystemdx11.dll`, `rendersystemvulkan.dll`
+  and `rendersystemempty.dll`. Note that DXVK translates D3D9 *into* Vulkan — CS2 having
+  its own native Vulkan backend does not give the wrapper anything to stand in front of.
 - More fundamentally, **no graphics-API wrapper can produce correct stereo**. A wrapper
   can offset a view matrix, but it cannot make the engine traverse the scene a second
   time. Culling, shadow cascades, particle simulation and temporal history are all
@@ -108,8 +110,31 @@ The manifests also leak Valve's own source paths, e.g. `src/engine2/renderingwor
 and `src/worldrenderer/grasstilesceneobject.cpp`, which is useful for orienting inside
 disassembly later.
 
-Note the absence of any Vulkan render module. D3D11 is the backend, and that decision is
-made for us.
+**Correction, 2026-09-18.** An earlier version of this note claimed CS2 had no Vulkan
+backend, inferred from the module metadata list in the GameTracking dump, which contains
+only `rendersystemdx11.kv3`. The actual installation disproves it:
+
+```
+rendersystemdx11.dll     4.5 MB
+rendersystemvulkan.dll   6.1 MB
+rendersystemempty.dll    1.7 MB
+```
+
+So the graphics backend is **not** decided for us, and this reopens a question worth
+weighing before committing:
+
+- **D3D11.** What HLAE hooks — `RenderSystemDX11Hooks.cpp` is D3D11-specific, so the
+  multi-pass machinery in note 02 is only available here. Requires D3D11-to-XR interop.
+- **Vulkan.** Would allow OpenXR to be driven with Vulkan directly, no interop, and is
+  the same API family the portal2vr reference submits through. But none of the HLAE
+  interception applies, so the second view pass would have to be built from nothing.
+
+Unverified: whether the Vulkan backend is actually reachable in CS2 (a launch option,
+a convar, or dead weight shipped from the shared Source 2 tree), and whether it is
+stable enough to be worth the loss of HLAE.
+
+Given that the multi-pass path is the strongest asset found so far, D3D11 remains the
+working assumption — but as a choice made for a reason, not an absence of options.
 
 ## HLAE as integration substrate
 
