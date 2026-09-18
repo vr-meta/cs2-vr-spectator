@@ -1,51 +1,74 @@
-# Launches CS2 for experiment work.
+# Launches CS2 through HLAE so AfxHookSource2 is injected.
 #
-# -insecure is mandatory: the cvar-unhide plugin will not load without it, and it
-# keeps this build away from VAC-protected servers. Do not remove it.
+# HLAE is what makes the experiment possible: mirv_cvar_unhide_all exposes the
+# developmentonly convars under test, and the multi-pass render machinery lives here
+# too. It injects into the running game and touches no game files, so Steam has
+# nothing to revert - unlike the gameinfo.gi edit that cvar-unhide-s2 needed, which
+# Steam deleted and which crashed the game (see docs/experiments/00).
 #
-# This launches the game directly rather than through Steam so the arguments are
-# explicit and repeatable. Steam must already be running.
+# -insecure is mandatory: it is this project's operating boundary. HLAE is technically
+# a hack and joining VAC-protected servers with it risks a ban. Local demos only.
+#
+# Steam must be running.
 
 param(
     [switch]$Vulkan,          # try the Vulkan backend instead of D3D11
-    [string]$Demo             # optional .dem to play on startup
+    [string]$Demo,            # optional .dem to play on startup
+    [switch]$Fullscreen
 )
 
 $ErrorActionPreference = 'Stop'
 
-$cs2 = 'D:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe'
-if (-not (Test-Path $cs2)) { throw "cs2.exe not found at $cs2" }
+$cs2  = 'D:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe'
+$hlae = 'D:\Dev\cs2-vr-tools\hlae\HLAE.exe'
+$hook = 'D:\Dev\cs2-vr-tools\hlae\x64\AfxHookSource2.dll'
+
+foreach ($p in @($cs2, $hlae, $hook)) {
+    if (-not (Test-Path $p)) { throw "Not found: $p" }
+}
 
 if (-not (Get-Process steam -ErrorAction SilentlyContinue)) {
     throw 'Steam is not running. Start it first.'
 }
 
-$argsList = @(
-    '-insecure'                     # required by the plugin; keeps us off VAC servers
-    '-novid'                        # skip the intro
+# Game arguments, passed through HLAE via -cmdLine.
+$gameArgs = @(
+    '-insecure'
+    '-novid'
     '-allow_third_party_software'
-    '-windowed'                     # keep the desktop usable while probing
-    '-w', '1280', '-h', '720'
-    '+con_enable', '1'              # developer console
-    '+sv_cheats', '1'
+    '+con_enable', '1'
 )
 
-if ($Vulkan) { $argsList += '-vulkan' }
-
+if (-not $Fullscreen) { $gameArgs += @('-windowed', '-w', '1280', '-h', '720') }
+if ($Vulkan)          { $gameArgs += '-vulkan' }
 if ($Demo) {
     if (-not (Test-Path $Demo)) { throw "Demo not found: $Demo" }
-    $argsList += '+playdemo'
-    $argsList += $Demo
+    $gameArgs += @('+playdemo', $Demo)
 }
 
-Write-Host 'Launching CS2 with:' -ForegroundColor Cyan
-Write-Host "  $($argsList -join ' ')"
-Write-Host ''
-Write-Host 'Once in game, open the console (~) and run:' -ForegroundColor Green
-Write-Host '  exec exp00_dump      -> captures version + full cvarlist to game/csgo/exp00_cvarlist.log'
-Write-Host '  exec exp00_probe     -> checks the four convars, binds the F5-F9 sweep'
-Write-Host ''
-Write-Host 'First thing to verify: the log must contain developmentonly convars.' -ForegroundColor Yellow
-Write-Host 'If it does not, the plugin did not load and every convar result is meaningless.'
+$gameCmdLine = $gameArgs -join ' '
 
-Start-Process -FilePath $cs2 -ArgumentList $argsList
+$hlaeArgs = @(
+    '-customLoader'
+    '-noGui'
+    '-autoStart'
+    '-programPath', "`"$cs2`""
+    '-hookDllPath', "`"$hook`""
+    '-cmdLine',     "`"$gameCmdLine`""
+)
+
+Write-Host 'Launching CS2 through HLAE' -ForegroundColor Cyan
+Write-Host "  game args: $gameCmdLine"
+Write-Host ''
+Write-Host 'In the console, FIRST of all:' -ForegroundColor Green
+Write-Host '  mirv_cvar_unhide_all'
+Write-Host '  mirv_cvar_unlock_sv_cheats'
+Write-Host ''
+Write-Host 'If mirv_cvar_unhide_all is not recognised, HLAE did not attach and every' -ForegroundColor Yellow
+Write-Host 'convar result afterwards is meaningless. Stop and fix that first.'
+Write-Host ''
+Write-Host 'Then:'
+Write-Host '  exec exp00_dump      -> version + full cvarlist to game/csgo/exp00_cvarlist.log'
+Write-Host '  exec exp00_probe     -> checks the four convars, binds the F5-F9 sweep'
+
+Start-Process -FilePath $hlae -ArgumentList $hlaeArgs
