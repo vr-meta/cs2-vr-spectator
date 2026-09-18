@@ -1,0 +1,237 @@
+﻿diff --git a/AfxHookSource2/RenderServiceHooks.cpp b/AfxHookSource2/RenderServiceHooks.cpp
+index cea3626..d5c4c32 100644
+--- a/AfxHookSource2/RenderServiceHooks.cpp
++++ b/AfxHookSource2/RenderServiceHooks.cpp
+@@ -5,6 +5,7 @@
+ #include "RenderSystemDX11Hooks.h"
+ 
+ #include "../shared/AfxDetours.h"
++#include "../shared/AfxConsole.h"
+ 
+ #include "addresses.h"
+ 
+@@ -12,6 +13,11 @@
+ 
+ extern void * g_pSceneSystem;
+ 
++// cs2-vr-spectator: probe, see RenderSystemDX11Hooks.cpp.
++extern int g_AfxVrFrameIndex;
++extern int g_AfxVrPassIndex;
++extern int g_AfxVrLogUntilFrame;
++
+ extern void ErrorBox(char const * messageText);
+ extern void ErrorBox();
+ 
+@@ -57,7 +63,9 @@ void __fastcall My_Engine2_RenderService_OnClientOutput(void * pUnk0, void * pUn
+ 
+     RenderSystemDX11_EngineThread_BeforeRender();
+ 
++    if(g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) advancedfx::Message("AFXVR: frame=%i pass=%i OnClientOutput enter\n", g_AfxVrFrameIndex, g_AfxVrPassIndex);
+     g_Engine2_RenderService_OnClientOutput(pUnk0,pUnk1);
++    if(g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) advancedfx::Message("AFXVR: frame=%i pass=%i OnClientOutput leave\n", g_AfxVrFrameIndex, g_AfxVrPassIndex);
+ 
+     if(RenderSystemDX11_EngineThread_HasNextRenderPass()) {
+ 
+@@ -96,7 +104,9 @@ void __fastcall My_Engine2_RenderService_OnClientOutput(void * pUnk0, void * pUn
+             if(bHooksAvailable) {
+                 RenderSystemDX11_EngineThread_BeforeRender();
+ 
++                if(g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) advancedfx::Message("AFXVR: frame=%i pass=%i OnClientOutput enter\n", g_AfxVrFrameIndex, g_AfxVrPassIndex);
+                 g_Engine2_RenderService_OnClientOutput(pUnk0,pUnk1);
++                if(g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) advancedfx::Message("AFXVR: frame=%i pass=%i OnClientOutput leave\n", g_AfxVrFrameIndex, g_AfxVrPassIndex);
+             }
+         }
+     }
+diff --git a/AfxHookSource2/RenderSystemDX11Hooks.cpp b/AfxHookSource2/RenderSystemDX11Hooks.cpp
+index 73b7c00..d74c320 100644
+--- a/AfxHookSource2/RenderSystemDX11Hooks.cpp
++++ b/AfxHookSource2/RenderSystemDX11Hooks.cpp
+@@ -60,6 +60,14 @@ extern void ExecuteClientCmd(const char * value);
+ 
+ int g_iRenderContextDebug = 0;
+ 
++// cs2-vr-spectator: per-pass camera probe.
++// g_AfxVrPassIndex is 0 for the main pass and 1..N for the extra (mirv_streams) passes.
++// Both are written on the engine thread only, from the render pass loop below.
++int g_AfxVrFrameIndex = 0;
++int g_AfxVrPassIndex = 0;
++extern int g_AfxVrLogUntilFrame; // armed by mirv_vr_log, defined in main.cpp
++extern void AfxVr_OnBeginRenderPass(int passIndex);
++
+ CRenderCommands g_RenderCommands;
+ 
+ bool g_bEnableReShade = true;
+@@ -3016,6 +3024,12 @@ public:
+     }
+ 
+     void EngineThread_BeginNextRenderPass() {
++        g_AfxVrPassIndex++; // cs2-vr-spectator
++        if(g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
++            advancedfx::Message("AFXVR: frame=%i BeginNextRenderPass -> pass=%i\n", g_AfxVrFrameIndex, g_AfxVrPassIndex);
++        }
++        AfxVr_OnBeginRenderPass(g_AfxVrPassIndex);
++
+         auto it = m_RecordingExtraPassesIterator;
+         while(it != m_RecordingExtraPasses.end()) {
+             it->EngineThread_BeginFrame();
+@@ -3041,6 +3055,13 @@ public:
+     }    
+ 
+     void EngineThread_BeginMainRenderPass() {
++        g_AfxVrFrameIndex++; // cs2-vr-spectator
++        g_AfxVrPassIndex = 0;
++        if(g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
++            advancedfx::Message("AFXVR: frame=%i BeginMainRenderPass\n", g_AfxVrFrameIndex);
++        }
++        AfxVr_OnBeginRenderPass(g_AfxVrPassIndex);
++
+         for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
+             it->EngineThread_BeginFrame();
+         }
+diff --git a/AfxHookSource2/main.cpp b/AfxHookSource2/main.cpp
+index efbea01..a9485b9 100644
+--- a/AfxHookSource2/main.cpp
++++ b/AfxHookSource2/main.cpp
+@@ -634,6 +634,92 @@ extern bool g_b_on_c_view_render_setup_view;
+ 
+ extern bool MirvFovOverride(float &fov);
+ 
++// cs2-vr-spectator ////////////////////////////////////////////////////////////
++//
++// Probe for phase B: is this trampoline called once per frame, or once per
++// render pass? g_AfxVrFrameIndex / g_AfxVrPassIndex are maintained by the pass
++// loop in RenderSystemDX11Hooks.cpp.
++
++extern int g_AfxVrFrameIndex;
++extern int g_AfxVrPassIndex;
++
++int g_AfxVrLogUntilFrame = 0; // log while g_AfxVrFrameIndex < this; also read by the pass loop
++static float g_AfxVrEyeSeparation = 0.0f; // units (1 unit = 1 inch); 0 disables
++
++// Last CViewSetup seen by the trampoline, and the camera it settled on. The pass loop
++// writes an eye offset back into it - see AfxVr_OnBeginRenderPass below. Whether that
++// has any effect is exactly what is being measured: if the object is a stack temporary
++// or is not re-read per pass, the image will not move.
++static void * g_AfxVrViewSetup = nullptr;
++static float g_AfxVrBaseOrigin[3] = {0.0f, 0.0f, 0.0f};
++static float g_AfxVrBaseAngles[3] = {0.0f, 0.0f, 0.0f};
++static bool g_AfxVrDirty = false; // an eye offset is currently sitting in the CViewSetup
++
++// Offset of a given pass along the view's right vector, in units.
++// Pass 0 (the main pass) is never offset: it is what the player sees.
++static float AfxVr_PassEyeOffset(int passIndex) {
++	if (0.0f == g_AfxVrEyeSeparation) return 0.0f;
++	switch (passIndex) {
++	case 1: return -0.5f * g_AfxVrEyeSeparation; // left eye
++	case 2: return +0.5f * g_AfxVrEyeSeparation; // right eye
++	default: return 0.0f;
++	}
++}
++
++// Source angles are (pitch, yaw, roll) in degrees; this is AngleVectors' right.
++static void AfxVr_RightVector(float pitch, float yaw, float roll, float outRight[3]) {
++	const double deg2rad = M_PI / 180.0;
++	double sp = sin(pitch * deg2rad), cp = cos(pitch * deg2rad);
++	double sy = sin(yaw * deg2rad), cy = cos(yaw * deg2rad);
++	double sr = sin(roll * deg2rad), cr = cos(roll * deg2rad);
++
++	outRight[0] = (float)(-sr * sp * cy + cr * sy);
++	outRight[1] = (float)(-sr * sp * sy - cr * cy);
++	outRight[2] = (float)(-sr * cp);
++}
++
++// Called from the render pass loop, once per extra pass, before that pass renders.
++void AfxVr_OnBeginRenderPass(int passIndex) {
++	if (nullptr == g_AfxVrViewSetup || 0.0f == g_AfxVrEyeSeparation) return;
++
++	// A zero offset still writes, so the main pass gets the base camera back rather
++	// than whatever the previous frame's last eye left behind.
++	float eyeOffset = AfxVr_PassEyeOffset(passIndex);
++
++	float right[3];
++	AfxVr_RightVector(g_AfxVrBaseAngles[0], g_AfxVrBaseAngles[1], g_AfxVrBaseAngles[2], right);
++
++	float * pViewOrigin = (float*)((unsigned char *)g_AfxVrViewSetup + 0x4a0);
++	pViewOrigin[0] = g_AfxVrBaseOrigin[0] + eyeOffset * right[0];
++	pViewOrigin[1] = g_AfxVrBaseOrigin[1] + eyeOffset * right[1];
++	pViewOrigin[2] = g_AfxVrBaseOrigin[2] + eyeOffset * right[2];
++	g_AfxVrDirty = 0.0f != eyeOffset;
++
++	if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
++		advancedfx::Message("AFXVR: frame=%i pass=%i wrote org=(%f,%f,%f) into %p\n",
++			g_AfxVrFrameIndex, passIndex,
++			pViewOrigin[0], pViewOrigin[1], pViewOrigin[2], g_AfxVrViewSetup);
++	}
++}
++
++CON_COMMAND(mirv_vr_log, "cs2-vr-spectator: log view setup calls for N frames.") {
++	int frames = 2 <= args->ArgC() ? atoi(args->ArgV(1)) : 1;
++	g_AfxVrLogUntilFrame = g_AfxVrFrameIndex + frames;
++	advancedfx::Message("mirv_vr_log: logging frames %i..%i\n", g_AfxVrFrameIndex, g_AfxVrLogUntilFrame - 1);
++}
++
++CON_COMMAND(mirv_vr_eyes, "cs2-vr-spectator: eye separation in units for extra render passes (0 = off).") {
++	if (2 <= args->ArgC()) {
++		g_AfxVrEyeSeparation = (float)atof(args->ArgV(1));
++	}
++	advancedfx::Message(
++		"mirv_vr_eyes <units> - pass 1 is shifted left, pass 2 right, by half this.\n"
++		"Current value: %f\n",
++		g_AfxVrEyeSeparation);
++}
++
++////////////////////////////////////////////////////////////////////////////////
++
+ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
+ 	if(!g_pEngineToClient) return false;
+ 
+@@ -649,6 +735,16 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
+ 	float *pViewOrigin = (float*)((unsigned char *)ThisCViewSetup + 0x4a0);
+ 	float *pViewAngles = (float*)((unsigned char *)ThisCViewSetup + 0x4b8);
+ 
++	// cs2-vr-spectator: this object is persistent and the render passes write eye
++	// offsets into it. Undo the last one before reading, or the offset is mistaken for
++	// the game's own camera and accumulates frame over frame.
++	if (g_AfxVrDirty && ThisCViewSetup == g_AfxVrViewSetup) {
++		pViewOrigin[0] = g_AfxVrBaseOrigin[0];
++		pViewOrigin[1] = g_AfxVrBaseOrigin[1];
++		pViewOrigin[2] = g_AfxVrBaseOrigin[2];
++		g_AfxVrDirty = false;
++	}
++
+ 	int width = *pWidth;
+ 	int height = *pHeight;
+ 	float Tx = pViewOrigin[0];
+@@ -745,6 +841,32 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
+ 		}		
+ 	}
+ 
++	// cs2-vr-spectator: per-pass eye offset, applied last so it composes on top
++	// of whatever camera the user set.
++	{
++		float eyeOffset = AfxVr_PassEyeOffset(g_AfxVrPassIndex);
++		if (0.0f != eyeOffset) {
++			float right[3];
++			AfxVr_RightVector(Rx, Ry, Rz, right);
++			Tx += eyeOffset * right[0];
++			Ty += eyeOffset * right[1];
++			Tz += eyeOffset * right[2];
++			originOrAnglesOverriden = true;
++		}
++
++		// Remember where the view lives and what it settled on, for the pass loop.
++		g_AfxVrViewSetup = ThisCViewSetup;
++		g_AfxVrBaseOrigin[0] = Tx; g_AfxVrBaseOrigin[1] = Ty; g_AfxVrBaseOrigin[2] = Tz;
++		g_AfxVrBaseAngles[0] = Rx; g_AfxVrBaseAngles[1] = Ry; g_AfxVrBaseAngles[2] = Rz;
++
++		if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
++			advancedfx::Message(
++				"AFXVR: frame=%i pass=%i SetupView this=%p t=%f org=(%f,%f,%f) ang=(%f,%f,%f) fov=%f eye=%f res=%ix%i\n",
++				g_AfxVrFrameIndex, g_AfxVrPassIndex, ThisCViewSetup, curTime,
++				Tx, Ty, Tz, Rx, Ry, Rz, Fov, eyeOffset, width, height);
++		}
++	}
++
+ 	if (g_S2CamIO.GetCamExport())
+ 	{
+ 		CamIO::CamData camData;

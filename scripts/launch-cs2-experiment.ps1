@@ -14,14 +14,23 @@
 param(
     [switch]$Vulkan,          # try the Vulkan backend instead of D3D11
     [string]$Demo,            # optional .dem to play on startup
-    [switch]$Fullscreen
+    [switch]$Fullscreen,
+    [switch]$SelfBuilt        # inject our own AfxHookSource2.dll instead of the release one
 )
 
 $ErrorActionPreference = 'Stop'
 
 $cs2  = 'D:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\cs2.exe'
-$hlae = 'D:\Dev\cs2-vr-tools\hlae\HLAE.exe'
-$hook = 'D:\Dev\cs2-vr-tools\hlae\x64\AfxHookSource2.dll'
+
+# The released HLAE is the reference build; hlae-selfbuilt is the same tree with our
+# own hook DLL dropped in. Swapping one file answers "is this my build or my change?".
+if ($SelfBuilt) {
+    $hlae = 'D:\Dev\cs2-vr-tools\hlae-selfbuilt\HLAE.exe'
+    $hook = 'D:\Dev\cs2-vr-tools\hlae-selfbuilt\x64\AfxHookSource2.dll'
+} else {
+    $hlae = 'D:\Dev\cs2-vr-tools\hlae\HLAE.exe'
+    $hook = 'D:\Dev\cs2-vr-tools\hlae\x64\AfxHookSource2.dll'
+}
 
 foreach ($p in @($cs2, $hlae, $hook)) {
     if (-not (Test-Path $p)) { throw "Not found: $p" }
@@ -64,6 +73,7 @@ $hlaeArgs = @(
 )
 
 Write-Host 'Launching CS2 through HLAE' -ForegroundColor Cyan
+Write-Host "  hook:      $hook"
 Write-Host "  game args: $gameCmdLine"
 Write-Host ''
 Write-Host 'In the console, FIRST of all:' -ForegroundColor Green

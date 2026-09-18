@@ -76,7 +76,21 @@ against the released binary rather than rebuild, which is worse but not fatal.
 
 ## Phase B — per-pass camera
 
-The one missing connection. Two candidate approaches, in order of preference:
+**DONE 2026-09-18.** See [`experiments/04-per-pass-camera.md`](experiments/04-per-pass-camera.md).
+
+The trampoline turned out to run **once per frame, outside the pass loop** — the
+expensive answer. But the object it receives, `CViewSetup`, is persistent and *is*
+re-read by every pass, so the eyes diverge when the pass loop rewrites it before each
+pass. Control take 0.00 % differing, test take 88.89 % with correct parallax.
+
+Two things the same trace turned up, both carried forward:
+
+- Two streams cost **four** scene traversals, not three: the pass loop always starts one
+  more pass than it needs. Worth removing before phase E measures anything.
+- The trampoline reads `CViewSetup` back as "the game camera", so a leftover offset
+  would accumulate. Fixed by restoring the base before reading.
+
+The original analysis, kept because it explains the shape of the solution:
 
 **UPDATED after experiment 03.** Option 1 below is void: concommands are already
 accepted in `beforeCommands`, and putting `mirv_input position` there changes nothing,
@@ -89,17 +103,12 @@ remains:
    `CS2_Client_CSetupView_Trampoline_IsPlayingDemo` in `AfxHookSource2/main.cpp:637`,
    where every HLAE camera override is applied. Now the only option.
 
-**First question of phase B, and it decides the cost:** does that trampoline run once per
-frame or once per render pass? Cheap to answer - add a log line, rebuild, record two
-streams, count the calls.
+~~**First question of phase B, and it decides the cost:** does that trampoline run once
+per frame or once per render pass?~~ Answered: once per frame. The fix was not to make it
+run per pass but to write the view it produced, per pass, from the pass loop.
 
 **Done when:** one paused frame produces two images that differ *only* by a camera
-translation, with correct parallax — near geometry shifting more than far.
-
-**Risk:** the render pass may run on a thread or at a point where changing the camera is
-not respected, because the view matrix for the frame is already resolved. If so, the
-change moves deeper — into where the pass sets up its view — and gets more expensive.
-This is the single most important unknown remaining.
+translation, with correct parallax — near geometry shifting more than far. **Met.**
 
 ## Phase C — stereo pair on disk
 

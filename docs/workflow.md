@@ -59,16 +59,27 @@ swallows the F-keys, which reads as "the binds do nothing".
 
 ```powershell
 scripts\grab-cs2-window.ps1 -Name <name> [-OutDir <dir>]   # PNG of the client area
+scripts\send-key.ps1 -Key F7                               # one key press
 scripts\sweep-offset.ps1                                   # F5..F8 sweep + captures
+scripts\compare-tga.ps1 -Take exp04_probe\take0001         # eyeL vs eyeR, per frame
+scripts\tga-to-png.ps1 -In <x.tga> -Out <x.png>            # to actually look at one
 ```
 
 Keys are sent with `SendInput` using the **scancode flag**; plain `SendKeys` does not
-reach the game. Stream recordings land as TGA under
-`game/bin/win64/<record name>/take####/<stream>/` — note that is next to `cs2.exe`, not
-in `csgo/`.
+reach the game. Binding the experiment's actions to F-keys in the cfg means the whole
+run can be driven from outside, with only `exec` left to the operator.
 
-TGA here is uncompressed 24-bit: header is 18 bytes, then BGR rows bottom-up. Comparing
-raw bytes is enough; no decoder needed.
+Stream recordings land as TGA under `game/bin/win64/<record name>/take####/<stream>/` —
+note that is next to `cs2.exe`, not in `csgo/`.
+
+TGA here is uncompressed 24-bit: 18-byte header, then BGR. Comparing raw bytes is enough
+for "are these the same image"; no decoder needed. To *look* at one, mind the row order:
+HLAE sets bit 5 of the descriptor at offset 17, so rows are **top-down**, not the
+bottom-up that TGA defaults to. Getting that backwards yields an upside-down image that
+is easy to mistake for a broken render.
+
+**Stop recordings.** `mirv_streams record start` writes about 300 MB per second at
+1280x720 with two streams. One forgotten `record end` produced 28.6 GB in 90 seconds.
 
 ## Demos
 

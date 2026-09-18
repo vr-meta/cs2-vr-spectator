@@ -6,9 +6,11 @@ Watch Counter-Strike 2 match replays from inside the map using a Meta Quest 3 co
 
 There is no working CS2 VR integration or installable build yet. Native stereo rendering inside the current CS2 engine is the main feasibility question to resolve.
 
-Milestone 1 is essentially done: integration points identified, environment pinned, and the first experiment run against the live game.
+Milestone 1 is done, and **stereo rendering inside CS2 now works**: one paused frame renders twice from two camera positions, with correct parallax. That was the main feasibility question. What remains between here and a headset is plumbing and performance, not an unknown.
 
-Where it stands: CS2 own stereo hooks are dead ends - the demo eye-offset convar has no effect, the multiview path is absent. But the two pieces stereo actually needs both work: HLAE renders one frame twice with independent settings per pass, and `mirv_input` moves the camera exactly and repeatably. What is missing is joining them - moving the camera *per pass* rather than per frame, which needs a contained change to HLAE rather than more configuration.
+How it stands: CS2's own stereo hooks are dead ends - the demo eye-offset convar has no effect, the multiview path is absent. Stereo instead comes from HLAE's multi-pass rendering, which re-renders one frame several times, plus a change of ours that gives each pass its own camera. The camera turned out to be resolved once per frame, outside the pass loop - but the object holding it is persistent and re-read by every pass, so rewriting it between passes separates the eyes.
+
+Next: prove the pair is correct on the content most likely to break it (smoke, particles, shadows), then the OpenXR bridge, then the frame budget - three scene traversals against 13.9 ms at 72 Hz, which is the remaining risk.
 
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
@@ -19,10 +21,12 @@ Where it stands: CS2 own stereo hooks are dead ends - the demo eye-offset convar
 - [`docs/experiments/01-camera-control.md`](docs/experiments/01-camera-control.md) - `mirv_input` moves the camera exactly and repeatably, replacing the dead convar.
 - [`docs/experiments/02-multipass.md`](docs/experiments/02-multipass.md) - confirmed: HLAE renders one frame twice with independent settings per pass. The expensive half of stereo already exists.
 - [`docs/experiments/03-per-pass-camera.md`](docs/experiments/03-per-pass-camera.md) - the camera cannot be changed per pass from config: the view is resolved before pass commands run. Needs a change inside the render path.
+- [`docs/experiments/04-per-pass-camera.md`](docs/experiments/04-per-pass-camera.md) - **stereo works.** The view setup runs once per frame, outside the pass loop, but the `CViewSetup` it fills is persistent and re-read per pass. Rewriting it there gives each eye its own camera: control take 0.00% differing, test take 88.89% with correct parallax.
 
 - [`docs/workflow.md`](docs/workflow.md) - how experiments are run here: division of labour, launch, capture, and the rules that earned their place.
 - [`docs/05-view-setup-point.md`](docs/05-view-setup-point.md) - the exact function where a per-pass camera must be applied, and why the config route failed.
-- [`docs/04-plan.md`](docs/04-plan.md) - the plan from here: build HLAE, add a per-pass camera, prove a stereo pair on disk, then the VR bridge.
+- [`docs/04-plan.md`](docs/04-plan.md) - the plan from here. Phases A and B are done; C (stereo pair on disk), D (VR bridge) and E (performance) remain.
+- [`docs/patches/README.md`](docs/patches/README.md) - the changes made to HLAE, kept so they survive a re-clone: the build fix, and the per-pass camera itself.
 
 Run [`scripts/check-toolchain.ps1`](scripts/check-toolchain.ps1) to see what the machine is missing; [`scripts/install-toolchain.ps1`](scripts/install-toolchain.ps1) installs it.
 

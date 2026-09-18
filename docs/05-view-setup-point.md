@@ -1,5 +1,11 @@
 # The view setup point — where a per-pass camera has to go
 
+> **Superseded in part by [`experiments/04-per-pass-camera.md`](experiments/04-per-pass-camera.md).**
+> The open question at the end of this note is answered: the trampoline runs **once per
+> frame, outside the pass loop**. The per-pass camera is not applied here — it is applied
+> by rewriting the persistent `CViewSetup` from the pass loop, which this note's field
+> offsets are still the map for. Everything above that question remains accurate.
+
 Date: 2026-09-18. Source read of `AfxHookSource2/main.cpp` in the cloned tree at
 `D:\Dev\cs2-vr-tools\advancedfx`. Not yet modified or tested.
 
