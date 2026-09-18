@@ -156,18 +156,46 @@ Keyboard, from `vr.cfg`:
 | HOME / END | HUD off / on |
 | INS / DEL | frame rate logging on / off |
 
-Controllers:
+Controllers. One idea per control: the left hand chooses who you are watching and where
+you stand, the right hand controls how time runs and where the camera points, and the
+triggers move through the demo.
+
+| left hand | |
+| --- | --- |
+| stick | walk, in the direction you are looking |
+| stick click | back onto the player |
+| trigger | seek back 10 s |
+| grip | free look on / off |
+| X | previous player |
+| Y | next player |
+
+| right hand | |
+| --- | --- |
+| stick | turn (in 30° steps), and rise or descend |
+| stick click | recentre |
+| trigger | seek forward 10 s |
+| grip | next camera mode |
+| A | pause / resume |
+| B | slow motion / normal speed |
+
+`mirv_vr_controls` prints this in the console, which is the only place it can be read
+until the overlay of [issue #2](https://github.com/vr-meta/cs2-vr-spectator/issues/2)
+exists.
+
+The feel is adjustable while wearing the headset, which is the only place the answer is
+visible:
 
 | | |
 | --- | --- |
-| left stick | walk, in the direction you are looking |
-| right stick | turn, and rise or descend |
-| triggers | previous / next player |
-| right grip | next camera mode |
-| X | free look on / off |
-| Y | back onto the player |
-| A | pause |
-| B | recentre |
+| `mirv_vr_speed <units/s>` | how fast the left stick flies (default 120) |
+| `mirv_vr_turn snap [deg]` | turn in steps — the default, 30° |
+| `mirv_vr_turn smooth [deg/s]` | turn continuously instead |
+| `mirv_vr_stick <deadzone> [curve]` | stick shaping (default 0.18, 2.0) |
+| `mirv_vr_seek <seconds>` | how far one trigger press moves (default 10) |
+| `mirv_vr_slowmo <scale>` | what B switches to (default 0.25) |
+
+Snap turning is the default because smooth rotation the body did not ask for is the main
+cause of sickness in VR. Smooth is there because some people prefer it.
 
 ## Shutting down, in this order
 

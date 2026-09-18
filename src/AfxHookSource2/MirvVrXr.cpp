@@ -2,6 +2,8 @@
 
 #include "MirvVrXr.h"
 #include "MirvVr.h"
+#include "MirvVrMath.h"
+#include "MirvTime.h"
 
 #include "WrpConsole.h"
 
@@ -72,20 +74,47 @@ float g_SubmitFps = 0.0f;
 bool g_LogFps = false;
 
 // --- controller input -------------------------------------------------------------
+//
+// One hand each, and one idea per control. The left hand chooses who is being watched and
+// where the viewer stands; the right hand controls how time runs and where the camera
+// looks. The triggers move through the demo, because that is what a spectator reaches for
+// most and it had no button at all until now.
+//
+//   left stick          walk, in the direction you are looking
+//   left stick click    back onto the player, undoing the flight
+//   left trigger        seek backwards
+//   left grip           free look on / off
+//   X                   previous player
+//   Y                   next player
+//
+//   right stick         turn (a snap by default), and rise or descend
+//   right stick click   recentre: straight ahead in the room is straight ahead in the map
+//   right trigger       seek forwards
+//   right grip          next camera mode
+//   A                   pause / resume
+//   B                   slow motion / normal speed
+//
+// The mapping is printed by mirv_vr_controls, because a table in a config file is no use
+// with a headset on. Until #2 puts it on a quad layer that is the best available.
 XrActionSet g_ActionSet = XR_NULL_HANDLE;
-XrAction g_MoveAction = XR_NULL_HANDLE;    // left stick:  strafe / forward
-XrAction g_TurnAction = XR_NULL_HANDLE;    // right stick: turn / rise
+XrAction g_MoveAction = XR_NULL_HANDLE;
+XrAction g_TurnAction = XR_NULL_HANDLE;
 XrAction g_RecenterAction = XR_NULL_HANDLE;
 XrAction g_FreeLookAction = XR_NULL_HANDLE;
 XrAction g_ResetAction = XR_NULL_HANDLE;
 XrAction g_PauseAction = XR_NULL_HANDLE;
-XrAction g_NextAction = XR_NULL_HANDLE;   // right trigger: next player
-XrAction g_PrevAction = XR_NULL_HANDLE;   // left trigger: previous player
-XrAction g_ModeAction = XR_NULL_HANDLE;   // right grip: cycle first/third person
+XrAction g_SlowMoAction = XR_NULL_HANDLE;
+XrAction g_NextAction = XR_NULL_HANDLE;
+XrAction g_PrevAction = XR_NULL_HANDLE;
+XrAction g_ModeAction = XR_NULL_HANDLE;
+XrAction g_SeekForwardAction = XR_NULL_HANDLE;
+XrAction g_SeekBackAction = XR_NULL_HANDLE;
 bool g_ActionsAttached = false;
 
 bool g_PrevRecenter = false, g_PrevFreeLook = false, g_PrevReset = false, g_PrevPause = false;
 bool g_PrevNext = false, g_PrevPrev = false, g_PrevMode = false;
+bool g_PrevSlowMo = false, g_PrevSeekForward = false, g_PrevSeekBack = false;
+bool g_SlowMotion = false;
 ULONGLONG g_LastInputTick = 0;
 
 // Console commands raised by a controller button. They cannot be dispatched from the
@@ -109,6 +138,21 @@ void QueueCommand(const char * cmd, int delayFrames = 0) {
     }
 }
 
+// Seeking cannot be expressed as a fixed command string: demo_gototick takes an absolute
+// tick and the current one is only knowable on the engine thread. So a trigger press
+// queues the offset in seconds and the drain turns it into a tick when it runs.
+//
+// Coalesced rather than queued, deliberately. Holding the trigger down or tapping it
+// impatiently should move the viewer further through the demo, not schedule six separate
+// seeks -- and seeking repeatedly in quick succession is the shape that crashed this game
+// before (docs/experiments/11-seeking.md).
+float g_PendingSeekSeconds = 0.0f;
+
+void QueueSeek(float seconds) {
+    std::lock_guard<std::mutex> lock(g_CmdMutex);
+    g_PendingSeekSeconds += seconds;
+}
+
 // Presses and releases a game action, the way the demo's own spectator controls are
 // driven. spec_next and spec_prev exist as commands but do nothing during demo playback -
 // the hints on screen say MOUSE1 and SPACE for a reason.
@@ -119,17 +163,38 @@ void QueueTap(const char * action) {
     QueueCommand(up.c_str(), 2);
 }
 
-// Units per second, and degrees per second. A comfortable walking pace in a headset is
-// far slower than a mouse-driven spectator would ever use.
+// Every number a hand touches, in one place and adjustable from the console. They were
+// all guesses to begin with and none of them was ever tried against an alternative; a
+// console variable is what makes trying one cost nothing.
+
+// Units per second. A comfortable walking pace in a headset is far slower than a
+// mouse-driven spectator would ever use. 1 unit is 1 inch, so 120 is about 3 m/s.
 float g_MoveSpeed = 120.0f;
-float g_TurnSpeed = 60.0f;
 
-const float kStickDeadzone = 0.18f;
+// Degrees per second, for smooth turning. Only used when snap turning is off.
+float g_TurnSpeed = 90.0f;
 
-float ApplyDeadzone(float v) {
-    if (v > kStickDeadzone)  return (v - kStickDeadzone) / (1.0f - kStickDeadzone);
-    if (v < -kStickDeadzone) return (v + kStickDeadzone) / (1.0f - kStickDeadzone);
-    return 0.0f;
+// Degrees per snap. Smooth rotation the body did not ask for is the main cause of
+// sickness in VR, so the default is a snap; 0 turns it off and goes back to smooth.
+float g_SnapTurnDegrees = 30.0f;
+
+float g_StickDeadzone = 0.18f;
+
+// An exponent on the shaped stick value. Above 1 the first half of the throw moves
+// slowly, which is what makes it possible to line a shot up rather than sail past it.
+float g_StickCurve = 2.0f;
+
+// Seconds per press of a trigger.
+float g_SeekSeconds = 10.0f;
+
+// Demo speed while slow motion is on.
+float g_SlowMoScale = 0.25f;
+
+AfxVrMath::SnapTurnState g_SnapTurn;
+
+// Shape a raw stick axis: deadzone first so a resting stick is still, then the curve.
+float ShapeStick(float v) {
+    return AfxVrMath::ApplyResponseCurve(AfxVrMath::ApplyDeadzone(v, g_StickDeadzone), g_StickCurve);
 }
 XrCompositionLayerProjectionView g_ProjViews[2] = {};
 
@@ -371,33 +436,44 @@ bool CreateActions() {
     setInfo.priority = 0;
     if (!Check(xrCreateActionSet_(g_Instance, &setInfo, &g_ActionSet), "xrCreateActionSet")) return false;
 
-    g_MoveAction     = MakeAction(XR_ACTION_TYPE_VECTOR2F_INPUT, "move", "Move");
-    g_TurnAction     = MakeAction(XR_ACTION_TYPE_VECTOR2F_INPUT, "turn", "Turn and rise");
-    g_RecenterAction = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "recenter", "Recenter");
-    g_FreeLookAction = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "freelook", "Toggle free look");
-    g_ResetAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "reset", "Return to the demo camera");
-    g_PauseAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "pause", "Pause the demo");
-    g_NextAction     = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "nextplayer", "Next player");
-    g_PrevAction     = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "prevplayer", "Previous player");
-    g_ModeAction     = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "specmode", "First or third person");
+    g_MoveAction        = MakeAction(XR_ACTION_TYPE_VECTOR2F_INPUT, "move", "Move");
+    g_TurnAction        = MakeAction(XR_ACTION_TYPE_VECTOR2F_INPUT, "turn", "Turn and rise");
+    g_RecenterAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "recenter", "Recenter");
+    g_FreeLookAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "freelook", "Toggle free look");
+    g_ResetAction       = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "reset", "Return to the demo camera");
+    g_PauseAction       = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "pause", "Pause the demo");
+    g_SlowMoAction      = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "slowmo", "Slow motion");
+    g_NextAction        = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "nextplayer", "Next player");
+    g_PrevAction        = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "prevplayer", "Previous player");
+    g_ModeAction        = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "specmode", "Next camera mode");
+    g_SeekForwardAction = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "seekforward", "Seek forwards");
+    g_SeekBackAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "seekback", "Seek backwards");
 
     if (!g_MoveAction || !g_TurnAction || !g_RecenterAction || !g_FreeLookAction
-        || !g_ResetAction || !g_PauseAction || !g_NextAction || !g_PrevAction
-        || !g_ModeAction) return false;
+        || !g_ResetAction || !g_PauseAction || !g_SlowMoAction || !g_NextAction
+        || !g_PrevAction || !g_ModeAction || !g_SeekForwardAction || !g_SeekBackAction) {
+        return false;
+    }
 
-    // Quest 3 controllers. Sticks for movement, the four face buttons for the things
-    // worth reaching for without taking the headset off.
+    // Quest 3 controllers. One idea per control, and the two things a spectator reaches
+    // for most -- moving through the demo, and choosing who to watch -- on the triggers
+    // and the face buttons rather than wherever there happened to be room.
     XrActionSuggestedBinding bindings[] = {
-        { g_MoveAction,     Path("/user/hand/left/input/thumbstick") },
-        { g_TurnAction,     Path("/user/hand/right/input/thumbstick") },
-        { g_FreeLookAction, Path("/user/hand/left/input/x/click") },
-        { g_ResetAction,    Path("/user/hand/left/input/y/click") },
-        { g_PauseAction,    Path("/user/hand/right/input/a/click") },
-        { g_RecenterAction, Path("/user/hand/right/input/b/click") },
+        { g_MoveAction,        Path("/user/hand/left/input/thumbstick") },
+        { g_ResetAction,       Path("/user/hand/left/input/thumbstick/click") },
+        { g_PrevAction,        Path("/user/hand/left/input/x/click") },
+        { g_NextAction,        Path("/user/hand/left/input/y/click") },
+
+        { g_TurnAction,        Path("/user/hand/right/input/thumbstick") },
+        { g_RecenterAction,    Path("/user/hand/right/input/thumbstick/click") },
+        { g_PauseAction,       Path("/user/hand/right/input/a/click") },
+        { g_SlowMoAction,      Path("/user/hand/right/input/b/click") },
+
         // Boolean actions bound to analogue inputs; the runtime picks the threshold.
-        { g_NextAction,     Path("/user/hand/right/input/trigger/value") },
-        { g_PrevAction,     Path("/user/hand/left/input/trigger/value") },
-        { g_ModeAction,     Path("/user/hand/right/input/squeeze/value") },
+        { g_SeekBackAction,    Path("/user/hand/left/input/trigger/value") },
+        { g_SeekForwardAction, Path("/user/hand/right/input/trigger/value") },
+        { g_FreeLookAction,    Path("/user/hand/left/input/squeeze/value") },
+        { g_ModeAction,        Path("/user/hand/right/input/squeeze/value") },
     };
 
     XrInteractionProfileSuggestedBinding suggested = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
@@ -410,6 +486,33 @@ bool CreateActions() {
     return true;
 }
 
+void PrintControls() {
+    advancedfx::Message(
+        "\n"
+        "Controllers\n"
+        "  left hand -- who you are watching, and where you are standing\n"
+        "    stick            walk, in the direction you are looking\n"
+        "    stick click      back onto the player\n"
+        "    trigger          seek back %.0f s\n"
+        "    grip             free look on / off  (currently %s)\n"
+        "    X                previous player\n"
+        "    Y                next player\n"
+        "  right hand -- how time runs, and where the camera points\n"
+        "    stick            turn%s, and rise or descend\n"
+        "    stick click      recentre\n"
+        "    trigger          seek forward %.0f s\n"
+        "    grip             next camera mode\n"
+        "    A                pause / resume\n"
+        "    B                slow motion / normal speed  (currently %s)\n"
+        "\n"
+        "Speeds and feel: mirv_vr_speed, mirv_vr_turn, mirv_vr_stick, mirv_vr_seek.\n",
+        g_SeekSeconds,
+        AfxVr_GetFreeLook() ? "on" : "off",
+        (0.0f < g_SnapTurnDegrees) ? " (snaps)" : " (smoothly)",
+        g_SeekSeconds,
+        g_SlowMotion ? "slow" : "normal");
+}
+
 bool AttachActions() {
     if (g_ActionsAttached) return true;
     if (XR_NULL_HANDLE == g_ActionSet || XR_NULL_HANDLE == g_Session) return false;
@@ -420,12 +523,8 @@ bool AttachActions() {
     if (!Check(xrAttachSessionActionSets_(g_Session, &attach), "xrAttachSessionActionSets")) return false;
 
     g_ActionsAttached = true;
-    advancedfx::Message(
-        "AFXVR: controllers bound.\n"
-        "  left stick   walk, right stick  turn and rise\n"
-        "  triggers     previous / next player\n"
-        "  right grip   first or third person\n"
-        "  X free look  Y back to the player  A pause  B recenter\n");
+    advancedfx::Message("AFXVR: controllers bound. mirv_vr_controls prints the mapping.\n");
+    PrintControls();
     return true;
 }
 
@@ -463,12 +562,21 @@ void ProcessInput() {
 
     float x = 0.0f, y = 0.0f;
     if (GetVec2(g_MoveAction, x, y)) {
-        float r = ApplyDeadzone(x), f = ApplyDeadzone(y);
+        float r = ShapeStick(x), f = ShapeStick(y);
         if (r || f) AfxVr_AddMove(r * g_MoveSpeed * dt, f * g_MoveSpeed * dt, 0.0f);
     }
     if (GetVec2(g_TurnAction, x, y)) {
-        float t = ApplyDeadzone(x), u = ApplyDeadzone(y);
-        if (t) AfxVr_AddYaw(-t * g_TurnSpeed * dt); // push right, turn right
+        if (0.0f < g_SnapTurnDegrees) {
+            // Snapping reads the raw axis, not the shaped one: it is a decision, not a
+            // rate, and a deadzone that has already eaten most of the throw would make
+            // the threshold mean something different from what it says.
+            float step = AfxVrMath::SnapTurn(g_SnapTurn, x, g_SnapTurnDegrees);
+            if (step) AfxVr_AddYaw(step);
+        } else {
+            float t = ShapeStick(x);
+            if (t) AfxVr_AddYaw(-t * g_TurnSpeed * dt); // push right, turn right
+        }
+        float u = ShapeStick(y);
         if (u) AfxVr_AddMove(0.0f, 0.0f, u * g_MoveSpeed * dt);
     }
 
@@ -491,6 +599,15 @@ void ProcessInput() {
     if (b && !g_PrevPause) QueueCommand("demo_togglepause");
     g_PrevPause = b;
 
+    b = GetPressed(g_SlowMoAction);
+    if (b && !g_PrevSlowMo) {
+        g_SlowMotion = !g_SlowMotion;
+        char cmd[64];
+        sprintf_s(cmd, "demo_timescale %f", g_SlowMotion ? g_SlowMoScale : 1.0f);
+        QueueCommand(cmd);
+    }
+    g_PrevSlowMo = b;
+
     // Switching players puts the viewer back on that player rather than wherever the
     // sticks had wandered to - otherwise you follow someone from across the map.
     b = GetPressed(g_NextAction);
@@ -504,6 +621,14 @@ void ProcessInput() {
     b = GetPressed(g_ModeAction);
     if (b && !g_PrevMode) QueueTap("jump"); // the demo's "next camera"
     g_PrevMode = b;
+
+    b = GetPressed(g_SeekForwardAction);
+    if (b && !g_PrevSeekForward) QueueSeek(+g_SeekSeconds);
+    g_PrevSeekForward = b;
+
+    b = GetPressed(g_SeekBackAction);
+    if (b && !g_PrevSeekBack) QueueSeek(-g_SeekSeconds);
+    g_PrevSeekBack = b;
 }
 
 void PollEvents() {
@@ -695,6 +820,7 @@ void MirvVrXr_EngineThread_Frame() {
     // handler only raises a flag.
     {
         std::vector<std::string> due;
+        float seekSeconds = 0.0f;
         {
             std::lock_guard<std::mutex> lock(g_CmdMutex);
             for (size_t i = 0; i < g_PendingCommands.size(); ) {
@@ -706,7 +832,29 @@ void MirvVrXr_EngineThread_Frame() {
                     i++;
                 }
             }
+            seekSeconds = g_PendingSeekSeconds;
+            g_PendingSeekSeconds = 0.0f;
         }
+
+        if (0.0f != seekSeconds) {
+            int tick = 0;
+            if (g_MirvTime.GetCurrentDemoTick(tick)) {
+                float interval = g_MirvTime.interval_per_tick_get();
+                if (interval > 0.0f) {
+                    int target = tick + (int)(seekSeconds / interval);
+                    // The demo starts somewhere above zero and seeking before the start
+                    // is the documented way to make this crash.
+                    if (target < 1) target = 1;
+                    due.push_back(std::string("demo_gototick ") + std::to_string(target));
+                    advancedfx::Message("AFXVR: seek %+.1fs, tick %i -> %i\n", seekSeconds, tick, target);
+                } else {
+                    advancedfx::Warning("AFXVR: cannot seek: the tick interval is not known yet.\n");
+                }
+            } else {
+                advancedfx::Warning("AFXVR: cannot seek: no demo is playing.\n");
+            }
+        }
+
         for (size_t i = 0; i < due.size(); i++) {
             if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, due[i].c_str(), true);
         }
@@ -906,4 +1054,109 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         (int)g_State,
         MirvVrXr_WantsPasses() ? "yes" : "no",
         g_SubmitFps, g_SwapchainWidth, g_SwapchainHeight);
+}
+
+// --- the numbers a hand can feel ---------------------------------------------------
+//
+// Every one of these started as a guess and none had ever been compared against an
+// alternative. Making them console variables is not polish; it is the difference between
+// "this feels wrong" and an answer, when the only instrument is a person wearing the
+// headset and the only way to test is to change it and look again.
+
+CON_COMMAND(mirv_vr_controls, "cs2-vr-spectator: print the controller mapping.")
+{
+    PrintControls();
+}
+
+CON_COMMAND(mirv_vr_speed, "cs2-vr-spectator: how fast the sticks move the viewer, in units per second.")
+{
+    if (2 <= args->ArgC()) {
+        g_MoveSpeed = (float)atof(args->ArgV(1));
+        advancedfx::Message("mirv_vr_speed: %.1f units/s\n", g_MoveSpeed);
+        return;
+    }
+    advancedfx::Message(
+        "mirv_vr_speed <units per second> - how fast the left stick flies the viewer.\n"
+        "1 unit is 1 inch, so 120 is a brisk walk and 400 is uncomfortable in a headset.\n"
+        "Current value: %.1f\n", g_MoveSpeed);
+}
+
+CON_COMMAND(mirv_vr_turn, "cs2-vr-spectator: snap or smooth turning, and how fast.")
+{
+    if (2 <= args->ArgC()) {
+        const char * arg1 = args->ArgV(1);
+        if (!_stricmp(arg1, "smooth")) {
+            g_SnapTurnDegrees = 0.0f;
+            if (3 <= args->ArgC()) g_TurnSpeed = (float)atof(args->ArgV(2));
+            advancedfx::Message("mirv_vr_turn: smooth, %.0f deg/s\n", g_TurnSpeed);
+            return;
+        }
+        if (!_stricmp(arg1, "snap")) {
+            g_SnapTurnDegrees = (3 <= args->ArgC()) ? (float)atof(args->ArgV(2)) : 30.0f;
+            if (g_SnapTurnDegrees <= 0.0f) g_SnapTurnDegrees = 30.0f;
+            advancedfx::Message("mirv_vr_turn: snapping %.0f degrees\n", g_SnapTurnDegrees);
+            return;
+        }
+    }
+    advancedfx::Message(
+        "mirv_vr_turn snap [degrees]  - turn in steps (the default, 30).\n"
+        "mirv_vr_turn smooth [deg/s]  - turn continuously.\n"
+        "\n"
+        "Smooth rotation that the body did not ask for is the main cause of sickness in\n"
+        "VR: the eyes report turning and the inner ear does not agree. A snap gives it\n"
+        "nothing to disagree with. Smooth is here because some people prefer it and\n"
+        "nobody had tried either.\n"
+        "Current: %s\n",
+        (0.0f < g_SnapTurnDegrees) ? "snap" : "smooth");
+}
+
+CON_COMMAND(mirv_vr_stick, "cs2-vr-spectator: stick deadzone and response curve.")
+{
+    if (2 <= args->ArgC()) {
+        g_StickDeadzone = (float)atof(args->ArgV(1));
+        if (g_StickDeadzone < 0.0f) g_StickDeadzone = 0.0f;
+        if (g_StickDeadzone > 0.9f) g_StickDeadzone = 0.9f;
+        if (3 <= args->ArgC()) g_StickCurve = (float)atof(args->ArgV(2));
+        advancedfx::Message("mirv_vr_stick: deadzone %.2f, curve %.2f\n", g_StickDeadzone, g_StickCurve);
+        return;
+    }
+    advancedfx::Message(
+        "mirv_vr_stick <deadzone> [curve] - how the sticks are shaped.\n"
+        "\n"
+        "Deadzone is the fraction of the throw that reads as nothing; a stick that does\n"
+        "not sit perfectly centred needs one, and the rest of the throw is rescaled so\n"
+        "full deflection still means full speed.\n"
+        "Curve is an exponent: 1 is linear, 2 makes half a push a quarter of the speed,\n"
+        "which is what makes fine positioning possible without losing the top end.\n"
+        "Current: deadzone %.2f, curve %.2f\n",
+        g_StickDeadzone, g_StickCurve);
+}
+
+CON_COMMAND(mirv_vr_seek, "cs2-vr-spectator: how far the triggers move through the demo.")
+{
+    if (2 <= args->ArgC()) {
+        g_SeekSeconds = (float)atof(args->ArgV(1));
+        if (g_SeekSeconds < 0.0f) g_SeekSeconds = -g_SeekSeconds;
+        advancedfx::Message("mirv_vr_seek: %.1f seconds per press\n", g_SeekSeconds);
+        return;
+    }
+    advancedfx::Message(
+        "mirv_vr_seek <seconds> - how far one trigger press moves through the demo.\n"
+        "Left trigger goes back, right goes forward. Presses inside one frame are added\n"
+        "together rather than queued, so an impatient hand does not schedule six seeks.\n"
+        "Current value: %.1f\n", g_SeekSeconds);
+}
+
+CON_COMMAND(mirv_vr_slowmo, "cs2-vr-spectator: the demo speed the B button switches to.")
+{
+    if (2 <= args->ArgC()) {
+        g_SlowMoScale = (float)atof(args->ArgV(1));
+        if (g_SlowMoScale <= 0.0f) g_SlowMoScale = 0.25f;
+        advancedfx::Message("mirv_vr_slowmo: %.2fx\n", g_SlowMoScale);
+        return;
+    }
+    advancedfx::Message(
+        "mirv_vr_slowmo <scale> - the demo_timescale the B button toggles to.\n"
+        "Current value: %.2f (currently %s)\n",
+        g_SlowMoScale, g_SlowMotion ? "slow" : "normal");
 }
