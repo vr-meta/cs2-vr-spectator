@@ -26,7 +26,15 @@ Status: **not yet run** — waiting on the CS2 download.
    It installs as a Source 2 plugin into
    `game/csgo/addons/`, plus a `Game csgo/addons` search path in `game/csgo/gameinfo.gi`.
    It requires `-insecure`, which this project requires anyway.
-   Note: last upstream push was 2025-08; it may need rebuilding against the current build.
+
+   **Version risk:** the newest release is `v0.5.0` from 2025-08-01, over a year old.
+   Source 2 plugins depend on engine internals and break on game updates, so it may
+   simply fail to load. If it does, rebuild it from source before concluding anything
+   about the convars — a plugin that did not load looks exactly like a convar that does
+   not exist.
+
+   HLAE (needed from step 6 on) ships as `v2.192.2`, released 2026-09-12, so it should
+   be current. No building required for either tool unless the plugin fails.
 3. Launch CS2 with `-insecure -novid -allow_third_party_software`.
 
 ## Step 1 — capture the ground-truth convar list

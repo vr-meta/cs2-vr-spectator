@@ -65,14 +65,35 @@ integration using OpenVR is a choice made in that project, not a constraint.
 
 ## Toolchain
 
-Nothing is installed yet. All of the following are required before the first build:
+Installed 2026-09-18 via `scripts/install-toolchain.ps1`:
 
-- Visual Studio 2022 Build Tools, C++ x64 workload (no `cl`, no `vswhere`)
-- CMake (absent)
-- Ninja (absent)
-- Vulkan SDK (`VULKAN_SDK` unset)
+| Tool | Version | Scope |
+| --- | --- | --- |
+| Ninja | 1.13.2 | user |
+| CMake | 4.4.3 | user |
+| Visual Studio 2022 Build Tools | C++ x64 workload + Windows 11 SDK 22621 | machine |
 
-Present: Git, `gh` (authenticated), Python (Windows Store shim).
+Already present: Git, `gh` (authenticated), Python (Windows Store shim).
+
+Not installed: Vulkan SDK. CS2 is D3D11 only, so it matters solely for reading the
+portal2vr DXVK reference. Skipped to avoid competing with the CS2 download for bandwidth.
+
+Note on CMake: 4.x rejects `cmake_minimum_required` below 3.5. HLAE declares 3.24, so
+it is unaffected, but other dependencies may not be.
+
+Run `scripts/check-toolchain.ps1` to re-verify. A new shell is required after install
+for the PATH changes to apply.
+
+### Nothing needs building for the first experiment
+
+Both tools experiment 00 depends on ship as binaries:
+
+- HLAE `v2.192.2`, released 2026-09-12 — current with recent CS2 patches.
+- cvar-unhide-s2 `v0.5.0`, released 2025-08-01.
+
+The cvar-unhide plugin is over a year old, and Source 2 plugins break on game updates.
+If it fails to load against the current CS2 build, it has to be rebuilt — which is the
+first thing the toolchain will actually be used for.
 
 ## Reproducing this snapshot
 
