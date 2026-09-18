@@ -91,6 +91,13 @@ synthetic Unicode input lands nowhere: no command runs, and nothing appears in
 So the division of labour stands: the operator types commands, and everything an
 experiment needs afterwards goes on an F-key bind, which *can* be driven from outside.
 
+**The mouse is a different story.** It was reasonable to assume Panorama ignored synthetic
+mouse input the way it ignores synthetic text. It does not: a synthesised click on the
+demo timeline seeks, and a synthesised drag scrubs it
+(`scripts/drag-in-cs2.ps1`, experiment [11](experiments/11-seeking.md)). So the parts of
+the UI that have no console command behind them *can* be driven after all — which is worth
+remembering the next time something seems unreachable.
+
 Two traps when driving keys:
 
 - The console toggle is a toggle. Pressing it when the console is already open closes it,

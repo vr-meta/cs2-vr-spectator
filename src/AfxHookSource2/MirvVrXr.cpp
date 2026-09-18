@@ -1132,16 +1132,42 @@ CON_COMMAND(mirv_vr_stick, "cs2-vr-spectator: stick deadzone and response curve.
         g_StickDeadzone, g_StickCurve);
 }
 
-CON_COMMAND(mirv_vr_seek, "cs2-vr-spectator: how far the triggers move through the demo.")
+CON_COMMAND(mirv_vr_seek, "cs2-vr-spectator: how far the triggers move through the demo, and seek now.")
 {
-    if (2 <= args->ArgC()) {
+    int argc = args->ArgC();
+
+    if (3 <= argc && !_stricmp(args->ArgV(1), "now")) {
+        // The same path a trigger takes, reachable from a key bind. Without this the
+        // seeking code could only be exercised with a headset on, which is a poor way to
+        // find out whether demo_gototick survives being used.
+        QueueSeek((float)atof(args->ArgV(2)));
+        return;
+    }
+
+    if (2 <= argc && !_stricmp(args->ArgV(1), "where")) {
+        int tick = 0;
+        if (g_MirvTime.GetCurrentDemoTick(tick)) {
+            float interval = g_MirvTime.interval_per_tick_get();
+            advancedfx::Message("mirv_vr_seek: tick %i, %.2f s in, %.4f s per tick\n",
+                tick, interval > 0.0f ? tick * interval : 0.0f, interval);
+        } else {
+            advancedfx::Message("mirv_vr_seek: no demo is playing.\n");
+        }
+        return;
+    }
+
+    if (2 <= argc) {
         g_SeekSeconds = (float)atof(args->ArgV(1));
         if (g_SeekSeconds < 0.0f) g_SeekSeconds = -g_SeekSeconds;
         advancedfx::Message("mirv_vr_seek: %.1f seconds per press\n", g_SeekSeconds);
         return;
     }
+
     advancedfx::Message(
-        "mirv_vr_seek <seconds> - how far one trigger press moves through the demo.\n"
+        "mirv_vr_seek <seconds>      - how far one trigger press moves through the demo.\n"
+        "mirv_vr_seek now <seconds>  - seek by that much right now (negative goes back).\n"
+        "mirv_vr_seek where          - report the current tick and the tick interval.\n"
+        "\n"
         "Left trigger goes back, right goes forward. Presses inside one frame are added\n"
         "together rather than queued, so an impatient hand does not schedule six seeks.\n"
         "Current value: %.1f\n", g_SeekSeconds);
