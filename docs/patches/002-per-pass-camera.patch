@@ -1,13 +1,27 @@
 ﻿diff --git a/AfxHookSource2/CMakeLists.txt b/AfxHookSource2/CMakeLists.txt
-index 1d66528..9a77e6b 100644
+index 1d66528..c36ef7a 100644
 --- a/AfxHookSource2/CMakeLists.txt
 +++ b/AfxHookSource2/CMakeLists.txt
-@@ -248,6 +248,8 @@ target_sources(${PROJECT_NAME} PRIVATE
+@@ -59,6 +59,11 @@ SET(AFXHOOKSOURCE2SNIPPETS_OUTPUTS ${AFXHOOKSOURCE2SNIPPETS_OUTPUTS} PARENT_SCOP
+ 
+ add_definitions(-DGAME_CS2)
+ 
++# cs2-vr-spectator: OpenXR headers. The loader is opened by explicit path at runtime
++# rather than linked, so only the include directory is needed here.
++set(AFXVR_OPENXR_DIR "D:/Dev/cs2-vr-tools/openxr/pkg" CACHE PATH "OpenXR SDK root (headers under include/)")
++target_include_directories(${PROJECT_NAME} PRIVATE "${AFXVR_OPENXR_DIR}/include")
++
+ #set_target_properties(
+ #    ${PROJECT_NAME}
+ #    PROPERTIES 
+@@ -248,6 +253,10 @@ target_sources(${PROJECT_NAME} PRIVATE
  
  	MirvTime.cpp
  	MirvTime.h
 +	MirvVr.cpp
 +	MirvVr.h
++	MirvVrXr.cpp
++	MirvVrXr.h
  
      ReplaceName.cpp
      ReplaceName.h
@@ -281,6 +295,248 @@ index 0000000..8ca3d23
 +                  float right, float forward, float up,
 +                  float dPitch, float dYaw, float dRoll,
 +                  float fov);
+diff --git a/AfxHookSource2/MirvVrXr.cpp b/AfxHookSource2/MirvVrXr.cpp
+new file mode 100644
+index 0000000..3ce30c9
+--- /dev/null
++++ b/AfxHookSource2/MirvVrXr.cpp
+@@ -0,0 +1,211 @@
++#include "stdafx.h"
++
++#include "MirvVrXr.h"
++
++#include "WrpConsole.h"
++
++#include "../shared/AfxConsole.h"
++
++#include <string>
++
++#define XR_USE_PLATFORM_WIN32
++#define XR_USE_GRAPHICS_API_D3D11
++#include <d3d11.h>
++#include <openxr/openxr.h>
++#include <openxr/openxr_platform.h>
++
++// The game's D3D11 objects, owned by RenderSystemDX11Hooks.cpp. The session will be
++// created on this device, so the eyes can be submitted with a plain CopyResource.
++extern ID3D11Device * g_pDevice;
++
++namespace {
++
++HMODULE g_hLoader = nullptr;
++XrInstance g_Instance = XR_NULL_HANDLE;
++XrSystemId g_SystemId = XR_NULL_SYSTEM_ID;
++
++// The loader is resolved by hand. Linking it would make this DLL refuse to load whenever
++// openxr_loader.dll is not on the game's search path, which for an injected hook is most
++// of the time.
++PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
++
++PFN_xrCreateInstance xrCreateInstance_ = nullptr;
++PFN_xrDestroyInstance xrDestroyInstance_ = nullptr;
++PFN_xrGetInstanceProperties xrGetInstanceProperties_ = nullptr;
++PFN_xrGetSystem xrGetSystem_ = nullptr;
++PFN_xrGetSystemProperties xrGetSystemProperties_ = nullptr;
++PFN_xrEnumerateViewConfigurationViews xrEnumerateViewConfigurationViews_ = nullptr;
++PFN_xrEnumerateInstanceExtensionProperties xrEnumerateInstanceExtensionProperties_ = nullptr;
++PFN_xrResultToString xrResultToString_ = nullptr;
++
++const wchar_t * const kLoaderPaths[] = {
++    L"D:\\Dev\\cs2-vr-tools\\openxr\\pkg\\native\\x64\\release\\bin\\openxr_loader.dll",
++    L"openxr_loader.dll", // whatever the process can already find
++};
++
++const char * ResultName(XrResult r) {
++    static char buf[XR_MAX_RESULT_STRING_SIZE];
++    if (xrResultToString_ && g_Instance != XR_NULL_HANDLE
++        && XR_SUCCEEDED(xrResultToString_(g_Instance, r, buf))) {
++        return buf;
++    }
++    static char fallback[32];
++    sprintf_s(fallback, "XrResult %i", (int)r);
++    return fallback;
++}
++
++bool LoadLoader() {
++    if (g_hLoader) return true;
++
++    for (int i = 0; i < _countof(kLoaderPaths); i++) {
++        g_hLoader = LoadLibraryW(kLoaderPaths[i]);
++        if (g_hLoader) break;
++    }
++    if (!g_hLoader) {
++        advancedfx::Warning("AFXVR: could not load openxr_loader.dll.\n");
++        return false;
++    }
++
++    xrGetInstanceProcAddr_ = (PFN_xrGetInstanceProcAddr)GetProcAddress(g_hLoader, "xrGetInstanceProcAddr");
++    if (!xrGetInstanceProcAddr_) {
++        advancedfx::Warning("AFXVR: openxr_loader.dll has no xrGetInstanceProcAddr.\n");
++        return false;
++    }
++
++    // Instance-independent entry points resolve against XR_NULL_HANDLE.
++    xrGetInstanceProcAddr_(XR_NULL_HANDLE, "xrCreateInstance", (PFN_xrVoidFunction*)&xrCreateInstance_);
++    xrGetInstanceProcAddr_(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", (PFN_xrVoidFunction*)&xrEnumerateInstanceExtensionProperties_);
++
++    return nullptr != xrCreateInstance_;
++}
++
++bool LoadInstanceFunctions() {
++    struct { const char * name; PFN_xrVoidFunction * fn; } table[] = {
++        { "xrDestroyInstance",                 (PFN_xrVoidFunction*)&xrDestroyInstance_ },
++        { "xrGetInstanceProperties",           (PFN_xrVoidFunction*)&xrGetInstanceProperties_ },
++        { "xrGetSystem",                       (PFN_xrVoidFunction*)&xrGetSystem_ },
++        { "xrGetSystemProperties",             (PFN_xrVoidFunction*)&xrGetSystemProperties_ },
++        { "xrEnumerateViewConfigurationViews", (PFN_xrVoidFunction*)&xrEnumerateViewConfigurationViews_ },
++        { "xrResultToString",                  (PFN_xrVoidFunction*)&xrResultToString_ },
++    };
++
++    for (int i = 0; i < _countof(table); i++) {
++        XrResult r = xrGetInstanceProcAddr_(g_Instance, table[i].name, table[i].fn);
++        if (XR_FAILED(r) || nullptr == *table[i].fn) {
++            advancedfx::Warning("AFXVR: missing entry point %s.\n", table[i].name);
++            return false;
++        }
++    }
++    return true;
++}
++
++} // namespace
++
++bool MirvVrXr_IsRunning() {
++    return XR_NULL_HANDLE != g_Instance;
++}
++
++bool MirvVrXr_Start() {
++    if (MirvVrXr_IsRunning()) {
++        advancedfx::Message("AFXVR: already running.\n");
++        return true;
++    }
++
++    if (!LoadLoader()) return false;
++
++    // The runtime must support rendering through the game's own D3D11 device; without
++    // that extension there is no cheap way to hand it a frame.
++    const char * extensions[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
++
++    XrInstanceCreateInfo createInfo = { XR_TYPE_INSTANCE_CREATE_INFO };
++    createInfo.enabledExtensionCount = _countof(extensions);
++    createInfo.enabledExtensionNames = extensions;
++    strcpy_s(createInfo.applicationInfo.applicationName, "cs2-vr-spectator");
++    createInfo.applicationInfo.applicationVersion = 1;
++    strcpy_s(createInfo.applicationInfo.engineName, "AfxHookSource2");
++    createInfo.applicationInfo.engineVersion = 1;
++    createInfo.applicationInfo.apiVersion = XR_API_VERSION_1_0;
++
++    XrResult r = xrCreateInstance_(&createInfo, &g_Instance);
++    if (XR_FAILED(r)) {
++        g_Instance = XR_NULL_HANDLE;
++        advancedfx::Warning("AFXVR: xrCreateInstance failed (%i). Is a runtime installed and running?\n", (int)r);
++        return false;
++    }
++
++    if (!LoadInstanceFunctions()) { MirvVrXr_Stop(); return false; }
++
++    XrInstanceProperties instanceProps = { XR_TYPE_INSTANCE_PROPERTIES };
++    if (XR_SUCCEEDED(xrGetInstanceProperties_(g_Instance, &instanceProps))) {
++        advancedfx::Message("AFXVR: runtime \"%s\" version %llu.%llu.%llu\n",
++            instanceProps.runtimeName,
++            XR_VERSION_MAJOR(instanceProps.runtimeVersion),
++            XR_VERSION_MINOR(instanceProps.runtimeVersion),
++            XR_VERSION_PATCH(instanceProps.runtimeVersion));
++    }
++
++    XrSystemGetInfo systemInfo = { XR_TYPE_SYSTEM_GET_INFO };
++    systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
++    r = xrGetSystem_(g_Instance, &systemInfo, &g_SystemId);
++    if (XR_FAILED(r)) {
++        advancedfx::Warning("AFXVR: no head mounted display available (%s). Is the headset connected?\n", ResultName(r));
++        MirvVrXr_Stop();
++        return false;
++    }
++
++    XrSystemProperties systemProps = { XR_TYPE_SYSTEM_PROPERTIES };
++    if (XR_SUCCEEDED(xrGetSystemProperties_(g_Instance, g_SystemId, &systemProps))) {
++        advancedfx::Message("AFXVR: system \"%s\", max swapchain %ux%u, %u layers\n",
++            systemProps.systemName,
++            systemProps.graphicsProperties.maxSwapchainImageWidth,
++            systemProps.graphicsProperties.maxSwapchainImageHeight,
++            systemProps.graphicsProperties.maxLayerCount);
++    }
++
++    // What the runtime would like each eye rendered at. The plan is to render at the
++    // window size instead and report the fov actually used, so this is information
++    // rather than a requirement - but it says how far off the window size is.
++    uint32_t viewCount = 0;
++    if (XR_SUCCEEDED(xrEnumerateViewConfigurationViews_(g_Instance, g_SystemId,
++            XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &viewCount, nullptr)) && viewCount) {
++        XrViewConfigurationView views[4] = {};
++        if (viewCount > _countof(views)) viewCount = _countof(views);
++        for (uint32_t i = 0; i < viewCount; i++) views[i].type = XR_TYPE_VIEW_CONFIGURATION_VIEW;
++        if (XR_SUCCEEDED(xrEnumerateViewConfigurationViews_(g_Instance, g_SystemId,
++                XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, viewCount, &viewCount, views))) {
++            for (uint32_t i = 0; i < viewCount; i++) {
++                advancedfx::Message("AFXVR: view %u recommended %ux%u (max %ux%u), %u samples\n",
++                    i,
++                    views[i].recommendedImageRectWidth, views[i].recommendedImageRectHeight,
++                    views[i].maxImageRectWidth, views[i].maxImageRectHeight,
++                    views[i].recommendedSwapchainSampleCount);
++            }
++        }
++    }
++
++    advancedfx::Message("AFXVR: instance up. Game D3D11 device: %p\n", g_pDevice);
++    return true;
++}
++
++void MirvVrXr_Stop() {
++    if (XR_NULL_HANDLE != g_Instance && xrDestroyInstance_) {
++        xrDestroyInstance_(g_Instance);
++    }
++    g_Instance = XR_NULL_HANDLE;
++    g_SystemId = XR_NULL_SYSTEM_ID;
++}
++
++CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: bring up the OpenXR runtime connection.")
++{
++    if (2 <= args->ArgC()) {
++        const char * arg1 = args->ArgV(1);
++        if (!_stricmp(arg1, "start")) { MirvVrXr_Start(); return; }
++        if (!_stricmp(arg1, "stop"))  { MirvVrXr_Stop(); advancedfx::Message("AFXVR: stopped.\n"); return; }
++    }
++
++    advancedfx::Message(
++        "mirv_vr_xr start - connect to the OpenXR runtime and report what it is.\n"
++        "mirv_vr_xr stop  - disconnect.\n"
++        "Currently: %s\n",
++        MirvVrXr_IsRunning() ? "running" : "not running");
++}
+diff --git a/AfxHookSource2/MirvVrXr.h b/AfxHookSource2/MirvVrXr.h
+new file mode 100644
+index 0000000..a27f339
+--- /dev/null
++++ b/AfxHookSource2/MirvVrXr.h
+@@ -0,0 +1,19 @@
++#pragma once
++
++// cs2-vr-spectator: the OpenXR side of the bridge.
++//
++// The engine-facing half lives in MirvVr.h: per-eye pose in, per-pass rendering out.
++// This half talks to the headset runtime and will eventually drive those poses from
++// xrLocateViews and submit the rendered eyes to a swapchain.
++//
++// The loader is opened by explicit path rather than linked, because this DLL is injected
++// into a process that knows nothing about OpenXR and must not depend on the loader being
++// on its search path.
++
++// Brings up an OpenXR instance and reports what the runtime is. Safe to call twice.
++bool MirvVrXr_Start();
++
++// Tears everything down. Safe to call when nothing is running.
++void MirvVrXr_Stop();
++
++bool MirvVrXr_IsRunning();
 diff --git a/AfxHookSource2/RenderServiceHooks.cpp b/AfxHookSource2/RenderServiceHooks.cpp
 index cea3626..ad2a751 100644
 --- a/AfxHookSource2/RenderServiceHooks.cpp
@@ -419,3 +675,24 @@ index efbea01..f6af405 100644
  	g_CampathDrawer.OnEngineThread_SetupViewDone();
  }
  
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fcc9fd4..757338e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -29,14 +29,14 @@ message(STATUS "AFX_RUST_CARGO_LOCKED=${AFX_RUST_CARGO_LOCKED}")
+ #
+ 
+ execute_process(
+-    COMMAND "$ENV{ProgramFiles\(x86\)}\\Microsoft Visual Studio\\Installer\\vswhere.exe" "-latest" "-version" "[17.0,18.0)" "-property" "installationPath"
++    COMMAND "$ENV{ProgramFiles\(x86\)}\\Microsoft Visual Studio\\Installer\\vswhere.exe" "-latest" "-products" "*" "-version" "[17.0,18.0)" "-property" "installationPath"
+     OUTPUT_VARIABLE VS_INSTALLPATH
+     OUTPUT_STRIP_TRAILING_WHITESPACE
+ )
+ string(REPLACE "\\" "/" VS_INSTALLPATH ${VS_INSTALLPATH})
+ 
+ execute_process(
+-    COMMAND "$ENV{ProgramFiles\(x86\)}\\Microsoft Visual Studio\\Installer\\vswhere.exe" "-latest" "-version" "[17.0,18.0)" "-requires" "Microsoft.Component.MSBuild" "-find" "MSBuild\\**\\**\\Bin\\MSBuild.exe"
++    COMMAND "$ENV{ProgramFiles\(x86\)}\\Microsoft Visual Studio\\Installer\\vswhere.exe" "-latest" "-products" "*" "-version" "[17.0,18.0)" "-requires" "Microsoft.Component.MSBuild" "-find" "MSBuild\\**\\**\\Bin\\MSBuild.exe"
+     OUTPUT_VARIABLE VS_MSBUILD
+     OUTPUT_STRIP_TRAILING_WHITESPACE
+ )

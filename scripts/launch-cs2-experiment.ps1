@@ -15,7 +15,11 @@ param(
     [switch]$Vulkan,          # try the Vulkan backend instead of D3D11
     [string]$Demo,            # optional .dem to play on startup
     [switch]$Fullscreen,
-    [switch]$SelfBuilt        # inject our own AfxHookSource2.dll instead of the release one
+    [switch]$SelfBuilt,       # inject our own AfxHookSource2.dll instead of the release one
+    [switch]$VrReady,         # square eye-sized window and a frame cap, for VR runtime work
+    [int]$Width  = 1280,
+    [int]$Height = 720,
+    [int]$FpsMax = 0          # 0 leaves the game uncapped
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,7 +56,16 @@ $gameArgs = @(
     '+con_enable', '1'
 )
 
-if (-not $Fullscreen) { $gameArgs += @('-windowed', '-w', '1280', '-h', '720') }
+# With a VR runtime up, an uncapped CS2 and the compositor fight over the GPU and both
+# stall: the game stops pumping messages and the headset stutters. Cap the game.
+if ($VrReady) {
+    if (-not $PSBoundParameters.ContainsKey('Width'))  { $Width  = 1080 }
+    if (-not $PSBoundParameters.ContainsKey('Height')) { $Height = 1080 }
+    if (0 -eq $FpsMax) { $FpsMax = 90 }
+}
+
+if (-not $Fullscreen) { $gameArgs += @('-windowed', '-w', "$Width", '-h', "$Height") }
+if (0 -lt $FpsMax)    { $gameArgs += @('+fps_max', "$FpsMax") }
 if ($Vulkan)          { $gameArgs += '-vulkan' }
 if ($Demo) {
     # A bare name is resolved by the engine relative to game/csgo, so only check
