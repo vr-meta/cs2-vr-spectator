@@ -36,6 +36,9 @@ $gameArgs = @(
     '-insecure'
     '-novid'
     '-condebug'                     # CS2 has no con_logfile; this writes game/csgo/console.log
+    # Note: CS2 has no -netconport. The string is absent from engine2.dll, so there is
+    # no remote console to drive the experiment through; key input is sent instead
+    # (scripts/sweep-offset.ps1).
     '-allow_third_party_software'
     '+con_enable', '1'
 )
@@ -43,7 +46,9 @@ $gameArgs = @(
 if (-not $Fullscreen) { $gameArgs += @('-windowed', '-w', '1280', '-h', '720') }
 if ($Vulkan)          { $gameArgs += '-vulkan' }
 if ($Demo) {
-    if (-not (Test-Path $Demo)) { throw "Demo not found: $Demo" }
+    # A bare name is resolved by the engine relative to game/csgo, so only check
+    # paths that actually look like paths.
+    if ($Demo -match '[\\/]' -and -not (Test-Path $Demo)) { throw "Demo not found: $Demo" }
     $gameArgs += @('+playdemo', $Demo)
 }
 
