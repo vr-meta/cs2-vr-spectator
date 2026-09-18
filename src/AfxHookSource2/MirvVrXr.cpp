@@ -73,6 +73,90 @@ int g_FpsFrames = 0;
 float g_SubmitFps = 0.0f;
 bool g_LogFps = false;
 
+// --- frame time sampling ------------------------------------------------------------
+//
+// An average tells you almost nothing about whether a headset is comfortable. What matters
+// is the shape of the distribution: a run that averages 60 but drops one frame in twenty
+// feels worse than a steady 50, and a mean hides that completely. So this keeps the
+// samples and reports percentiles.
+//
+// Measured on the engine thread, around the whole frame, so it counts everything the game
+// does and not only what the hook can see. It works with no session and no headset, which
+// is the point: the graphics settings can then be compared on a desk instead of on a face.
+const int kFrameSampleCapacity = 16384;
+double g_FrameSamplesMs[kFrameSampleCapacity];
+int g_FrameSampleCount = 0;
+bool g_SamplingFrames = false;
+LARGE_INTEGER g_PerfFrequency = {};
+LARGE_INTEGER g_LastFrameStamp = {};
+double g_SampleUntilSeconds = 0.0;
+double g_SampledSeconds = 0.0;
+char g_SampleLabel[64] = "";
+
+int CompareDouble(const void * a, const void * b) {
+    double x = *(const double*)a, y = *(const double*)b;
+    return (x < y) ? -1 : ((x > y) ? 1 : 0);
+}
+
+double Percentile(const double * sorted, int count, double fraction) {
+    if (count <= 0) return 0.0;
+    int index = (int)(fraction * (count - 1) + 0.5);
+    if (index < 0) index = 0;
+    if (index >= count) index = count - 1;
+    return sorted[index];
+}
+
+void ReportFrameSamples() {
+    if (g_FrameSampleCount < 2) {
+        advancedfx::Message("AFXVR: not enough frames sampled.\n");
+        return;
+    }
+
+    double total = 0.0;
+    for (int i = 0; i < g_FrameSampleCount; i++) total += g_FrameSamplesMs[i];
+    double mean = total / g_FrameSampleCount;
+
+    qsort(g_FrameSamplesMs, g_FrameSampleCount, sizeof(double), CompareDouble);
+
+    double p50 = Percentile(g_FrameSamplesMs, g_FrameSampleCount, 0.50);
+    double p95 = Percentile(g_FrameSamplesMs, g_FrameSampleCount, 0.95);
+    double p99 = Percentile(g_FrameSamplesMs, g_FrameSampleCount, 0.99);
+    double worst = g_FrameSamplesMs[g_FrameSampleCount - 1];
+
+    advancedfx::Message(
+        "AFXVR frametime%s%s: %i frames over %.1f s\n"
+        "  mean %.2f ms (%.1f fps)   median %.2f ms (%.1f fps)\n"
+        "  p95  %.2f ms   p99 %.2f ms   worst %.2f ms\n",
+        g_SampleLabel[0] ? " " : "", g_SampleLabel,
+        g_FrameSampleCount, g_SampledSeconds,
+        mean, mean > 0.0 ? 1000.0 / mean : 0.0,
+        p50, p50 > 0.0 ? 1000.0 / p50 : 0.0,
+        p95, p99, worst);
+}
+
+void SampleFrameTime() {
+    if (!g_SamplingFrames) return;
+
+    if (0 == g_PerfFrequency.QuadPart) QueryPerformanceFrequency(&g_PerfFrequency);
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+
+    if (0 != g_LastFrameStamp.QuadPart) {
+        double ms = 1000.0 * (double)(now.QuadPart - g_LastFrameStamp.QuadPart)
+                  / (double)g_PerfFrequency.QuadPart;
+        g_SampledSeconds += ms / 1000.0;
+        if (g_FrameSampleCount < kFrameSampleCapacity) {
+            g_FrameSamplesMs[g_FrameSampleCount++] = ms;
+        }
+        if (g_SampledSeconds >= g_SampleUntilSeconds || g_FrameSampleCount >= kFrameSampleCapacity) {
+            g_SamplingFrames = false;
+            ReportFrameSamples();
+        }
+    }
+    g_LastFrameStamp = now;
+}
+
 // --- controller input -------------------------------------------------------------
 //
 // One hand each, and one idea per control. The left hand chooses who is being watched and
@@ -830,6 +914,9 @@ void MirvVrXr_Stop() {
 }
 
 void MirvVrXr_EngineThread_Frame() {
+    // First, before anything this function does can be counted as part of the frame.
+    SampleFrameTime();
+
     PollEvents();
 
     // A console command has to be dispatched from the engine thread, so the controller
@@ -1201,4 +1288,43 @@ CON_COMMAND(mirv_vr_slowmo, "cs2-vr-spectator: the demo speed the B button switc
         "mirv_vr_slowmo <scale> - the demo_timescale the B button toggles to.\n"
         "Current value: %.2f (currently %s)\n",
         g_SlowMoScale, g_SlowMotion ? "slow" : "normal");
+}
+
+CON_COMMAND(mirv_vr_frametime, "cs2-vr-spectator: sample frame times and report the distribution.")
+{
+    int argc = args->ArgC();
+
+    if (2 <= argc) {
+        double seconds = atof(args->ArgV(1));
+        if (seconds <= 0.0) {
+            g_SamplingFrames = false;
+            advancedfx::Message("mirv_vr_frametime: stopped.\n");
+            return;
+        }
+        if (seconds > 120.0) seconds = 120.0;
+
+        g_SampleLabel[0] = '\0';
+        if (3 <= argc) strcpy_s(g_SampleLabel, args->ArgV(2));
+
+        g_FrameSampleCount = 0;
+        g_SampledSeconds = 0.0;
+        g_SampleUntilSeconds = seconds;
+        g_LastFrameStamp.QuadPart = 0;
+        g_SamplingFrames = true;
+
+        advancedfx::Message("mirv_vr_frametime: sampling %.0f s%s%s...\n",
+            seconds, g_SampleLabel[0] ? " as " : "", g_SampleLabel);
+        return;
+    }
+
+    advancedfx::Message(
+        "mirv_vr_frametime <seconds> [label] - sample frame times, then report.\n"
+        "mirv_vr_frametime 0                 - stop early.\n"
+        "\n"
+        "Reports mean, median, p95, p99 and the worst frame. The mean is the least\n"
+        "useful of those: a run averaging 60 that drops one frame in twenty feels worse\n"
+        "in a headset than a steady 50, and only the tail shows it.\n"
+        "\n"
+        "Measured around the whole engine frame, so it works with no session and no\n"
+        "headset -- which is what makes the graphics settings comparable at a desk.\n");
 }
