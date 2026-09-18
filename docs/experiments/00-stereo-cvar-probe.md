@@ -21,45 +21,55 @@ Status: **not yet run** — waiting on the CS2 download.
 ## Setup
 
 1. Enable the developer console (Settings, Game, Enable Developer Console).
-2. Install [cvar-unhide-s2](https://github.com/saul/cvar-unhide-s2) (MIT). The three
-   convars under test are `developmentonly defensive` and are invisible without it.
-   It installs as a Source 2 plugin into
-   `game/csgo/addons/`, plus a `Game csgo/addons` search path in `game/csgo/gameinfo.gi`.
-   It requires `-insecure`, which this project requires anyway.
+2. Launch CS2 through HLAE so `AfxHookSource2` is injected. `-insecure` stays in the
+   launch options: it is this project's operating boundary regardless of the plugin.
+3. In the console, before anything else:
 
-   **Version risk:** the newest release is `v0.5.0` from 2025-08-01, over a year old.
-   Source 2 plugins depend on engine internals and break on game updates, so it may
-   simply fail to load. If it does, rebuild it from source before concluding anything
-   about the convars — a plugin that did not load looks exactly like a convar that does
-   not exist.
+   ```
+   mirv_cvar_unhide_all
+   mirv_cvar_unlock_sv_cheats
+   ```
 
-   HLAE (needed from step 6 on) ships as `v2.192.2`, released 2026-09-12, so it should
-   be current. No building required for either tool unless the plugin fails.
+   Everything downstream depends on these succeeding. If `mirv_cvar_unhide_all` is not
+   recognised, HLAE is not attached, and every convar result afterwards is meaningless —
+   a missing hook looks exactly like a missing convar.
 3. Launch CS2 with `-insecure -novid -allow_third_party_software`.
 
-## Tools, already downloaded
+## Tools
 
-Both live in `D:\Dev\cs2-vr-tools\` (outside the repository — they are third-party
-binaries, not project content):
+HLAE `v2.192.2` in `D:\Dev\cs2-vr-tools\hlae\` — `x64\AfxHookSource2.dll` built
+2026-09-12. Outside the repository: third-party binary, not project content.
 
-| Tool | Version | Binary date | Note |
-| --- | --- | --- | --- |
-| HLAE | v2.192.2 | `x64\AfxHookSource2.dll` built 2026-09-12 | current |
-| cvar-unhide-s2 | v0.5.0 | `addons\bin\win64\server.dll` built 2025-08-01 | **13 months old** |
-
-The plugin installs by copying its `addons` folder into
-`<CS2>\game\csgo\`, then adding a search path to `<CS2>\game\csgo\gameinfo.gi` near
-line 22:
+**HLAE unhides the convars itself.** It provides:
 
 ```
-Game    csgo/addons
+mirv_cvar_unhide_all
+mirv_cvar_unlock_sv_cheats
 ```
 
-Back up `gameinfo.gi` first — a Steam update will overwrite it, and the edit has to be
-reapplied after every CS2 patch.
+That removes the need for the `cvar-unhide-s2` plugin entirely, along with the
+`gameinfo.gi` edit it required. HLAE injects into the running game and touches no game
+files, so Steam has nothing to revert.
 
-HLAE is launched on its own and starts CS2 itself; it does not need to be copied into
-the game folder.
+### Do not install cvar-unhide-s2 (tried 2026-09-18, crashed the game)
+
+Recorded so it is not retried. The plugin ships its payload as `addons\bin\win64\
+server.dll`, and the `Game csgo/addons` search path it asks for puts that directory
+ahead of the stock one on `GAMEBIN`. Confirmed from the crash dump's search-path spew:
+
+```
+41:  GAMEBIN  ...\game\csgo\addons\bin\win64\
+42:  GAMEBIN  ...\game\csgo\addons\bin\
+```
+
+The engine then loads the plugin's `server.dll` in place of the stock module. That
+binary dates to 2025-08-01, thirteen months behind build 2000908, and CS2 crashed
+during startup — `engine2`, `rendersystemdx11`, `scenesystem` and `vphysics2` were
+loaded, no `server.dll` was, so it failed at exactly that point.
+
+Steam then deleted the modified `gameinfo.gi` on its own and flipped the app state out
+of "fully installed". Modifying that file is not merely fragile across updates, as
+assumed earlier: Steam actively reverts it.
 
 ## Prepared config files
 
