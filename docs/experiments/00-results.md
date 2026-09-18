@@ -2,12 +2,11 @@
 
 **Build:** CS2 ClientVersion 2000908, PatchVersion 1.41.8.1, SourceRevision 10981323,
 dated 2026-09-09.
-**Run:** 2026-09-18, RTX 4070 Laptop (driver 32.0.15.9144), D3D11 backend, windowed 1280x720.
+**Run:** 2026-09-18, RTX 4070 Laptop (driver 32.0.15.9144), D3D11 backend, 1280x720.
 **Tooling:** HLAE v2.192.2, `AfxHookSource2.dll` built 2026-09-12, injected via `-customLoader -noGui -autoStart`. CS2 launched with `-insecure`, fullscreen.
-`-customLoader -noGui -autoStart`. CS2 launched with `-insecure`.
 
-Steps 1 and the convar half of the experiment are complete. The offset sweep and the
-two-pass test are not yet run — they need a demo.
+The convar checks and the offset sweep are complete. The two-pass test (step 6) is not
+yet run.
 
 ## Setup notes worth keeping
 

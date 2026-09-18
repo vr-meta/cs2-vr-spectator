@@ -60,8 +60,7 @@ rendersystemempty.dll    1.7 MB
 A Vulkan backend does ship, contrary to what note 01 first assumed from the community
 module dump. Whether it can actually be selected is untested.
 
-**Not yet obtained:** `.dem` files. Milestone 2 cannot be validated without at least
-one local demo on a known map.
+See "Test demo" below for the demo used.
 
 ## Working reference: portal2vr
 
@@ -90,8 +89,8 @@ Installed 2026-09-18 via `scripts/install-toolchain.ps1`:
 
 Already present: Git, `gh` (authenticated), Python (Windows Store shim).
 
-Not installed: Vulkan SDK. CS2 is D3D11 only, so it matters solely for reading the
-portal2vr DXVK reference. Skipped to avoid competing with the CS2 download for bandwidth.
+Not installed: Vulkan SDK. CS2 defaults to D3D11 and that is where the HLAE hooks live,
+so the SDK matters only for the portal2vr reference or if the Vulkan backend is pursued. Skipped to avoid competing with the CS2 download for bandwidth.
 
 Note on CMake: 4.x rejects `cmake_minimum_required` below 3.5. HLAE declares 3.24, so
 it is unaffected, but other dependencies may not be.
