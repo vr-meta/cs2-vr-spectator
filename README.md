@@ -10,11 +10,11 @@ How it works: CS2's own stereo hooks are dead ends - the demo eye-offset convar 
 
 The pair is verified: at a real 63 mm interpupillary distance it differs only by viewpoint, and with the separation set to zero on a playing demo with live smoke the two eyes stay identical - so the simulation does not advance between passes, which is the error that would be unbearable in a headset. [Look at the pair](https://claude.ai/artifact/3iESVvwPKZjiEDLX9eAC8x).
 
-Two things stand between this and something pleasant to use:
+Open work is tracked as [GitHub issues](https://github.com/vr-meta/cs2-vr-spectator/issues). Two things stand between this and something pleasant to use:
 
-**Frame rate.** 38-48 frames/s where the headset wants 72, so SteamVR is reprojecting to fill the gap. The game's graphics settings have never been touched and are the obvious first lever.
+**Frame rate.** 38-48 frames/s where the headset wants 72, so SteamVR reprojects to fill the gap. Where it goes is now measured rather than guessed ([experiment 13](docs/experiments/13-where-the-frame-goes.md)): three scene traversals are about 11 ms of a 21-26 ms frame, so **more than half of a VR frame is not the game rendering at all** - it is the submission path and the runtime. The two levers everyone reaches for are spent: the graphics settings were already at minimum, the game having quietly auto-configured itself there, and resolution is worth 8% rather than the half it looks like. Trying Meta's runtime instead of SteamVR is now one launch argument.
 
-**Everything two-dimensional.** The demo's timeline, menu and player name tags all assume one camera and a screen, so in stereo they are doubled, misplaced, and unreachable. The answer is an OpenXR quad layer fed from HLAE's own before-UI hook - see [`docs/06-vr-experience-plan.md`](docs/06-vr-experience-plan.md).
+**Everything two-dimensional.** The demo's timeline and menu assume one camera and a screen. Both halves of the answer now exist and neither has been worn: `mirv_vr_xr ui out` takes the UI out of the eyes, and `mirv_vr_panel on` puts it on an OpenXR quad layer placed in space. Player name tags are a harder case and stay off - they are world-anchored, so no flat panel can carry them, and the cheap fix was tried and [does not work](docs/experiments/15-hud-per-eye.md).
 
 - [`src/`](src/) - the C++ this project wrote: a camera pose per render pass, and the OpenXR session that consumes it.
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
@@ -36,13 +36,21 @@ Two things stand between this and something pleasant to use:
 - [`docs/05-view-setup-point.md`](docs/05-view-setup-point.md) - the exact function where a per-pass camera must be applied, and why the config route failed.
 - [`docs/experiments/09-frames-in-the-headset.md`](docs/experiments/09-frames-in-the-headset.md) - **frames reach the headset.** The session, the swapchains, and the two problems only a headset reveals: the world swimming when the head turns, and a followed player's aim dragging your head with it.
 - [`docs/experiments/10-frame-budget.md`](docs/experiments/10-frame-budget.md) - what it costs: 38-48 frames/s against the 72 the headset wants, and a wasted render pass removed.
+- [`docs/experiments/11-seeking.md`](docs/experiments/11-seeking.md) - **seeking works and the timeline never crashed anything.** Twenty-three seeks including full-width slider drags. Direction is not what costs: a backward seek replays from the preceding keyframe, so ten seconds back can cost more than sixty forward. And Panorama takes synthetic mouse input, which we had assumed it did not.
+- [`docs/experiments/12-openxr-runtime.md`](docs/experiments/12-openxr-runtime.md) - choosing the OpenXR runtime for CS2 alone, through `XR_RUNTIME_JSON`, instead of the machine-wide registry change. No elevation, nothing left behind.
+- [`docs/experiments/13-where-the-frame-goes.md`](docs/experiments/13-where-the-frame-goes.md) - **more than half a VR frame is not rendering.** Three traversals are 11 ms of 21-26. The graphics settings were already at minimum and nobody knew; resolution is worth 8%. Also the trap that nearly ruined the measurement: `fps_max 120` lives in a file CS2 loads after the command line.
+- [`docs/experiments/14-when-the-ui-is-drawn.md`](docs/experiments/14-when-the-ui-is-drawn.md) - the UI is composited **once per pass**, so it really is baked into both eyes, and moving the capture to HLAE's before-UI hook takes it out.
+- [`docs/experiments/15-hud-per-eye.md`](docs/experiments/15-hud-per-eye.md) - the name tags, reproduced on a monitor at last, and the cheap fix disproved: asking the engine to rebuild its matrices puts the base camera back and cancels the stereo.
 - [`docs/06-vr-experience-plan.md`](docs/06-vr-experience-plan.md) - the plan for making it usable: the menu, the timeline, the controls, and why they all need to leave the back buffer.
 - [`docs/04-plan.md`](docs/04-plan.md) - the original plan, phases A to E. All of it is done; 06 is what comes next.
 - [`docs/patches/README.md`](docs/patches/README.md) - the changes made to HLAE, kept so they survive a re-clone: the build fix, and the per-pass camera itself.
 
 - [`docs/install.md`](docs/install.md) - how to get from a clean machine to CS2 rendering into a headset: build the hook, lay out the files, launch, the controls, and the shutdown order that avoids an unkillable process.
 
-Run [`scripts/check-toolchain.ps1`](scripts/check-toolchain.ps1) to see what the machine is missing; [`scripts/install-toolchain.ps1`](scripts/install-toolchain.ps1) installs it.
+- [`tests/`](tests/) - the parts that are a function of their arguments and nothing else: the geometry, the stick shaping, the plausibility check on the view struct, the steam.inf parsing. 226 checks, no engine, no headset, seconds in CI.
+- [`tools/xr-probe/`](tools/xr-probe/) - which OpenXR runtime a process would actually get. Needs no headset.
+
+Run [`scripts/check-toolchain.ps1`](scripts/check-toolchain.ps1) to see what the machine is missing; [`scripts/install-toolchain.ps1`](scripts/install-toolchain.ps1) installs it. [`scripts/check-patches.ps1`](scripts/check-patches.ps1) answers "do the patches still apply", against the pinned tag or against upstream `main`.
 
 ## Goal
 
