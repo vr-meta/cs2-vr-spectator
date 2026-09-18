@@ -18,6 +18,10 @@ on:
       - 'src/**'
       - 'docs/patches/**'
       - '.github/workflows/build-hook.yml'
+  schedule:
+    # Weekly, so upstream moving out from under the patches is noticed by itself rather
+    # than by someone trying to build.
+    - cron: '17 4 * * 1'
   workflow_dispatch:
 
 env:
@@ -28,8 +32,64 @@ env:
   OPENXR_VERSION: 1.1.63
 
 jobs:
+  # Two minutes and no toolchain. The patches stopped applying in sequence once already —
+  # 002 had been generated from a tree that already had 001 in it, so it carried 001's hunk
+  # too — and a full build is a slow way to be told that.
+  patches:
+    name: Patches apply
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          path: cs2-vr-spectator
+
+      - name: Check out advancedfx at the pinned revision
+        uses: actions/checkout@v4
+        with:
+          repository: advancedfx/advancedfx
+          ref: ${{ env.ADVANCEDFX_REF }}
+          path: advancedfx
+
+      - name: Apply
+        working-directory: advancedfx
+        run: |
+          cp ../cs2-vr-spectator/src/AfxHookSource2/* AfxHookSource2/
+          # The tree is CRLF; git apply preserves it, unlike anything sed-shaped.
+          git apply --verbose ../cs2-vr-spectator/docs/patches/001-vswhere-products.patch
+          git apply --verbose ../cs2-vr-spectator/docs/patches/002-per-pass-camera.patch
+
+  # The same check against upstream's moving branch. Advisory: upstream is allowed to move,
+  # we just want to know before someone hits it.
+  patches-upstream:
+    name: Patches apply (upstream main)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+        with:
+          path: cs2-vr-spectator
+
+      - name: Check out advancedfx main
+        uses: actions/checkout@v4
+        with:
+          repository: advancedfx/advancedfx
+          ref: main
+          path: advancedfx
+
+      - name: Apply
+        working-directory: advancedfx
+        run: |
+          cp ../cs2-vr-spectator/src/AfxHookSource2/* AfxHookSource2/
+          git apply --verbose ../cs2-vr-spectator/docs/patches/001-vswhere-products.patch
+          git apply --verbose ../cs2-vr-spectator/docs/patches/002-per-pass-camera.patch
+
   build:
+    name: Build AfxHookSource2
+    needs: patches
     runs-on: windows-2022
+    timeout-minutes: 90
 
     steps:
       - name: Check out this repository
@@ -52,7 +112,6 @@ jobs:
           # Our own files are real sources in this repository; only the edits to
           # advancedfx's own files are a patch.
           Copy-Item ../cs2-vr-spectator/src/AfxHookSource2/* AfxHookSource2/ -Force
-          # The tree is CRLF; git apply preserves it, unlike anything sed-shaped.
           git apply --verbose ../cs2-vr-spectator/docs/patches/001-vswhere-products.patch
           git apply --verbose ../cs2-vr-spectator/docs/patches/002-per-pass-camera.patch
 
@@ -72,7 +131,15 @@ jobs:
         run: |
           # AfxHookSource2 depends on ShaderBuilder, which is a C# project. Without this
           # the build fails with MSB3644, which does not say what is actually missing.
-          choco install netfx-4.6.2-devpack -y --no-progress
+          # The runner image may already carry it; installing over it is harmless, failing
+          # to install when it is already there is not a reason to stop.
+          $ref = "${env:ProgramFiles(x86)}\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.6.2"
+          if (Test-Path $ref) {
+            "Targeting pack already present at $ref"
+          } else {
+            choco install netfx-4.6.2-devpack -y --no-progress
+            if (-not (Test-Path $ref)) { throw "targeting pack still missing after install" }
+          }
 
       - name: Install Rust
         shell: pwsh
@@ -85,6 +152,8 @@ jobs:
       - name: Configure
         working-directory: advancedfx
         shell: pwsh
+        env:
+          AFXVR_OPENXR_DIR: ${{ github.workspace }}/openxr/pkg
         run: |
           cmake --preset x64-release -DAFXVR_OPENXR_DIR="${{ github.workspace }}/openxr/pkg"
 
@@ -95,6 +164,8 @@ jobs:
           # ShaderBuilder is invoked by bare name from the hook's CMakeLists, so its output
           # directory has to be on PATH first. Exit code 9009 here means "not found", not a
           # shader problem.
+          # The target is lowercase 'shaderbuilder' (its project() name); the directory it
+          # builds into is 'ShaderBuilder'. They are not the same word by accident here.
           cmake --build --preset x64-release --target shaderbuilder
           $env:Path = "${{ github.workspace }}/advancedfx/build/x64-release/ShaderBuilder;$env:Path"
           cmake --build --preset x64-release --target AfxHookSource2

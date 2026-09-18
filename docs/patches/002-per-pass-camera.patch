@@ -1,20 +1,28 @@
-﻿diff --git a/AfxHookSource2/CMakeLists.txt b/AfxHookSource2/CMakeLists.txt
-index 1d66528..c36ef7a 100644
+diff --git a/AfxHookSource2/CMakeLists.txt b/AfxHookSource2/CMakeLists.txt
+index 1d66528..9c58db7 100644
 --- a/AfxHookSource2/CMakeLists.txt
 +++ b/AfxHookSource2/CMakeLists.txt
-@@ -59,6 +59,11 @@ SET(AFXHOOKSOURCE2SNIPPETS_OUTPUTS ${AFXHOOKSOURCE2SNIPPETS_OUTPUTS} PARENT_SCOP
+@@ -59,6 +59,19 @@ SET(AFXHOOKSOURCE2SNIPPETS_OUTPUTS ${AFXHOOKSOURCE2SNIPPETS_OUTPUTS} PARENT_SCOP
  
  add_definitions(-DGAME_CS2)
  
 +# cs2-vr-spectator: OpenXR headers. The loader is opened by explicit path at runtime
 +# rather than linked, so only the include directory is needed here.
-+set(AFXVR_OPENXR_DIR "D:/Dev/cs2-vr-tools/openxr/pkg" CACHE PATH "OpenXR SDK root (headers under include/)")
++if(NOT DEFINED AFXVR_OPENXR_DIR AND DEFINED ENV{AFXVR_OPENXR_DIR})
++    set(AFXVR_OPENXR_DIR_DEFAULT "$ENV{AFXVR_OPENXR_DIR}")
++else()
++    set(AFXVR_OPENXR_DIR_DEFAULT "D:/Dev/cs2-vr-tools/openxr/pkg")
++endif()
++set(AFXVR_OPENXR_DIR "${AFXVR_OPENXR_DIR_DEFAULT}" CACHE PATH "OpenXR SDK root (headers under include/)")
++if(NOT EXISTS "${AFXVR_OPENXR_DIR}/include/openxr/openxr.h")
++    message(FATAL_ERROR "cs2-vr-spectator: OpenXR headers not found at ${AFXVR_OPENXR_DIR}/include/openxr/openxr.h -- pass -DAFXVR_OPENXR_DIR=<sdk root>, or set the AFXVR_OPENXR_DIR environment variable. See cs2-vr-spectator/docs/install.md.")
++endif()
 +target_include_directories(${PROJECT_NAME} PRIVATE "${AFXVR_OPENXR_DIR}/include")
 +
  #set_target_properties(
  #    ${PROJECT_NAME}
  #    PROPERTIES 
-@@ -248,6 +253,10 @@ target_sources(${PROJECT_NAME} PRIVATE
+@@ -248,6 +261,10 @@ target_sources(${PROJECT_NAME} PRIVATE
  
  	MirvTime.cpp
  	MirvTime.h
@@ -214,24 +222,3 @@ index efbea01..f6af405 100644
  	g_CampathDrawer.OnEngineThread_SetupViewDone();
  }
  
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index fcc9fd4..757338e 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -29,14 +29,14 @@ message(STATUS "AFX_RUST_CARGO_LOCKED=${AFX_RUST_CARGO_LOCKED}")
- #
- 
- execute_process(
--    COMMAND "$ENV{ProgramFiles\(x86\)}\\Microsoft Visual Studio\\Installer\\vswhere.exe" "-latest" "-version" "[17.0,18.0)" "-property" "installationPath"
-+    COMMAND "$ENV{ProgramFiles\(x86\)}\\Microsoft Visual Studio\\Installer\\vswhere.exe" "-latest" "-products" "*" "-version" "[17.0,18.0)" "-property" "installationPath"
-     OUTPUT_VARIABLE VS_INSTALLPATH
-     OUTPUT_STRIP_TRAILING_WHITESPACE
- )
- string(REPLACE "\\" "/" VS_INSTALLPATH ${VS_INSTALLPATH})
- 
- execute_process(
--    COMMAND "$ENV{ProgramFiles\(x86\)}\\Microsoft Visual Studio\\Installer\\vswhere.exe" "-latest" "-version" "[17.0,18.0)" "-requires" "Microsoft.Component.MSBuild" "-find" "MSBuild\\**\\**\\Bin\\MSBuild.exe"
-+    COMMAND "$ENV{ProgramFiles\(x86\)}\\Microsoft Visual Studio\\Installer\\vswhere.exe" "-latest" "-products" "*" "-version" "[17.0,18.0)" "-requires" "Microsoft.Component.MSBuild" "-find" "MSBuild\\**\\**\\Bin\\MSBuild.exe"
-     OUTPUT_VARIABLE VS_MSBUILD
-     OUTPUT_STRIP_TRAILING_WHITESPACE
- )
