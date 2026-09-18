@@ -8,7 +8,7 @@ There is no working CS2 VR integration or installable build yet. Native stereo r
 
 Milestone 1 is essentially done: integration points identified, environment pinned, and the first experiment run against the live game.
 
-Where it stands: CS2 own stereo hooks turned out to be dead ends - the demo eye-offset convar has no effect and the multiview path is absent from the build. But HLAE `mirv_input` moves the camera exactly and repeatably, so the eye can be moved after all. The open question is whether it can be moved per render pass rather than per frame, which is what stereo needs.
+Where it stands: CS2 own stereo hooks are dead ends - the demo eye-offset convar has no effect, the multiview path is absent. But the two pieces stereo actually needs both work: HLAE renders one frame twice with independent settings per pass, and `mirv_input` moves the camera exactly and repeatably. What is missing is joining them - moving the camera *per pass* rather than per frame, which needs a contained change to HLAE rather than more configuration.
 
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
@@ -17,6 +17,7 @@ Where it stands: CS2 own stereo hooks turned out to be dead ends - the demo eye-
 - [`docs/experiments/00-stereo-cvar-probe.md`](docs/experiments/00-stereo-cvar-probe.md) - the first experiment.
 - [`docs/experiments/00-results.md`](docs/experiments/00-results.md) - CS2 own stereo hooks are dead: the demo eye-offset convar has no effect, and the multiview path is absent.
 - [`docs/experiments/01-camera-control.md`](docs/experiments/01-camera-control.md) - `mirv_input` moves the camera exactly and repeatably, replacing the dead convar.
+- [`docs/experiments/02-multipass.md`](docs/experiments/02-multipass.md) - confirmed: HLAE renders one frame twice with independent settings per pass. The expensive half of stereo already exists.
 
 Run [`scripts/check-toolchain.ps1`](scripts/check-toolchain.ps1) to see what the machine is missing; [`scripts/install-toolchain.ps1`](scripts/install-toolchain.ps1) installs it.
 
