@@ -37,6 +37,19 @@ Status: **not yet run** — waiting on the CS2 download.
    be current. No building required for either tool unless the plugin fails.
 3. Launch CS2 with `-insecure -novid -allow_third_party_software`.
 
+## Prepared config files
+
+Two configs in [`../../scripts/cs2/`](../../scripts/cs2/) cover the console work.
+Copy both into `<CS2>\game\csgo\cfg\`:
+
+| File | Purpose |
+| --- | --- |
+| `exp00_dump.cfg` | `exec exp00_dump` — captures `version` and the full `cvarlist` to a log |
+| `exp00_probe.cfg` | `exec exp00_probe` — checks the four convars exist, binds the offset sweep to F5-F9 |
+
+`exp00_probe.cfg` changes nothing by itself, so the baseline screenshot can be taken
+before anything is altered.
+
 ## Step 1 — capture the ground-truth convar list
 
 Everything downstream depends on knowing what actually exists in *this* build, rather
