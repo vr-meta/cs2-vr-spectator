@@ -3,7 +3,7 @@
 **Build:** CS2 ClientVersion 2000908, PatchVersion 1.41.8.1, SourceRevision 10981323,
 dated 2026-09-09.
 **Run:** 2026-09-18, RTX 4070 Laptop (driver 32.0.15.9144), D3D11 backend, windowed 1280x720.
-**Tooling:** HLAE v2.192.2, `AfxHookSource2.dll` built 2026-09-12, injected via
+**Tooling:** HLAE v2.192.2, `AfxHookSource2.dll` built 2026-09-12, injected via `-customLoader -noGui -autoStart`. CS2 launched with `-insecure`, fullscreen.
 `-customLoader -noGui -autoStart`. CS2 launched with `-insecure`.
 
 Steps 1 and the convar half of the experiment are complete. The offset sweep and the
@@ -49,32 +49,55 @@ defensive`, but in this build it is not hidden at all.
 
 ### …and it has no effect
 
-Tested on the recorded bot demo. Screenshots were captured of the game window between
-key presses, so the crop is identical across the sweep, and compared pixel-wise over
-the scene area (UI excluded).
+Measured on a professional GOTV demo (MOUZ vs Natus Vincere, mirage, from HLTV),
+paused, POV of a player on Bombsite A — a frame with an ammo crate a few metres away
+and buildings across the site, so parallax would have somewhere to show.
 
-| offset | mean diff vs baseline | max channel diff |
-| --- | --- | --- |
-| -1.25 | 0.001 | 3 / 765 |
-| +1.25 | 0.002 | 3 / 765 |
-| +10   | 0.003 | 5 / 765 |
-| +10 with `cl_demoviewoverride 1` | 0.009 | 11 / 765 |
+| offset | mean diff vs baseline | max channel diff | pixels changed |
+| --- | --- | --- | --- |
+| -1.25 | 0 | 0 / 765 | 0% |
+| +1.25 | 0 | 1 / 765 | 0% |
+| +10   | 0 | 0 / 765 | 0% |
 
-That is render noise, not a camera move. A 10-unit offset is roughly a quarter of a
-metre; it would be unmissable.
+Not "small". Identical. A 10-unit offset is roughly a quarter of a metre and would be
+unmissable.
 
-**Conditions ruled out**, so the negative is not a measurement artefact:
+**Validity of this measurement** — each of these was checked, because the first attempt
+was invalid (see below):
 
-- The convar really was set — reading it back after the sweep returned `= 10`, which
-  also proves the synthetic key input reached the game.
-- Both in free roaming camera (`spec_mode 6`) and in the demo's default view.
-- Both paused and during playback, checked by eye while toggling the value — no lateral
-  jump at any point.
-- With `cl_demoviewoverride 1` as well as without.
-- HLAE attached and `mirv_cvar_unhide_all` applied (1929 convars unhidden), so nothing
-  was hidden or inert for lack of the hook.
+- **The demo really was playing.** Zero `Cannot process snapshot` errors in the log.
+- **The demo really was paused.** Two captures 1.5 s apart were byte-identical
+  (max channel diff 0), so the renderer was stable and noise-free.
+- **The binds were installed in this session**, confirmed in the log at 20:27:23, after
+  `mirv_cvar_unhide_all` reported 1929 convars unhidden.
+- **The key input reached the game.** Reading the convar back after an earlier sweep
+  returned `= 10`.
+- Also tested: free roaming camera and default view, paused and playing, with and
+  without `cl_demoviewoverride 1`. No lateral movement under any combination.
 
-The convar registers, stores values, and is read back correctly. Nothing consumes it.
+The convar registers, stores values and reads back correctly. Nothing consumes it.
+
+### The first attempt was invalid, and why
+
+The first sweep ran against a locally recorded bot demo and produced mean differences
+of 0.001–0.009, which was read as render noise around a dead convar. That reading was
+wrong — not in its conclusion, but in its evidence.
+
+That demo did not replay. The console filled with
+
+```
+Cannot process snapshot tick 4581, it is a delta from tick 4580, which we do not have
+```
+
+hundreds of times, and in-game nothing moved: bots frozen, camera unresponsive. The
+screenshots were of a still image, and **a still image cannot respond to a view offset**.
+The small non-zero differences were artefacts of the broken playback, not of rendering.
+
+The tell was in the log from the first minute and was dismissed as noise. It surfaced
+only when the operator noticed the bots were not moving.
+
+Lesson for later experiments: **verify the thing under test is alive before measuring
+its response.** A frozen scene and a dead convar produce the same screenshots.
 
 ## Finding 2: no multiview stereo path in this build
 

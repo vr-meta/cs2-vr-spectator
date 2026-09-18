@@ -118,3 +118,13 @@ Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion
 Get-Service OVRService, OVRLibraryService
 (Get-ItemProperty 'HKCU:\Software\Valve\Steam').SteamPath
 ```
+
+## Test demo
+
+`game/csgo/pro_mirage.dem` — MOUZ vs Natus Vincere, mirage, from the HLTV demo package
+for match 2398099 (StarLadder StarSeries Fall 2026). 308 MB, GOTV.
+
+A locally recorded bot demo was tried first and **did not replay** — the console filled
+with `Cannot process snapshot tick N, it is a delta from tick N-1, which we do not have`
+and the scene was frozen. Measurements taken against it were void. Prefer a GOTV demo:
+it also provides real smoke, grenades and movement, which is what stereo will break on.
