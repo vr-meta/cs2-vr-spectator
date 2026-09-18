@@ -143,10 +143,9 @@ ships and is maintained.
 
 What has to be replaced is only the cheap part — shifting the camera between passes:
 
-- **`mirv_input`**, HLAE's documented camera override, is the obvious candidate. It is
-  actively used for fragmovie work, so unlike the Valve convar it is known to function.
-  Unverified: whether it can be changed *per pass* rather than per frame, which is the
-  whole question.
+- **`mirv_input` works.** Confirmed in [experiment 01](01-camera-control.md): it sets the
+  camera position exactly and repeatably on a paused demo. Still unverified: whether it
+  can be changed *per pass* rather than per frame, which is now the whole question.
 - Failing that, a per-pass camera hook has to be added to HLAE's pass loop — more work,
   but in code that is MIT licensed and whose structure is already understood.
 
