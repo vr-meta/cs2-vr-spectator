@@ -234,6 +234,16 @@ XrAction g_SeekForwardAction = XR_NULL_HANDLE;
 XrAction g_SeekBackAction = XR_NULL_HANDLE;
 bool g_ActionsAttached = false;
 
+// Render the eye passes with no session and no headset. Nothing reaches a runtime; the
+// point is that the pass loop, the per-pass camera and the UI compositing order can all
+// be watched from a desk, which is the only way most of this project can be debugged
+// without a Quest on someone's head.
+int g_ForcedPasses = 0;
+
+// See MirvVrXr.h. Off by default: it removes the demo menu from the headset entirely, and
+// until there is a quad layer to put it back on, a wrongly-placed menu beats no menu.
+bool g_CaptureBeforeUi = false;
+
 bool g_PrevRecenter = false, g_PrevFreeLook = false, g_PrevReset = false, g_PrevPause = false;
 bool g_PrevNext = false, g_PrevPrev = false, g_PrevMode = false;
 bool g_PrevSlowMo = false, g_PrevSeekForward = false, g_PrevSeekBack = false;
@@ -809,11 +819,18 @@ bool MirvVrXr_IsRunning() {
     return XR_NULL_HANDLE != g_Instance;
 }
 
+bool MirvVrXr_CaptureBeforeUi() {
+    return g_CaptureBeforeUi;
+}
+
 bool MirvVrXr_WantsPasses() {
     // As soon as the session is running, not once it is visible. The runtime only
     // advances a session past READY when the application starts its frame loop, so
     // waiting for SYNCHRONIZED before running it means it never starts.
-    return g_SessionRunning;
+    //
+    // Or when forced, with no session and no headset, so the pass machinery can be
+    // watched at a desk. Nothing is submitted in that case - see SubmitEye.
+    return g_SessionRunning || 0 < g_ForcedPasses;
 }
 
 bool MirvVrXr_Start() {
@@ -1033,6 +1050,9 @@ void MirvVrXr_EngineThread_Frame() {
 void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
     if (eyeIndex < 0 || eyeIndex > 1) return;
     if (!pContext || !pTexture) return;
+    // Forced passes render but go nowhere: every call below needs a session, and half the
+    // function pointers are null without one.
+    if (!g_SessionRunning) return;
 
     if (0 == eyeIndex) {
         if (!MirvVrXr_WantsPasses()) return;
@@ -1196,6 +1216,34 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         if (!_stricmp(arg1, "start"))   { MirvVrXr_SessionStart(); return; }
         if (!_stricmp(arg1, "stop"))    { MirvVrXr_SessionStop(); AfxVr_SetEye(1,false,0,0,0,0,0,0,0); AfxVr_SetEye(2,false,0,0,0,0,0,0,0); advancedfx::Message("AFXVR: session stopped.\n"); return; }
         if (!_stricmp(arg1, "quit"))    { MirvVrXr_Stop(); advancedfx::Message("AFXVR: disconnected.\n"); return; }
+        if (!_stricmp(arg1, "ui")) {
+            if (3 <= args->ArgC()) {
+                // "in" keeps the UI in the eyes, "out" takes it out.
+                g_CaptureBeforeUi = (0 == _stricmp(args->ArgV(2), "out"));
+            } else {
+                g_CaptureBeforeUi = !g_CaptureBeforeUi;
+            }
+            advancedfx::Message(
+                "AFXVR: the UI is now %s the eyes.\n"
+                "  %s\n"
+                "  Takes effect on the next frame; no need to restart the session.\n",
+                g_CaptureBeforeUi ? "OUT of" : "IN",
+                g_CaptureBeforeUi
+                    ? "The world is clean, and the demo menu is not visible at all."
+                    : "The menu is there, at screen depth, in both eyes - which is wrong but readable.");
+            return;
+        }
+        if (!_stricmp(arg1, "passes")) {
+            g_ForcedPasses = (3 <= args->ArgC()) ? atoi(args->ArgV(2)) : 2;
+            if (g_ForcedPasses < 0) g_ForcedPasses = 0;
+            advancedfx::Message(
+                "AFXVR: forcing %i extra render passes with no session.\n"
+                "  Nothing is submitted anywhere. This exists so the pass loop and the\n"
+                "  per-pass camera can be watched without a headset - arm mirv_vr_log and\n"
+                "  read game/csgo/console.log.\n",
+                g_ForcedPasses);
+            return;
+        }
         if (!_stricmp(arg1, "fps")) {
             g_LogFps = (3 <= args->ArgC()) ? (0 != atoi(args->ArgV(2))) : !g_LogFps;
             advancedfx::Message("AFXVR: frame logging %s. Last measured: %.1f frames/s at %ux%u per eye.\n",
@@ -1209,7 +1257,9 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         "mirv_vr_xr start - create the session and start sending frames to the headset.\n"
         "mirv_vr_xr stop  - stop sending frames, keep the connection.\n"
         "mirv_vr_xr quit  - disconnect entirely.\n"
-        "mirv_vr_xr fps [0|1] - log submitted frames per second.\n"
+        "mirv_vr_xr fps [0|1] - log submitted frames per second, and where they go.\n"
+        "mirv_vr_xr passes [n] - render n extra passes with no session, for debugging.\n"
+        "mirv_vr_xr ui in|out - whether the HUD and demo menu are baked into the eyes.\n"
         "\n"
         "Instance: %s, session: %s, state %i, submitting: %s\n"
         "Last measured: %.1f frames/s at %ux%u per eye.\n",

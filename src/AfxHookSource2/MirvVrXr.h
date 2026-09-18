@@ -39,5 +39,17 @@ bool MirvVrXr_WantsPasses();
 // would mean the session could never start.
 void MirvVrXr_EngineThread_Frame();
 
-// Render thread, from the pass's BeforePresent command. eyeIndex is 0 or 1.
+// Render thread, from the pass's BeforeUi or BeforePresent command. eyeIndex is 0 or 1.
 void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture);
+
+// Which of the two capture points the eyes are taken from.
+//
+// BeforeUi fires once per render pass, immediately before that pass's UI is composited -
+// measured, in docs/experiments/14-when-the-ui-is-drawn.md, not assumed. Capturing there
+// gives eyes with no HUD and no demo menu baked in, which is what stereo wants: a flat
+// overlay at screen depth is drawn at the wrong distance in a headset and doubled besides.
+//
+// BeforePresent is where this started, and keeps the UI. Still the default until the quad
+// layer that replaces it exists, because a viewer with a wrong menu is better off than one
+// with no menu at all.
+bool MirvVrXr_CaptureBeforeUi();

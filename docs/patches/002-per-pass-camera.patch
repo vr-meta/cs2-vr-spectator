@@ -70,7 +70,7 @@ index cea3626..ad2a751 100644
          }
      }
 diff --git a/AfxHookSource2/RenderSystemDX11Hooks.cpp b/AfxHookSource2/RenderSystemDX11Hooks.cpp
-index 73b7c00..d3ea691 100644
+index 73b7c00..4f24381 100644
 --- a/AfxHookSource2/RenderSystemDX11Hooks.cpp
 +++ b/AfxHookSource2/RenderSystemDX11Hooks.cpp
 @@ -8,6 +8,8 @@
@@ -94,7 +94,41 @@ index 73b7c00..d3ea691 100644
  CRenderCommands g_RenderCommands;
  
  bool g_bEnableReShade = true;
-@@ -2986,6 +2993,13 @@ public:
+@@ -1913,6 +1920,15 @@ public:
+                 if (pRenderTargetViews[0]) pRenderTargetViews[0]->Release();
+             }
+ 
++            // cs2-vr-spectator: the UI is composited here, once the scene is finished.
++            // Whether that happens once a frame or once a pass decides whether the eyes
++            // have the HUD baked into them, which decides how issues #2 and #3 can be
++            // solved at all. Cheap, and silent unless mirv_vr_log armed it.
++            if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
++                advancedfx::Message("AFXVR: frame=%i pass=%i BeforeUi (render thread)\n",
++                    g_AfxVrFrameIndex, g_AfxVrPassIndex);
++            }
++
+             ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
+             pDeviceContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
+             if (pRenderTargetViews[0]) {
+@@ -2188,6 +2204,17 @@ void Before_Present() {
+ 
+     if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
+     {
++        // cs2-vr-spectator: the point after the UI has been composited. Note it reads
++        // through g_BeforeUiRT, the render target captured at the BeforeUi point, so the
++        // contents by now include whatever the UI drew into it.
++        //
++        // Do not read anything into the queue being non-empty here: HLAE queues its own
++        // work on it too. Which point an eye was actually captured at is reported by the
++        // capture itself, below.
++        if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
++            advancedfx::Message("AFXVR: frame=%i pass=%i BeforePresent (render thread)\n",
++                g_AfxVrFrameIndex, g_AfxVrPassIndex);
++        }
+         if(!pRenderPassCommands->BeforePresent.Empty()) {
+             ID3D11Resource* pRenderTargetViewResource = nullptr;
+             if(g_BeforeUiRT) {
+@@ -2986,6 +3013,13 @@ public:
      void EngineThread_Prepare() {
          m_RecordingExtraPassesIterator = m_RecordingExtraPasses.begin();
  
@@ -108,7 +142,7 @@ index 73b7c00..d3ea691 100644
          if (m_Recording) {
              if (m_AutoForceFullReSmoke) {
                  if (!m_Restore_smoke_volume_lod_ratio_change) {
-@@ -3012,10 +3026,36 @@ public:
+@@ -3012,10 +3046,49 @@ public:
      }
  
      bool EngineThread_HasNextRenderPass() {
@@ -137,16 +171,29 @@ index 73b7c00..d3ea691 100644
 +            int eyeIndex = m_VrPassesDone;
 +            m_VrPassesDone++;
 +            auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
-+            pRenderPassCommands.BeforePresent.Push(
-+                [eyeIndex](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
-+                    MirvVrXr_RenderThread_SubmitEye(eyeIndex, pDeviceContext, pTexture);
-+                });
++            bool beforeUi = MirvVrXr_CaptureBeforeUi();
++            auto submit = [eyeIndex, beforeUi](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
++                if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
++                    advancedfx::Message("AFXVR: eye %i captured at %s (render thread)\n",
++                        eyeIndex, beforeUi ? "BeforeUi" : "BeforePresent");
++                }
++                MirvVrXr_RenderThread_SubmitEye(eyeIndex, pDeviceContext, pTexture);
++            };
++            // BeforeUi fires once per pass, immediately before that pass's UI is
++            // composited, so capturing there gives an eye with no HUD and no demo menu in
++            // it. BeforePresent is after, and keeps them. Measured in
++            // docs/experiments/14-when-the-ui-is-drawn.md; mirv_vr_xr ui switches it.
++            if (MirvVrXr_CaptureBeforeUi()) {
++                pRenderPassCommands.BeforeUi.Push(submit);
++            } else {
++                pRenderPassCommands.BeforePresent.Push(submit);
++            }
 +        }
 +
          auto it = m_RecordingExtraPassesIterator;
          while(it != m_RecordingExtraPasses.end()) {
              it->EngineThread_BeginFrame();
-@@ -3041,6 +3081,13 @@ public:
+@@ -3041,6 +3114,13 @@ public:
      }    
  
      void EngineThread_BeginMainRenderPass() {
@@ -160,7 +207,7 @@ index 73b7c00..d3ea691 100644
          for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
              it->EngineThread_BeginFrame();
          }
-@@ -3563,6 +3610,10 @@ private:
+@@ -3563,6 +3643,10 @@ private:
      std::multiset<CStream,RenderPassCompare> m_RecordingExtraPasses;
      std::multiset<CStream,RenderPassCompare>::iterator m_RecordingExtraPassesIterator;
  

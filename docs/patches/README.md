@@ -156,11 +156,28 @@ build or my change?".
 
 ### Note on applying patches to this tree
 
-Do not use `sed -i` on these files. The tree uses CRLF, and Git Bash `sed` rewrote every
-line ending on the first attempt — a two-line change showed up as 262 insertions and 262
-deletions. Use a method that preserves bytes, e.g. PowerShell:
+Do not use `sed -i`, `awk`, or anything else from Git Bash that rewrites a whole file. The
+tree uses CRLF, and these strip it — a two-line change showed up as 262 insertions and 262
+deletions the first time, and an eight-line insertion later came out as a 10,820-line diff
+of `RenderSystemDX11Hooks.cpp`. It happens quietly; nothing warns.
+
+**Always check with `git diff --stat` before regenerating a patch.** A hunk you wrote is a
+handful of lines. Thousands means the line endings went, not the code.
+
+Use a method that preserves bytes, e.g. PowerShell:
 
 ```powershell
 $raw = [IO.File]::ReadAllText($path)
-[IO.File]::WriteAllText($path, $raw.Replace($old, $new))
+[IO.File]::WriteAllText($path, $raw.Replace($old, $new), (New-Object Text.UTF8Encoding($false)))
 ```
+
+To put a file back after it has happened:
+
+```powershell
+$raw = [IO.File]::ReadAllText($path) -replace "`r`n", "`n" -replace "`n", "`r`n"
+[IO.File]::WriteAllText($path, $raw, (New-Object Text.UTF8Encoding($false)))
+```
+
+`scripts/check-patches.ps1` verifies the result applies to a clean checkout, and the
+repository's `.gitattributes` keeps git from rewriting the patch files themselves — it was
+doing exactly that, silently, for the whole first half of this project.
