@@ -126,6 +126,38 @@ view, in which case find it in the captured convar list. This is the built-in
 alternative to the HLAE `mirv_input` camera override, and if it works it is preferable:
 no injection.
 
+## Step 6 — two passes in one frame
+
+Only worth doing if step 3 showed the offset working. Requires HLAE
+([advancedfx](https://github.com/advancedfx/advancedfx), MIT) attached to CS2.
+
+Per [`../02-hlae-multipass-analysis.md`](../02-hlae-multipass-analysis.md), streams with
+differing `BeforeCommands` are rendered in separate passes of the same frame. So:
+
+```
+mirv_streams add afxDefault left
+mirv_streams edit left settings ... (BeforeCommands: cl_demo_view_offset_left -1.25)
+mirv_streams add afxDefault right
+mirv_streams edit right settings ... (BeforeCommands: cl_demo_view_offset_left 1.25)
+mirv_streams record start
+```
+
+Exact command syntax to be confirmed against `mirv_streams` built-in help — invoking a
+command with no arguments prints it.
+
+On a paused demo, capture one frame and compare the two outputs. What to determine:
+
+- Do the two passes actually differ by the eye offset?
+- Is the scene identical otherwise — same particle state, same smoke, same animation
+  pose? Any difference means the simulation advanced between passes, which would be
+  disqualifying.
+- How long does a two-pass frame take? This is the first real data point on whether the
+  multi-pass path can fit a VR frame budget rather than an offline capture one.
+
+A positive result here means the stereo half of the project is reachable by composing
+existing parts, and the remaining work is pose input plus getting the pass results to
+the compositor as textures instead of files.
+
 ## Recording results
 
 Write findings to `docs/experiments/00-results.md`, including:

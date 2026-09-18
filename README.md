@@ -10,6 +10,7 @@ Milestone 1 is in progress. Desk research is written up; nothing has been run ag
 
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
+- [`docs/02-hlae-multipass-analysis.md`](docs/02-hlae-multipass-analysis.md) - HLAE already re-renders the CS2 scene several times per frame from one simulation state, which is the core of what stereo needs.
 - [`docs/experiments/00-stereo-cvar-probe.md`](docs/experiments/00-stereo-cvar-probe.md) - the first experiment, ready to run once CS2 finishes installing.
 
 ## Goal

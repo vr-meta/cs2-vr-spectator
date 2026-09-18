@@ -146,8 +146,11 @@ boundary of `-insecure` local demo playback only, and incompatible with anything
    view offset is live, the work becomes feeding poses in and taking two targets out.
    Cheapest by a wide margin. Unknown whether it is possible at all.
 2. **Engine-level second view pass.** Drive a second scene traversal through the
-   `RenderService` / `SceneSystem` hooks HLAE already establishes. Correct results,
-   substantial reverse engineering, breaks on patches.
+   `RenderService` / `SceneSystem` hooks HLAE already establishes. Correct results.
+   **Revised after reading the HLAE source — see [`02-hlae-multipass-analysis.md`](02-hlae-multipass-analysis.md):
+   this is much cheaper than first assumed. HLAE already re-renders the scene N times
+   per frame from one simulation state, and applies per-pass convars while doing it.
+   Combined with option 1 it may be the whole answer.**
 3. **Alternate-eye rendering.** Alternate the eye per frame at the presentation hook.
    On a *paused* demo this is exact and nearly free, which fits the primary use case;
    during playback it halves the rate and introduces judder.
