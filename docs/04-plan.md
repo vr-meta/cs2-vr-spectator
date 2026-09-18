@@ -84,9 +84,14 @@ because the view is resolved before per-pass commands run. Only the deeper chang
 remains:
 
 1. ~~Allow concommands in `beforeCommands`~~ — already supported, and ineffective.
-2. **Apply a per-stream camera offset inside the render path**, at the point where a
-   pass obtains its view, downstream of the `mirv_input` override. More invasive, and now
-   the only option.
+2. **Apply a per-stream camera offset inside the render path.** The exact location is
+   identified in [`05-view-setup-point.md`](05-view-setup-point.md):
+   `CS2_Client_CSetupView_Trampoline_IsPlayingDemo` in `AfxHookSource2/main.cpp:637`,
+   where every HLAE camera override is applied. Now the only option.
+
+**First question of phase B, and it decides the cost:** does that trampoline run once per
+frame or once per render pass? Cheap to answer - add a log line, rebuild, record two
+streams, count the calls.
 
 **Done when:** one paused frame produces two images that differ *only* by a camera
 translation, with correct parallax — near geometry shifting more than far.

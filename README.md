@@ -20,6 +20,8 @@ Where it stands: CS2 own stereo hooks are dead ends - the demo eye-offset convar
 - [`docs/experiments/02-multipass.md`](docs/experiments/02-multipass.md) - confirmed: HLAE renders one frame twice with independent settings per pass. The expensive half of stereo already exists.
 - [`docs/experiments/03-per-pass-camera.md`](docs/experiments/03-per-pass-camera.md) - the camera cannot be changed per pass from config: the view is resolved before pass commands run. Needs a change inside the render path.
 
+- [`docs/workflow.md`](docs/workflow.md) - how experiments are run here: division of labour, launch, capture, and the rules that earned their place.
+- [`docs/05-view-setup-point.md`](docs/05-view-setup-point.md) - the exact function where a per-pass camera must be applied, and why the config route failed.
 - [`docs/04-plan.md`](docs/04-plan.md) - the plan from here: build HLAE, add a per-pass camera, prove a stereo pair on disk, then the VR bridge.
 
 Run [`scripts/check-toolchain.ps1`](scripts/check-toolchain.ps1) to see what the machine is missing; [`scripts/install-toolchain.ps1`](scripts/install-toolchain.ps1) installs it.
