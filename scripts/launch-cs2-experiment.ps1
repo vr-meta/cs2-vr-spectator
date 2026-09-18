@@ -35,6 +35,7 @@ if (-not (Get-Process steam -ErrorAction SilentlyContinue)) {
 $gameArgs = @(
     '-insecure'
     '-novid'
+    '-condebug'                     # CS2 has no con_logfile; this writes game/csgo/console.log
     '-allow_third_party_software'
     '+con_enable', '1'
 )

@@ -12,7 +12,8 @@ Milestone 1 is in progress. Desk research is written up; nothing has been run ag
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
 - [`docs/02-hlae-multipass-analysis.md`](docs/02-hlae-multipass-analysis.md) - HLAE already re-renders the CS2 scene several times per frame from one simulation state, which is the core of what stereo needs.
 - [`docs/03-vr-bridge-sketch.md`](docs/03-vr-bridge-sketch.md) - where the per-eye textures would come from, and the problems that sketch has to survive.
-- [`docs/experiments/00-stereo-cvar-probe.md`](docs/experiments/00-stereo-cvar-probe.md) - the first experiment, ready to run once CS2 finishes installing.
+- [`docs/experiments/00-stereo-cvar-probe.md`](docs/experiments/00-stereo-cvar-probe.md) - the first experiment.
+- [`docs/experiments/00-results.md`](docs/experiments/00-results.md) - results so far: the demo eye-offset convar exists in the live build; the multiview stereo path does not.
 
 Run [`scripts/check-toolchain.ps1`](scripts/check-toolchain.ps1) to see what the machine is missing; [`scripts/install-toolchain.ps1`](scripts/install-toolchain.ps1) installs it.
 
