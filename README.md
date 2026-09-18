@@ -10,7 +10,9 @@ Milestone 1 is done, and **stereo rendering inside CS2 now works**: one paused f
 
 How it stands: CS2's own stereo hooks are dead ends - the demo eye-offset convar has no effect, the multiview path is absent. Stereo instead comes from HLAE's multi-pass rendering, which re-renders one frame several times, plus a change of ours that gives each pass its own camera. The camera turned out to be resolved once per frame, outside the pass loop - but the object holding it is persistent and re-read by every pass, so rewriting it between passes separates the eyes.
 
-Next: prove the pair is correct on the content most likely to break it (smoke, particles, shadows), then the OpenXR bridge, then the frame budget - three scene traversals against 13.9 ms at 72 Hz, which is the remaining risk.
+The pair is also verified: at a real 63 mm interpupillary distance it differs only by viewpoint, and with the separation set to zero on a playing demo with live smoke the two eyes stay identical - so the simulation does not advance between passes, which is the error that would be unbearable in a headset. [Look at the pair](https://claude.ai/artifact/3iESVvwPKZjiEDLX9eAC8x).
+
+Next: the OpenXR bridge - per-eye projection and resolution, head tracking angles, and a GPU-to-GPU copy into the swapchain - then the frame budget, three scene traversals against 13.9 ms at 72 Hz, which is the remaining risk.
 
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
@@ -21,6 +23,7 @@ Next: prove the pair is correct on the content most likely to break it (smoke, p
 - [`docs/experiments/01-camera-control.md`](docs/experiments/01-camera-control.md) - `mirv_input` moves the camera exactly and repeatably, replacing the dead convar.
 - [`docs/experiments/02-multipass.md`](docs/experiments/02-multipass.md) - confirmed: HLAE renders one frame twice with independent settings per pass. The expensive half of stereo already exists.
 - [`docs/experiments/03-per-pass-camera.md`](docs/experiments/03-per-pass-camera.md) - the camera cannot be changed per pass from config: the view is resolved before pass commands run. Needs a change inside the render path.
+- [`docs/experiments/05-stereo-pair.md`](docs/experiments/05-stereo-pair.md) - **the pair is correct.** At 63 mm separation it differs only by viewpoint; with separation 0 on a playing demo the eyes stay identical while consecutive frames differ by up to 98%, so nothing advances between passes.
 - [`docs/experiments/04-per-pass-camera.md`](docs/experiments/04-per-pass-camera.md) - **stereo works.** The view setup runs once per frame, outside the pass loop, but the `CViewSetup` it fills is persistent and re-read per pass. Rewriting it there gives each eye its own camera: control take 0.00% differing, test take 88.89% with correct parallax.
 
 - [`docs/workflow.md`](docs/workflow.md) - how experiments are run here: division of labour, launch, capture, and the rules that earned their place.

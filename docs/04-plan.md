@@ -112,6 +112,19 @@ translation, with correct parallax — near geometry shifting more than far. **M
 
 ## Phase C — stereo pair on disk
 
+**DONE 2026-09-18.** See [`experiments/05-stereo-pair.md`](experiments/05-stereo-pair.md).
+
+At a real interpupillary distance (2.5 units = 63 mm) the pair differs only by viewpoint,
+and the parallax matches the arithmetic. The decisive test was the temporal one: with
+separation 0 on a *playing* demo with live smoke, the eyes stay identical to within
+dithering (max 3 of 255) while consecutive frames differ by up to 98% and max 255. The
+simulation does not advance between passes.
+
+The one frame that deviated further put all of it in the kill feed — a UI fade driven by
+wall-clock time — with the volumetric smoke identical to the byte.
+
+Original intent, all of it met:
+
 Before any VR hardware is involved, prove the images are correct.
 
 - Left and right eye of the same frozen frame, at a real interpupillary distance.

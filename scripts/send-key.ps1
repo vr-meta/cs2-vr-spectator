@@ -40,19 +40,33 @@ public class SendKeyOne {
     [DllImport("user32.dll")] public static extern ushort MapVirtualKey(uint uCode, uint uMapType);
 
     // Windows refuses a foreground steal unless the caller shares the foreground
-    // thread's input queue. Attaching to it makes the call succeed.
+    // thread's input queue, or unless input is "active". Two workarounds, tried in
+    // order, because neither is reliable on its own.
     public static bool Focus(IntPtr target) {
-        IntPtr fg = GetForegroundWindow();
-        if (fg == target) return true;
-        uint fgThread = GetWindowThreadProcessId(fg, IntPtr.Zero);
-        uint myThread = GetCurrentThreadId();
-        AttachThreadInput(myThread, fgThread, true);
-        ShowWindow(target, 9 /* SW_RESTORE */);
-        BringWindowToTop(target);
-        SetForegroundWindow(target);
-        AttachThreadInput(myThread, fgThread, false);
-        System.Threading.Thread.Sleep(250);
-        return GetForegroundWindow() == target;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (GetForegroundWindow() == target) return true;
+
+            // 1. Share the foreground thread's input queue.
+            uint fgThread = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
+            uint myThread = GetCurrentThreadId();
+            AttachThreadInput(myThread, fgThread, true);
+            ShowWindow(target, 9 /* SW_RESTORE */);
+            BringWindowToTop(target);
+            SetForegroundWindow(target);
+            AttachThreadInput(myThread, fgThread, false);
+            System.Threading.Thread.Sleep(200);
+            if (GetForegroundWindow() == target) return true;
+
+            // 2. A synthetic ALT tap makes Windows treat the caller as active, which
+            //    lifts the same restriction. Ugly, documented, and it works.
+            Tap(0x12 /* VK_MENU */);
+            SetForegroundWindow(target);
+            System.Threading.Thread.Sleep(200);
+            if (GetForegroundWindow() == target) return true;
+
+            System.Threading.Thread.Sleep(300);
+        }
+        return false;
     }
 
     public static void Tap(ushort vk) {
