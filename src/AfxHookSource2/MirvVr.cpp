@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "MirvVr.h"
+#include "MirvVrMath.h"
 
 #include "WrpConsole.h"
 
@@ -8,13 +9,27 @@
 
 #define _USE_MATH_DEFINES
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+// For GetModuleFileNameA: the game's own steam.inf is found relative to the running
+// executable, which is the only way to learn the build number from in here.
+#include <windows.h>
 
 // Field offsets into the view struct the trampoline receives, which is CViewRender+0x10
 // for CS2 build 2000908. These move on game updates - see docs/05-view-setup-point.md.
+//
+// When they do move, nothing fails to load and nothing complains: the hook writes floats
+// into whatever now lives at those addresses. Everything below the offsets exists to make
+// that loud instead of silent - the build number is compared against the one they were
+// measured on, and every write is gated on the values reading back like a camera.
 #define AFXVR_OFS_FOV     0x498
 #define AFXVR_OFS_ORIGIN  0x4a0
 #define AFXVR_OFS_ANGLES  0x4b8
+
+// The CS2 ClientVersion the offsets above were measured against.
+#define AFXVR_TESTED_CLIENT_VERSION "2000908"
 
 int g_AfxVrLogUntilFrame = 0;
 
@@ -47,29 +62,100 @@ float g_MoveOffset[3] = { 0.0f, 0.0f, 0.0f };
 // viewer is looking rather than where the map's X axis points.
 float g_LastViewYaw = 0.0f;
 
-// Source's AngleVectors, for angles in degrees as (pitch, yaw, roll).
-void AngleVectors(const float angles[3], float forward[3], float right[3], float up[3]) {
-    const double d = M_PI / 180.0;
-    double sp = sin(angles[0] * d), cp = cos(angles[0] * d);
-    double sy = sin(angles[1] * d), cy = cos(angles[1] * d);
-    double sr = sin(angles[2] * d), cr = cos(angles[2] * d);
-
-    forward[0] = (float)(cp * cy);
-    forward[1] = (float)(cp * sy);
-    forward[2] = (float)(-sp);
-
-    right[0] = (float)(-sr * sp * cy + cr * sy);
-    right[1] = (float)(-sr * sp * sy - cr * cy);
-    right[2] = (float)(-sr * cp);
-
-    up[0] = (float)(cr * sp * cy + sr * sy);
-    up[1] = (float)(cr * sp * sy - sr * cy);
-    up[2] = (float)(cr * cp);
-}
-
 bool AnyEyeEnabled() {
     for (int i = 1; i < 4; i++) if (g_Eyes[i].enabled) return true;
     return false;
+}
+
+// --- does the view struct still look like a view struct? ---------------------------
+
+// Latched so the log does not fill with the same sentence sixty times a second, and so
+// the first transition in either direction is reported exactly once.
+bool g_ViewPlausible = true;
+bool g_ReportedImplausible = false;
+bool g_ReportedRecovered = false;
+const char * g_LastImplausibleReason = nullptr;
+
+// What steam.inf says, read once. Empty when it could not be read at all, which is not
+// itself a problem - a missing file says nothing about the offsets.
+char g_GameClientVersion[64] = "";
+bool g_CheckedGameBuild = false;
+bool g_GameBuildMatches = false;
+
+bool ReadWholeFile(const char * path, char * out, size_t outSize) {
+    FILE * f = nullptr;
+    if (0 != fopen_s(&f, path, "rb") || !f) return false;
+    size_t n = fread(out, 1, outSize - 1, f);
+    fclose(f);
+    out[n] = '\0';
+    return true;
+}
+
+void CheckGameBuildOnce() {
+    if (g_CheckedGameBuild) return;
+    g_CheckedGameBuild = true;
+
+    char exePath[MAX_PATH] = "";
+    if (0 == GetModuleFileNameA(NULL, exePath, sizeof(exePath))) return;
+
+    char infPath[MAX_PATH] = "";
+    if (!AfxVrMath::SteamInfPathFromExe(exePath, infPath, sizeof(infPath))) return;
+
+    char text[4096];
+    if (!ReadWholeFile(infPath, text, sizeof(text))) return;
+
+    if (!AfxVrMath::SteamInfValue(text, "ClientVersion", g_GameClientVersion, sizeof(g_GameClientVersion))) {
+        g_GameClientVersion[0] = '\0';
+        return;
+    }
+
+    g_GameBuildMatches = (0 == strcmp(g_GameClientVersion, AFXVR_TESTED_CLIENT_VERSION));
+    if (g_GameBuildMatches) {
+        advancedfx::Message("AFXVR: CS2 build %s, the one the view offsets were measured on.\n",
+            g_GameClientVersion);
+    } else {
+        advancedfx::Warning(
+            "AFXVR: CS2 build %s, but the view field offsets were measured on %s.\n"
+            "AFXVR: They may have moved. If the camera behaves oddly or the game crashes on\n"
+            "AFXVR: entering VR, that is the first thing to suspect. Re-measuring is described\n"
+            "AFXVR: in docs/05-view-setup-point.md; mirv_vr_selftest reports what is read back.\n",
+            g_GameClientVersion, AFXVR_TESTED_CLIENT_VERSION);
+    }
+}
+
+// Every write into the view struct goes through this. The offsets are a guess about
+// another program's memory layout, and the moment the values stop looking like a camera
+// the honest thing to do is stop writing rather than corrupt whatever is there now.
+bool ViewIsPlausible() {
+    AfxVrMath::ViewCheck r = AfxVrMath::CheckView(g_BaseOrigin, g_BaseAngles, g_BaseFov);
+
+    if (!r.ok) {
+        g_ViewPlausible = false;
+        g_LastImplausibleReason = r.why;
+        if (!g_ReportedImplausible) {
+            g_ReportedImplausible = true;
+            g_ReportedRecovered = false;
+            advancedfx::Warning(
+                "AFXVR: refusing to write the eye pose: %s.\n"
+                "AFXVR: read back origin=(%f,%f,%f) angles=(%f,%f,%f) fov=%f\n"
+                "AFXVR: This is what a game update looks like from in here. The offsets in\n"
+                "AFXVR: MirvVr.cpp are for CS2 build %s; this game is build %s.\n",
+                r.why,
+                g_BaseOrigin[0], g_BaseOrigin[1], g_BaseOrigin[2],
+                g_BaseAngles[0], g_BaseAngles[1], g_BaseAngles[2], g_BaseFov,
+                AFXVR_TESTED_CLIENT_VERSION,
+                g_GameClientVersion[0] ? g_GameClientVersion : "unknown");
+        }
+        return false;
+    }
+
+    g_ViewPlausible = true;
+    if (g_ReportedImplausible && !g_ReportedRecovered) {
+        g_ReportedRecovered = true;
+        g_ReportedImplausible = false;
+        advancedfx::Message("AFXVR: the view struct reads like a camera again; writing resumed.\n");
+    }
+    return true;
 }
 
 } // namespace
@@ -95,6 +181,10 @@ void AfxVr_AfterViewSetup(void * pViewStruct, float tx, float ty, float tz,
     g_BaseAngles[0] = rx; g_BaseAngles[1] = ry; g_BaseAngles[2] = rz;
     g_BaseFov = fov;
 
+    // Cheap, and the first frame is the right moment: the game is fully up by the time a
+    // view is being set up, and the answer is wanted before anything is written.
+    CheckGameBuildOnce();
+
     if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
         advancedfx::Message(
             "AFXVR: frame=%i pass=%i SetupView this=%p org=(%f,%f,%f) ang=(%f,%f,%f) fov=%f\n",
@@ -105,6 +195,12 @@ void AfxVr_AfterViewSetup(void * pViewStruct, float tx, float ty, float tz,
 void AfxVr_OnBeginRenderPass(int passIndex) {
     if (nullptr == g_ViewStruct || !AnyEyeEnabled()) return;
     if (passIndex < 0 || passIndex > 3) return;
+
+    // Gate on what came back out of the struct rather than on a version number: a build
+    // can change without moving these fields, and these fields can move without the tool
+    // knowing which build it is. What matters is whether the last read looked like a
+    // camera.
+    if (!ViewIsPlausible()) return;
 
     const Eye & eye = g_Eyes[passIndex];
 
@@ -142,7 +238,7 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     g_LastViewYaw = angles[1];
 
     float forward[3], right[3], up[3];
-    AngleVectors(angles, forward, right, up);
+    AfxVrMath::AngleVectors(angles, forward, right, up);
 
     for (int i = 0; i < 3; i++) {
         pOrigin[i] = g_BaseOrigin[i]
@@ -191,21 +287,13 @@ void AfxVr_Recenter() {
 }
 
 void AfxVr_AddMove(float right, float forward, float up) {
-    // Move in the plane the viewer is facing. Deliberately horizontal: tilting the head
-    // down and pushing forward should not drive you into the floor.
-    const double d = M_PI / 180.0;
-    double sy = sin(g_LastViewYaw * d), cy = cos(g_LastViewYaw * d);
-
-    // Source: forward is (cos yaw, sin yaw, 0), right is (sin yaw, -cos yaw, 0).
-    g_MoveOffset[0] += (float)(forward * cy + right * sy);
-    g_MoveOffset[1] += (float)(forward * sy - right * cy);
-    g_MoveOffset[2] += up;
+    float delta[3];
+    AfxVrMath::MoveInViewPlane(g_LastViewYaw, right, forward, up, delta);
+    for (int i = 0; i < 3; i++) g_MoveOffset[i] += delta[i];
 }
 
 void AfxVr_AddYaw(float degrees) {
-    g_YawOffset += degrees;
-    while (g_YawOffset > 180.0f) g_YawOffset -= 360.0f;
-    while (g_YawOffset < -180.0f) g_YawOffset += 360.0f;
+    g_YawOffset = AfxVrMath::NormalizeDegrees(g_YawOffset + degrees);
 }
 
 void AfxVr_ResetMove() {
@@ -295,6 +383,43 @@ CON_COMMAND(mirv_vr_ipd, "cs2-vr-spectator: place the two eyes symmetrically, gi
     advancedfx::Message(
         "mirv_vr_ipd <units> [fov] - symmetric eyes, a shorthand for two mirv_vr_eye calls.\n"
         "A 63 mm interpupillary distance is 2.5 units. 0 disables.\n");
+}
+
+CON_COMMAND(mirv_vr_selftest, "cs2-vr-spectator: report whether the hard-coded view offsets still look right.")
+{
+    CheckGameBuildOnce();
+
+    advancedfx::Message(
+        "mirv_vr_selftest\n"
+        "  game build      %s\n"
+        "  offsets built for %s%s\n"
+        "  offsets         fov +0x%x, origin +0x%x, angles +0x%x (from CViewRender+0x10)\n",
+        g_GameClientVersion[0] ? g_GameClientVersion : "unknown (steam.inf not read)",
+        AFXVR_TESTED_CLIENT_VERSION,
+        g_GameClientVersion[0] ? (g_GameBuildMatches ? "  - match" : "  - MISMATCH") : "",
+        AFXVR_OFS_FOV, AFXVR_OFS_ORIGIN, AFXVR_OFS_ANGLES);
+
+    if (nullptr == g_ViewStruct) {
+        advancedfx::Message(
+            "  view struct     not seen yet - start a demo, the check runs on the first frame.\n");
+        return;
+    }
+
+    AfxVrMath::ViewCheck r = AfxVrMath::CheckView(g_BaseOrigin, g_BaseAngles, g_BaseFov);
+    advancedfx::Message(
+        "  last read back  origin=(%.1f, %.1f, %.1f) angles=(%.1f, %.1f, %.1f) fov=%.1f\n"
+        "  verdict         %s\n",
+        g_BaseOrigin[0], g_BaseOrigin[1], g_BaseOrigin[2],
+        g_BaseAngles[0], g_BaseAngles[1], g_BaseAngles[2], g_BaseFov,
+        r.ok ? "looks like a camera" : r.why);
+
+    if (!r.ok) {
+        advancedfx::Message(
+            "\n"
+            "  The eye poses are not being written while this is the case, which is the\n"
+            "  safe answer but not a working one. Re-measuring the offsets is described in\n"
+            "  docs/05-view-setup-point.md.\n");
+    }
 }
 
 CON_COMMAND(mirv_vr_log, "cs2-vr-spectator: trace the pass loop and view setup for N frames.")

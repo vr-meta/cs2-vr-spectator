@@ -11,11 +11,13 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'tests/**'
       - 'docs/patches/**'
       - '.github/workflows/build-hook.yml'
   pull_request:
     paths:
       - 'src/**'
+      - 'tests/**'
       - 'docs/patches/**'
       - '.github/workflows/build-hook.yml'
   schedule:
@@ -32,6 +34,21 @@ env:
   OPENXR_VERSION: 1.1.63
 
 jobs:
+  # The geometry, the stick shaping, the plausibility check on the view struct and the
+  # steam.inf parsing have no engine in them, so they are tested here in seconds rather
+  # than by putting a headset on. Everything else in this project needs a Quest.
+  tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run
+        run: |
+          cmake -S tests -B build/tests -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/tests
+          ctest --test-dir build/tests --output-on-failure
+
   # Two minutes and no toolchain. The patches stopped applying in sequence once already —
   # 002 had been generated from a tree that already had 001 in it, so it carried 001's hunk
   # too — and a full build is a slow way to be told that.
@@ -87,7 +104,7 @@ jobs:
 
   build:
     name: Build AfxHookSource2
-    needs: patches
+    needs: [patches, tests]
     runs-on: windows-2022
     timeout-minutes: 90
 
