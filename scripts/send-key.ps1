@@ -2,9 +2,14 @@
 #
 # CS2 has no remote console, so anything bound to a key has to be pressed. SendKeys
 # does not reach games that read raw input; SendInput with the scancode flag does.
-# Extracted from sweep-offset.ps1 so single presses do not need the whole sweep.
 #
 #   .\send-key.ps1 -Key F7
+#
+# Focus is the catch. A plain SetForegroundWindow is refused by Windows whenever the
+# calling process is not itself in the foreground, and it fails *silently* - the key is
+# then sent to whatever window actually has focus, and the experiment looks like the
+# bind does nothing. So: attach to the foreground thread's input queue first, which
+# lifts the restriction, and verify afterwards that the game really is in front.
 
 param(
     [Parameter(Mandatory = $true)][string]$Key,
@@ -26,7 +31,29 @@ public class SendKeyOne {
     }
     [DllImport("user32.dll")] public static extern uint SendInput(uint n, INPUT[] p, int cb);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
+    [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern ushort MapVirtualKey(uint uCode, uint uMapType);
+
+    // Windows refuses a foreground steal unless the caller shares the foreground
+    // thread's input queue. Attaching to it makes the call succeed.
+    public static bool Focus(IntPtr target) {
+        IntPtr fg = GetForegroundWindow();
+        if (fg == target) return true;
+        uint fgThread = GetWindowThreadProcessId(fg, IntPtr.Zero);
+        uint myThread = GetCurrentThreadId();
+        AttachThreadInput(myThread, fgThread, true);
+        ShowWindow(target, 9 /* SW_RESTORE */);
+        BringWindowToTop(target);
+        SetForegroundWindow(target);
+        AttachThreadInput(myThread, fgThread, false);
+        System.Threading.Thread.Sleep(250);
+        return GetForegroundWindow() == target;
+    }
 
     public static void Tap(ushort vk) {
         ushort scan = MapVirtualKey(vk, 0);
@@ -46,8 +73,10 @@ if (-not $vk) { throw "Unsupported key: $Key" }
 $proc = Get-Process cs2 -ErrorAction SilentlyContinue
 if (-not $proc) { throw 'cs2.exe is not running.' }
 
-[SendKeyOne]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
-Start-Sleep -Milliseconds 400
+if (-not [SendKeyOne]::Focus($proc.MainWindowHandle)) {
+    throw "Could not bring the CS2 window to the foreground; the key would have gone somewhere else. Click the game window once and retry."
+}
+
 [SendKeyOne]::Tap([System.UInt16]$vk)
 Start-Sleep -Milliseconds $SettleMs
 
