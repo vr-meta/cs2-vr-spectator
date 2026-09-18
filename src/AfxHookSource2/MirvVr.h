@@ -31,6 +31,25 @@ void AfxVr_AfterViewSetup(void * pViewStruct, float tx, float ty, float tz,
 // Called from the render pass loop, before the given pass renders.
 void AfxVr_OnBeginRenderPass(int passIndex);
 
+// The client builds its world-to-screen and projection matrices once a frame, from the
+// base camera, in a function main.cpp already hooks. The HUD is drawn once per *pass* and
+// reads those matrices - so name tags and health numbers land where they would have been
+// on the monitor, not where the player is from this eye. That is issue #3.
+//
+// The obvious idea is to let the engine redo its own work with the camera we have just
+// written, rather than compute a matrix here and get the conventions wrong. main.cpp hands
+// the original function over for that.
+//
+// It does not work, and the negative result is worth keeping: calling the builder puts the
+// base camera back, so the pass renders from the middle and the stereo disappears
+// (docs/experiments/15-hud-per-eye.md). The builder is not a consumer of the fields we
+// write; it has its own source of truth and restores them.
+//
+// mirv_vr_remakematrix is the switch, off by default, kept as the evidence that issue #3
+// is deep rather than cheap.
+typedef void (__fastcall * AfxVr_MakeMatrix_t)(void * pCViewRender);
+void AfxVr_SetMakeMatrix(AfxVr_MakeMatrix_t fn);
+
 // Set the pose of one eye. Offsets are in the base camera's own frame - right, forward,
 // up in units - and angle deltas are added to the base angles. A fov of 0 means "use the
 // game's". This is the interface an OpenXR layer will drive from xrLocateViews.

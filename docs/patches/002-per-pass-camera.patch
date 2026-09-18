@@ -219,7 +219,7 @@ index 73b7c00..4f24381 100644
  
      bool m_Shutdown = false;
 diff --git a/AfxHookSource2/main.cpp b/AfxHookSource2/main.cpp
-index efbea01..f6af405 100644
+index efbea01..508bec1 100644
 --- a/AfxHookSource2/main.cpp
 +++ b/AfxHookSource2/main.cpp
 @@ -21,6 +21,7 @@
@@ -254,10 +254,15 @@ index efbea01..f6af405 100644
  	if (g_S2CamIO.GetCamExport())
  	{
  		CamIO::CamData camData;
-@@ -978,6 +989,15 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
+@@ -978,6 +989,20 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
  	g_WorldToScreenMatrix.m[3][2] = proj[4*3+2];
  	g_WorldToScreenMatrix.m[3][3] = proj[4*3+3];
  
++	// cs2-vr-spectator: hand the original over to MirvVr, which calls it again for each
++	// eye so the client's world-to-screen matrix matches the camera that pass renders
++	// with. Registered here because only this translation unit holds the trampoline.
++	AfxVr_SetMakeMatrix(g_Old_CViewRender_UnkMakeMatrix);
++
 +	// cs2-vr-spectator: is the projection rebuilt once per frame or once per pass, and is
 +	// this the same object the view setup trampoline writes into?
 +	if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {

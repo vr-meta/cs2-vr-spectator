@@ -67,6 +67,26 @@ bool AnyEyeEnabled() {
     return false;
 }
 
+// See the note in MirvVr.h. The view struct we hold is CViewRender+0x10; the matrix
+// builder wants CViewRender itself.
+AfxVr_MakeMatrix_t g_MakeMatrix = nullptr;
+bool g_HudFix = false;
+bool g_WarnedNoMakeMatrix = false;
+
+void RebuildViewMatrices() {
+    if (!g_HudFix || nullptr == g_ViewStruct) return;
+    if (nullptr == g_MakeMatrix) {
+        if (!g_WarnedNoMakeMatrix) {
+            g_WarnedNoMakeMatrix = true;
+            advancedfx::Warning(
+                "AFXVR: mirv_vr_remakematrix has nothing to call - the matrix builder was never\n"
+                "AFXVR: hooked. This build of the hook cannot do it.\n");
+        }
+        return;
+    }
+    g_MakeMatrix((unsigned char*)g_ViewStruct - 0x10);
+}
+
 // --- does the view struct still look like a view struct? ---------------------------
 
 // Latched so the log does not fill with the same sentence sixty times a second, and so
@@ -256,6 +276,10 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
 
     g_Dirty = true;
 
+    // The pose is in place; now let the client rebuild what it derives from it, so the
+    // HUD drawn during this pass is placed for this eye.
+    RebuildViewMatrices();
+
     if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
         advancedfx::Message(
             "AFXVR: frame=%i pass=%i eye org=(%f,%f,%f) ang=(%f,%f,%f) fov=%f\n",
@@ -427,4 +451,45 @@ CON_COMMAND(mirv_vr_log, "cs2-vr-spectator: trace the pass loop and view setup f
     int frames = 2 <= args->ArgC() ? atoi(args->ArgV(1)) : 1;
     g_AfxVrLogUntilFrame = g_AfxVrFrameIndex + frames;
     advancedfx::Message("mirv_vr_log: logging frames %i..%i\n", g_AfxVrFrameIndex, g_AfxVrLogUntilFrame - 1);
+}
+
+void AfxVr_SetMakeMatrix(AfxVr_MakeMatrix_t fn) {
+    g_MakeMatrix = fn;
+}
+
+CON_COMMAND(mirv_vr_remakematrix, "cs2-vr-spectator: call the client's matrix builder per eye. Does NOT fix the HUD - see help.")
+{
+    if (2 <= args->ArgC()) {
+        g_HudFix = 0 != atoi(args->ArgV(1));
+        advancedfx::Message("mirv_vr_remakematrix: %s%s\n",
+            g_HudFix ? "on" : "off",
+            g_HudFix ? " - note this cancels the eye offset; see the help text" : "");
+        if (g_HudFix && nullptr == g_MakeMatrix) {
+            advancedfx::Warning("  ...but the matrix builder was never hooked, so this will do nothing.\n");
+        }
+        return;
+    }
+
+    advancedfx::Message(
+        "mirv_vr_remakematrix 0|1 - call the client's matrix builder after writing an eye\n"
+        "pose. Kept because it answers a question, not because it works.\n"
+        "\n"
+        "The problem it was written for: name tags and health numbers are placed with a\n"
+        "world-to-screen matrix the client builds once a frame from the camera in the\n"
+        "middle, while the HUD itself is drawn once per pass. So in an eye rendered from\n"
+        "somewhere else, the tags float free of the people they belong to.\n"
+        "\n"
+        "The idea was to let the engine redo its own calculation with the eye's camera,\n"
+        "rather than compute a matrix here and get the conventions wrong. Measured, in\n"
+        "docs/experiments/15-hud-per-eye.md: it does not work. Calling the builder puts\n"
+        "the base camera back, so the pass renders from the middle and the stereo is gone.\n"
+        "The builder is not a consumer of the fields we write - it has its own source of\n"
+        "truth and restores them.\n"
+        "\n"
+        "So issue #3 is deep rather than cheap, and this switch is the evidence. Leave it\n"
+        "off.\n"
+        "\n"
+        "Current value: %s%s\n",
+        g_HudFix ? "1" : "0",
+        nullptr == g_MakeMatrix ? " (unavailable: the matrix builder was not hooked)" : "");
 }
