@@ -47,37 +47,44 @@ Two lines changed. Configure then completes.
 of requiring a full Visual Studio install, and `-products *` is harmless for people who
 do have Community — it widens the search rather than narrowing it.
 
-## 002 — per-pass camera (phase B)
+## 002 — per-eye camera for the render passes
 
-**What it does.** Gives each render pass its own camera position, which is what stereo
-needs and what HLAE has no way to express. Full reasoning and measurements in
-[`../experiments/04-per-pass-camera.md`](../experiments/04-per-pass-camera.md).
+**What it does.** Gives each render pass its own camera pose — position, orientation and
+field of view — which is what stereo needs and what HLAE has no way to express. Reasoning
+and measurements in experiments
+[04](../experiments/04-per-pass-camera.md),
+[06](../experiments/06-per-eye-projection.md) and
+[07](../experiments/07-eye-pose.md).
 
-Patch: [`002-per-pass-camera.patch`](002-per-pass-camera.patch), against
-`AfxHookSource2/{main.cpp, RenderSystemDX11Hooks.cpp, RenderServiceHooks.cpp}`.
+Patch: [`002-per-pass-camera.patch`](002-per-pass-camera.patch). Adds
+`AfxHookSource2/MirvVr.{h,cpp}` and touches `main.cpp`,
+`RenderSystemDX11Hooks.cpp`, `RenderServiceHooks.cpp` and `AfxHookSource2/CMakeLists.txt`.
 
 Three pieces:
 
 1. **Pass identity.** `g_AfxVrFrameIndex` / `g_AfxVrPassIndex`, maintained in
    `EngineThread_BeginMainRenderPass` (frame++, pass=0) and
-   `EngineThread_BeginNextRenderPass` (pass++). Pass 0 is the main pass.
-2. **The offset.** `AfxVr_OnBeginRenderPass(passIndex)` writes `base + offset * right`
-   into the persistent `CViewSetup` at `+0x4a0`, before that pass renders. `right` is
-   Source's `AngleVectors` right vector, derived from the view angles, so the eyes
-   separate perpendicular to the gaze rather than along a world axis.
-3. **Undo before read.** The view setup trampoline reads `CViewSetup` back as the game's
-   own camera, so it restores the base first, guarded by a dirty flag and a pointer
-   match. Without this the offset accumulates.
+   `EngineThread_BeginNextRenderPass` (pass++). Pass 0 is the main pass; 1 and 2 are the
+   eyes; the loop always starts one spare pass beyond what it uses.
+2. **The pose.** `AfxVr_OnBeginRenderPass(passIndex)` writes the eye's pose into the
+   persistent view struct before that pass renders — origin at `+0x4a0`, angles at
+   `+0x4b8`, fov at `+0x498`. Offsets are given in the camera's own frame and converted
+   through Source's `AngleVectors`, so the eyes separate perpendicular to the gaze rather
+   than along a world axis.
+3. **Undo before read.** The view setup trampoline reads that struct back as the game's
+   own camera, so `AfxVr_BeforeViewSetupRead` restores the base first, guarded by a dirty
+   flag and a pointer match. Without this the offset accumulates frame over frame.
 
-Console commands added: `mirv_vr_eyes <units>` (separation, 0 disables) and
-`mirv_vr_log <frames>` (trace the pass loop and view setup for N frames).
+Console commands: `mirv_vr_eye <pass> <right> <forward> <up> <dPitch> <dYaw> <dRoll>
+<fov>` (and `off`), `mirv_vr_ipd <units> [fov]` for symmetric eyes, and
+`mirv_vr_log <frames>` to trace the pass loop and view setup.
 
-Also included: the probe logging that answered the frame-vs-pass question. It is cheap,
-off unless armed, and the next person to ask "where does this pass get its camera" will
-want it.
+Also included: the probe logging that answered the frame-versus-pass question. It is
+cheap, off unless armed, and the next person to ask "where does this pass get its camera"
+will want it.
 
-**Not upstreamable as is.** The field offset `+0x4a0` is build-specific, and the eye
-mapping (pass 1 left, pass 2 right) is a placeholder for real per-eye poses.
+**Not upstreamable as is.** The field offsets are build-specific, and the pass-to-eye
+mapping is fixed rather than negotiated with the streams.
 
 ## Build environment notes (not patches, but required)
 
