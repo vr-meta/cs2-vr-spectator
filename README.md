@@ -29,7 +29,7 @@ Next: the OpenXR bridge - per-eye projection and resolution, head tracking angle
 
 - [`docs/workflow.md`](docs/workflow.md) - how experiments are run here: division of labour, launch, capture, and the rules that earned their place.
 - [`docs/05-view-setup-point.md`](docs/05-view-setup-point.md) - the exact function where a per-pass camera must be applied, and why the config route failed.
-- [`docs/04-plan.md`](docs/04-plan.md) - the plan from here. Phases A and B are done; C (stereo pair on disk), D (VR bridge) and E (performance) remain.
+- [`docs/04-plan.md`](docs/04-plan.md) - the plan from here. Phases A, B and C are done and D has started; what remains of D is the OpenXR session and frame submission, then E (performance).
 - [`docs/patches/README.md`](docs/patches/README.md) - the changes made to HLAE, kept so they survive a re-clone: the build fix, and the per-pass camera itself.
 
 Run [`scripts/check-toolchain.ps1`](scripts/check-toolchain.ps1) to see what the machine is missing; [`scripts/install-toolchain.ps1`](scripts/install-toolchain.ps1) installs it.
