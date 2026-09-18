@@ -410,10 +410,10 @@ index 0000000..b5bbc6a
 +void AfxVr_ResetMove();
 diff --git a/AfxHookSource2/MirvVrXr.cpp b/AfxHookSource2/MirvVrXr.cpp
 new file mode 100644
-index 0000000..3e242d3
+index 0000000..3b21ce4
 --- /dev/null
 +++ b/AfxHookSource2/MirvVrXr.cpp
-@@ -0,0 +1,880 @@
+@@ -0,0 +1,909 @@
 +#include "stdafx.h"
 +
 +#include "MirvVrXr.h"
@@ -506,12 +506,33 @@ index 0000000..3e242d3
 +
 +// Console commands raised by a controller button. They cannot be dispatched from the
 +// render thread where the input is read, so the engine thread drains this.
-+std::mutex g_CmdMutex;
-+std::vector<std::string> g_PendingCommands;
++//
++// `delay` is in engine frames. A button that maps to a game action has to be pressed and
++// released on separate frames - dispatching "+attack" and "-attack" back to back in one
++// frame is not a press the game notices.
++struct PendingCommand { std::string cmd; int delay; };
 +
-+void QueueCommand(const char * cmd) {
++std::mutex g_CmdMutex;
++std::vector<PendingCommand> g_PendingCommands;
++
++void QueueCommand(const char * cmd, int delayFrames = 0) {
 +    std::lock_guard<std::mutex> lock(g_CmdMutex);
-+    if (g_PendingCommands.size() < 8) g_PendingCommands.push_back(cmd);
++    if (g_PendingCommands.size() < 16) {
++        PendingCommand p;
++        p.cmd = cmd;
++        p.delay = delayFrames;
++        g_PendingCommands.push_back(p);
++    }
++}
++
++// Presses and releases a game action, the way the demo's own spectator controls are
++// driven. spec_next and spec_prev exist as commands but do nothing during demo playback -
++// the hints on screen say MOUSE1 and SPACE for a reason.
++void QueueTap(const char * action) {
++    std::string down("+"); down += action;
++    std::string up("-");   up   += action;
++    QueueCommand(down.c_str(), 0);
++    QueueCommand(up.c_str(), 2);
 +}
 +
 +// Units per second, and degrees per second. A comfortable walking pace in a headset is
@@ -889,15 +910,15 @@ index 0000000..3e242d3
 +    // Switching players puts the viewer back on that player rather than wherever the
 +    // sticks had wandered to - otherwise you follow someone from across the map.
 +    b = GetPressed(g_NextAction);
-+    if (b && !g_PrevNext) { QueueCommand("spec_next"); AfxVr_ResetMove(); }
++    if (b && !g_PrevNext) { QueueTap("attack"); AfxVr_ResetMove(); }
 +    g_PrevNext = b;
 +
 +    b = GetPressed(g_PrevAction);
-+    if (b && !g_PrevPrev) { QueueCommand("spec_prev"); AfxVr_ResetMove(); }
++    if (b && !g_PrevPrev) { QueueTap("attack2"); AfxVr_ResetMove(); }
 +    g_PrevPrev = b;
 +
 +    b = GetPressed(g_ModeAction);
-+    if (b && !g_PrevMode) QueueCommand("spec_mode");
++    if (b && !g_PrevMode) QueueTap("jump"); // the demo's "next camera"
 +    g_PrevMode = b;
 +}
 +
@@ -1089,13 +1110,21 @@ index 0000000..3e242d3
 +    // A console command has to be dispatched from the engine thread, so the controller
 +    // handler only raises a flag.
 +    {
-+        std::vector<std::string> commands;
++        std::vector<std::string> due;
 +        {
 +            std::lock_guard<std::mutex> lock(g_CmdMutex);
-+            commands.swap(g_PendingCommands);
++            for (size_t i = 0; i < g_PendingCommands.size(); ) {
++                if (0 >= g_PendingCommands[i].delay) {
++                    due.push_back(g_PendingCommands[i].cmd);
++                    g_PendingCommands.erase(g_PendingCommands.begin() + i);
++                } else {
++                    g_PendingCommands[i].delay--;
++                    i++;
++                }
++            }
 +        }
-+        for (size_t i = 0; i < commands.size(); i++) {
-+            if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, commands[i].c_str(), true);
++        for (size_t i = 0; i < due.size(); i++) {
++            if (g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, due[i].c_str(), true);
 +        }
 +    }
 +

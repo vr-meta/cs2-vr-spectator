@@ -71,9 +71,12 @@ public class SendKeyOne {
 
     public static void Tap(ushort vk) {
         ushort scan = MapVirtualKey(vk, 0);
+        // Home, End, Insert and Delete live on the extended part of the keyboard and are
+        // not seen without this flag.
+        uint ext = (vk == 0x24 || vk == 0x23 || vk == 0x2D || vk == 0x2E) ? 0x0001u : 0u;
         INPUT[] inp = new INPUT[2];
-        inp[0].type = 1; inp[0].ki.wVk = vk; inp[0].ki.wScan = scan; inp[0].ki.dwFlags = 0x0008;
-        inp[1].type = 1; inp[1].ki.wVk = vk; inp[1].ki.wScan = scan; inp[1].ki.dwFlags = 0x0008 | 0x0002;
+        inp[0].type = 1; inp[0].ki.wVk = vk; inp[0].ki.wScan = scan; inp[0].ki.dwFlags = 0x0008 | ext;
+        inp[1].type = 1; inp[1].ki.wVk = vk; inp[1].ki.wScan = scan; inp[1].ki.dwFlags = 0x0008 | 0x0002 | ext;
         SendInput(2, inp, Marshal.SizeOf(typeof(INPUT)));
     }
 }
@@ -83,7 +86,8 @@ $vk = @{ F1 = 0x70; F2 = 0x71; F3 = 0x72; F4 = 0x73; F5 = 0x74
          F6 = 0x75; F7 = 0x76; F8 = 0x77; F9 = 0x78; F10 = 0x79
          # VK_OEM_3 is the key left of "1" - the console toggle. Its scancode is the
          # same whatever the keyboard layout, which a Russian layout's "e" is not.
-         TILDE = 0xC0; CONSOLE = 0xC0 }[$Key.ToUpper()]
+         TILDE = 0xC0; CONSOLE = 0xC0
+         HOME = 0x24; END = 0x23; INS = 0x2D; DEL = 0x2E }[$Key.ToUpper()]
 
 if (-not $vk) { throw "Unsupported key: $Key" }
 
