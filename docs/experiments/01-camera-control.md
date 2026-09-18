@@ -24,16 +24,30 @@ It requires `mirv_input camera` to enable the override first.
 
 Measured on the paused demo, moving 40 units (about a metre) along world X:
 
-| change | mean diff | max channel | pixels changed |
-| --- | --- | --- | --- |
-| x −40 | 124.3 | 664 / 765 | 88.9% |
-| x +40 | 112.4 | 679 / 765 | 89.2% |
-| **back to baseline** | **0** | **2 / 765** | **0%** |
+Second run, with a return to baseline after *every* move, to rule out drift:
 
-The control row is the important one: returning to the original coordinates reproduces
-the original frame exactly. The camera is not merely moving, it is **positionable and
-repeatable** — which is what a VR eye offset needs, since the two eyes must differ by a
-precise amount and nothing else.
+```
+base -> x+40 -> base -> x-40 -> base
+```
+
+| comparison | mean diff | max channel | pixels changed |
+| --- | --- | --- | --- |
+| base → x +40 | 146.0 | 695 / 765 | 96.3% |
+| base → x −40 | 165.7 | 713 / 765 | 96.5% |
+| base¹ vs base² | 0 | **0** | 0% |
+| base¹ vs base³ | 0 | **0** | 0% |
+| base² vs base³ | 0 | **0** | 0% |
+
+The three control rows matter more than the two measurements. All baseline captures are
+bit-identical, so the camera is not merely moving, it is **positionable and repeatable** —
+which is exactly what a VR eye offset needs, since the two eyes must differ by a precise
+amount and by nothing else.
+
+This also rules out the obvious confound. `mirv_input camera` mode lets the mouse fly the
+camera, so a stray mouse movement could have produced the difference. But the mouse
+changes *angles*, while the command sets only *position* — any mouse input between
+captures would have left the baselines disagreeing with each other. Three identical
+returns say nothing changed except what was commanded.
 
 Visually the shift shows true parallax: a crate a few metres away moves a lot and
 changes size, while buildings across the site barely move. That is a camera translating

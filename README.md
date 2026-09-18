@@ -8,7 +8,7 @@ There is no working CS2 VR integration or installable build yet. Native stereo r
 
 Milestone 1 is essentially done: integration points identified, environment pinned, and the first experiment run against the live game.
 
-The result so far: `cl_demo_view_offset_left`, CS2's own per-eye view offset for demo playback, exists in build 2000908. Whether it actually moves the camera is the next test.
+Where it stands: CS2 own stereo hooks turned out to be dead ends - the demo eye-offset convar has no effect and the multiview path is absent from the build. But HLAE `mirv_input` moves the camera exactly and repeatably, so the eye can be moved after all. The open question is whether it can be moved per render pass rather than per frame, which is what stereo needs.
 
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
