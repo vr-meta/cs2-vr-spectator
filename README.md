@@ -4,7 +4,7 @@ Watch Counter-Strike 2 match replays from inside the map using a Meta Quest 3 co
 
 ## Status
 
-There is no working CS2 VR integration or installable build yet. Native stereo rendering inside the current CS2 engine is the main feasibility question to resolve.
+**CS2 renders into a Meta Quest 3.** Stereo, head tracked, at the runtime's full recommended 2528x2780 per eye, from a demo playing inside the real game. The feasibility question this project existed to answer is answered. There is no installable build yet, and performance is still unmeasured.
 
 Milestone 1 is done, and **stereo rendering inside CS2 now works**: one paused frame renders twice from two camera positions, with correct parallax. That was the main feasibility question. What remains between here and a headset is plumbing and performance, not an unknown.
 
@@ -12,7 +12,9 @@ How it stands: CS2's own stereo hooks are dead ends - the demo eye-offset convar
 
 The pair is also verified: at a real 63 mm interpupillary distance it differs only by viewpoint, and with the separation set to zero on a playing demo with live smoke the two eyes stay identical - so the simulation does not advance between passes, which is the error that would be unbearable in a headset. [Look at the pair](https://claude.ai/artifact/3iESVvwPKZjiEDLX9eAC8x).
 
-Next: the OpenXR bridge - per-eye projection and resolution, head tracking angles, and a GPU-to-GPU copy into the swapchain - then the frame budget, three scene traversals against 13.9 ms at 72 Hz, which is the remaining risk.
+The bridge is built: an OpenXR session on the game's own D3D11 device, swapchains matching the back buffer, head poses driving the per-pass camera, and each eye submitted with a `CopyResource`. Two viewing modes work - sit in a player and see what they see, or ride along and look where you like.
+
+Next: the frame budget. Four scene traversals per stereo frame against 13.9 ms at 72 Hz, entirely unmeasured, and the pass loop still starts one pass more than it uses. That is now the project's only remaining risk.
 
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.

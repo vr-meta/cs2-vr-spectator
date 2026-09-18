@@ -19,7 +19,8 @@ param(
     [switch]$VrReady,         # square eye-sized window and a frame cap, for VR runtime work
     [int]$Width  = 1280,
     [int]$Height = 720,
-    [int]$FpsMax = 0          # 0 leaves the game uncapped
+    [int]$FpsMax = 0,         # 0 leaves the game uncapped
+    [string]$ExecCfg          # a cfg to exec at startup, for key bindings
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,14 +59,24 @@ $gameArgs = @(
 
 # With a VR runtime up, an uncapped CS2 and the compositor fight over the GPU and both
 # stall: the game stops pumping messages and the headset stutters. Cap the game.
+# Per-eye resolution is the window size, because submission is a copy of the back buffer.
+# A square window keeps the reported frustum square, and the window cannot be taller than
+# the display - so on a 2560x1600 panel 1600x1600 is the ceiling. Going beyond that needs
+# rendering to an off-screen target instead of the back buffer.
 if ($VrReady) {
-    if (-not $PSBoundParameters.ContainsKey('Width'))  { $Width  = 1080 }
-    if (-not $PSBoundParameters.ContainsKey('Height')) { $Height = 1080 }
+    if (-not $PSBoundParameters.ContainsKey('Width'))  { $Width  = 1600 }
+    if (-not $PSBoundParameters.ContainsKey('Height')) { $Height = 1600 }
     if (0 -eq $FpsMax) { $FpsMax = 90 }
+    $gameArgs += '-noborder'   # a title bar would eat rows we cannot spare
 }
 
 if (-not $Fullscreen) { $gameArgs += @('-windowed', '-w', "$Width", '-h', "$Height") }
 if (0 -lt $FpsMax)    { $gameArgs += @('+fps_max', "$FpsMax") }
+
+# With a VR runtime up the game window stops taking input reliably, and console text
+# cannot be synthesised - so the experiment's commands go on key binds loaded at startup
+# and are pressed from outside. See docs/workflow.md.
+if ($ExecCfg)         { $gameArgs += @('+exec', $ExecCfg) }
 if ($Vulkan)          { $gameArgs += '-vulkan' }
 if ($Demo) {
     # A bare name is resolved by the engine relative to game/csgo, so only check
