@@ -7,6 +7,16 @@ and what can they reach from inside the headset?**
 Phases A–D of [`04-plan.md`](04-plan.md) answered "can CS2 render into a Quest". They can.
 This plan is about making it usable. It supersedes nothing there; it is what comes after.
 
+> **Later, 2026-09-19.** Most of what follows has now been built or measured, and two of
+> the assumptions in it turned out to be wrong. Read
+> [`experiments/11`](experiments/11-seeking.md) through [`15`](experiments/15-hud-per-eye.md)
+> and the GitHub issues before acting on anything below. In brief: seeking is safe and the
+> timeline never crashed anything; Panorama accepts synthetic mouse input, which is the
+> pointer problem solved at the far end; the UI really is composited once per pass, and both
+> `mirv_vr_xr ui out` and `mirv_vr_panel` now exist; the name tags cannot be fixed by asking
+> the engine to recompute; and the frame budget is more than half submission rather than
+> rendering, so the graphics settings this plan expected to help were already at minimum.
+
 ## What works today
 
 - Stereo at the runtime's full 2528x2780 per eye, head tracked, from a playing demo.
