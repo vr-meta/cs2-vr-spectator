@@ -37,6 +37,30 @@ Status: **not yet run** — waiting on the CS2 download.
    be current. No building required for either tool unless the plugin fails.
 3. Launch CS2 with `-insecure -novid -allow_third_party_software`.
 
+## Tools, already downloaded
+
+Both live in `D:\Dev\cs2-vr-tools\` (outside the repository — they are third-party
+binaries, not project content):
+
+| Tool | Version | Binary date | Note |
+| --- | --- | --- | --- |
+| HLAE | v2.192.2 | `x64\AfxHookSource2.dll` built 2026-09-12 | current |
+| cvar-unhide-s2 | v0.5.0 | `addons\bin\win64\server.dll` built 2025-08-01 | **13 months old** |
+
+The plugin installs by copying its `addons` folder into
+`<CS2>\game\csgo\`, then adding a search path to `<CS2>\game\csgo\gameinfo.gi` near
+line 22:
+
+```
+Game    csgo/addons
+```
+
+Back up `gameinfo.gi` first — a Steam update will overwrite it, and the edit has to be
+reapplied after every CS2 patch.
+
+HLAE is launched on its own and starts CS2 itself; it does not need to be copied into
+the game folder.
+
 ## Prepared config files
 
 Two configs in [`../../scripts/cs2/`](../../scripts/cs2/) cover the console work.
