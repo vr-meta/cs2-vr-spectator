@@ -27,13 +27,34 @@ is development.
 Not interesting in itself, but nothing downstream is possible without it, and it is the
 first real test of the toolchain.
 
-Missing prerequisites, discovered from `CMakeLists.txt`:
+`BUILDING.md` lists a heavy dependency set for a full release — Node.js, Python with pip,
+GNU gettext, Rust with a 32-bit target, and Visual Studio Community with the .NET
+workload. **Most of that is for the GUI, injector and Win32 hooks, none of which this
+project touches.**
 
-- **Rust toolchain** (`cargo`, `rustc`) — the project builds Rust components through
-  Corrosion. Neither is installed.
+Only `AfxHookSource2.dll` (x64) matters here, and the build system supports that directly:
+
+```batch
+cmake --preset x64-release
+cmake --build --preset x64-release
+```
+
+with `-DAFX_MULTIBUILD_STAGING_X64=source2` to limit staging to the Source 2 hook family.
+That drops Node.js, gettext and the .NET pieces from the requirements.
+
+Still needed:
+
+- **Rust toolchain** (`cargo`, `rustc`) — not optional even for the hook alone:
+  `AfxHookSource2` contains `AfxHookSource2Rs.cpp`, `CVarRs.cpp` and `ConsoleRs.cpp`,
+  which bind to Rust components built through Corrosion. Neither is installed.
 - **MSBuild** — `CMakeLists.txt` locates it via `vswhere -requires
-  Microsoft.Component.MSBuild`, and that query currently returns nothing. The Build Tools
-  install needs that component added.
+  Microsoft.Component.MSBuild`, and that query currently returns nothing. The preset also
+  uses the `Visual Studio 17 2022` generator rather than Ninja, so MSBuild is required
+  regardless. The Build Tools install needs that component added.
+
+The existing HLAE release stays installed as the reference: when the self-built DLL
+misbehaves, the question "is this my build or my change?" should be answerable by
+swapping one file.
 
 **Done when:** a self-built `AfxHookSource2.dll` attaches to CS2 and reproduces
 experiment 02 — two streams, one with `worldAction noDraw`, visibly different output.
