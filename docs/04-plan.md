@@ -40,7 +40,17 @@ cmake --build --preset x64-release
 ```
 
 with `-DAFX_MULTIBUILD_STAGING_X64=source2` to limit staging to the Source 2 hook family.
-That drops Node.js, gettext and the .NET pieces from the requirements.
+That drops Node.js and gettext from the requirements.
+
+**Correction:** the .NET pieces are *not* droppable, contrary to the first version of this
+plan. The x64 hook depends on `ShaderBuilder`, a C# project used to compile shaders, so
+the build fails without the .NET Framework 4.6.2 Targeting Pack:
+
+```
+error MSB3644: The reference assemblies for .NETFramework,Version=v4.6.2 were not found.
+```
+
+`BUILDING.md` lists that component; it was dismissed as GUI-only and it is not.
 
 Still needed:
 
@@ -56,9 +66,10 @@ The existing HLAE release stays installed as the reference: when the self-built 
 misbehaves, the question "is this my build or my change?" should be answerable by
 swapping one file.
 
-**Done when:** a self-built `AfxHookSource2.dll` attaches to CS2 and reproduces
-experiment 02 — two streams, one with `worldAction noDraw`, visibly different output.
-Reproducing a known result is the point; a build that merely compiles proves nothing.
+**DONE 2026-09-18.** The self-built `AfxHookSource2.dll` loads into CS2 and reproduces
+experiment 02: two streams, `eyeR` with `worldAction noDraw`, 80.4% of pixels differing
+(release build: 74.1% on a different frame). Build recipe and the two environment
+obstacles are in [`patches/README.md`](patches/README.md).
 
 **Risk:** the build pulls protobuf and ABSL. If it fights back, the fallback is to patch
 against the released binary rather than rebuild, which is worse but not fatal.

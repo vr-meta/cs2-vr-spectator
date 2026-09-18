@@ -47,6 +47,70 @@ Two lines changed. Configure then completes.
 of requiring a full Visual Studio install, and `-products *` is harmless for people who
 do have Community — it widens the search rather than narrowing it.
 
+## Build environment notes (not patches, but required)
+
+Two further obstacles hit after the vswhere fix. Neither needs a source change, but both
+stop the build cold and neither error says what is actually wrong.
+
+### .NET Framework 4.6.2 Targeting Pack is required, even for the x64 hook
+
+```
+error MSB3644: The reference assemblies for .NETFramework,Version=v4.6.2 were not found.
+```
+
+`AfxHookSource2` depends on `ShaderBuilder`, which is a **C# project** that compiles the
+hook's shaders through SharpDX. So the .NET dependency is not GUI-only, as
+`docs/04-plan.md` first assumed.
+
+Installed with:
+
+```powershell
+vs_installer.exe modify --installPath "...\2022\BuildTools" `
+  --add Microsoft.Net.Component.4.6.2.TargetingPack --quiet --norestart
+```
+
+### ShaderBuilder.exe must be on PATH
+
+```
+'ShaderBuilder.exe' is not recognized as an internal or external command
+...exited with code 9009
+```
+
+`AfxHookSource2/CMakeLists.txt` invokes `ShaderBuilder.exe` by bare name, with no path,
+for each shader. It builds to `build/x64-release/ShaderBuilder/`, which is not on PATH.
+Exit code 9009 on Windows means "command not found" and is easy to misread as a shader
+compilation failure — the shaders are fine, the tool is simply not found.
+
+Worked around by prepending that directory to `PATH` for the build rather than patching:
+
+```powershell
+$env:Path = "D:\Dev\cs2-vr-tools\advancedfx\build\x64-release\ShaderBuilder;$env:Path"
+cmake --build --preset x64-release --target AfxHookSource2
+```
+
+The official `cmake/MultiBuild.cmake` route probably sets this up itself; building a
+single target directly does not.
+
+## Working build recipe
+
+```powershell
+$env:Path = "$env:USERPROFILE\.cargo\bin;<cmake>\bin;" +
+            "D:\Dev\cs2-vr-tools\advancedfx\build\x64-release\ShaderBuilder;$env:Path"
+cd D:\Dev\cs2-vr-tools\advancedfx
+cmake --preset x64-release
+cmake --build --preset x64-release --target AfxHookSource2
+```
+
+Output: `build/x64-release/AfxHookSource2/Release/AfxHookSource2.dll` (5.26 MB).
+
+**Verified 2026-09-18:** the self-built DLL loads into CS2 and reproduces experiment 02 —
+two streams, `eyeR` with `worldAction noDraw`, 80.4% of pixels differing from `eyeL`
+(release build gave 74.1% on a different frame). Behaviour matches the shipped binary.
+
+Keep the released HLAE installed alongside at `D:\Dev\cs2-vr-tools\hlae`; the self-built
+copy lives at `D:\Dev\cs2-vr-tools\hlae-selfbuilt`. Swapping one file answers "is this my
+build or my change?".
+
 ### Note on applying patches to this tree
 
 Do not use `sed -i` on these files. The tree uses CRLF, and Git Bash `sed` rewrote every
