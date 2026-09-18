@@ -6,7 +6,9 @@ Watch Counter-Strike 2 match replays from inside the map using a Meta Quest 3 co
 
 There is no working CS2 VR integration or installable build yet. Native stereo rendering inside the current CS2 engine is the main feasibility question to resolve.
 
-Milestone 1 is in progress. Desk research is written up; nothing has been run against CS2 yet.
+Milestone 1 is essentially done: integration points identified, environment pinned, and the first experiment run against the live game.
+
+The result so far: `cl_demo_view_offset_left`, CS2's own per-eye view offset for demo playback, exists in build 2000908. Whether it actually moves the camera is the next test.
 
 - [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
 - [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
