@@ -297,10 +297,10 @@ index 0000000..8ca3d23
 +                  float fov);
 diff --git a/AfxHookSource2/MirvVrXr.cpp b/AfxHookSource2/MirvVrXr.cpp
 new file mode 100644
-index 0000000..3ce30c9
+index 0000000..beb9716
 --- /dev/null
 +++ b/AfxHookSource2/MirvVrXr.cpp
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,214 @@
 +#include "stdafx.h"
 +
 +#include "MirvVrXr.h"
@@ -440,11 +440,14 @@ index 0000000..3ce30c9
 +
 +    XrInstanceProperties instanceProps = { XR_TYPE_INSTANCE_PROPERTIES };
 +    if (XR_SUCCEEDED(xrGetInstanceProperties_(g_Instance, &instanceProps))) {
-+        advancedfx::Message("AFXVR: runtime \"%s\" version %llu.%llu.%llu\n",
++        // Narrow before printing: advancedfx::Message does not handle 64-bit arguments,
++        // and passing them shifts the whole list - which printed a runtime version of
++        // "2.17.9223372036854775818" before this was noticed.
++        advancedfx::Message("AFXVR: runtime \"%s\" version %u.%u.%u\n",
 +            instanceProps.runtimeName,
-+            XR_VERSION_MAJOR(instanceProps.runtimeVersion),
-+            XR_VERSION_MINOR(instanceProps.runtimeVersion),
-+            XR_VERSION_PATCH(instanceProps.runtimeVersion));
++            (unsigned int)XR_VERSION_MAJOR(instanceProps.runtimeVersion),
++            (unsigned int)XR_VERSION_MINOR(instanceProps.runtimeVersion),
++            (unsigned int)XR_VERSION_PATCH(instanceProps.runtimeVersion));
 +    }
 +
 +    XrSystemGetInfo systemInfo = { XR_TYPE_SYSTEM_GET_INFO };

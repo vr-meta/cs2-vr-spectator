@@ -81,6 +81,49 @@ is easy to mistake for a broken render.
 **Stop recordings.** `mirv_streams record start` writes about 300 MB per second at
 1280x720 with two streams. One forgotten `record end` produced 28.6 GB in 90 seconds.
 
+## What cannot be automated: console text
+
+Key presses can be synthesised (`send-key.ps1`, scancodes), and the console **toggle**
+works that way — but typed **text** does not reach the console. CS2's UI is Panorama, and
+synthetic Unicode input lands nowhere: no command runs, and nothing appears in
+`console.log`, not even `Unknown command`. A driver for this was written and deleted.
+
+So the division of labour stands: the operator types commands, and everything an
+experiment needs afterwards goes on an F-key bind, which *can* be driven from outside.
+
+Two traps when driving keys:
+
+- The console toggle is a toggle. Pressing it when the console is already open closes it,
+  and anything sent afterwards goes to the game as binds. Check the state first with a
+  screenshot.
+- Typing into the game by accident triggers binds. One stray attempt jumped the demo from
+  0:51 to 22:06.
+
+## With a VR runtime running
+
+**SteamVR stalls CS2's presentation.** With SteamVR up, `console.log` fills with
+
+```
+CSwapChainBase::QueuePresentAndWait() looped for 23 iterations without a present event.
+```
+
+and the game stops showing frames. Because the main loop is stuck there, it also stops
+processing console commands — which reads as "nothing works", including the console. It
+is not the console. Killing SteamVR restores the game immediately and completely.
+
+Other rules learned the hard way:
+
+- **Never kill the runtime while an OpenXR instance is live.** CS2 then hangs unkillable —
+  one thread, no window, holding the hook DLL and `console.log` — until a reboot. Run
+  `mirv_vr_xr stop`, or close the game first.
+- **Cap the game's framerate.** An uncapped CS2 and a VR compositor fight over the GPU and
+  both lose. `launch-cs2-experiment.ps1 -VrReady` sets an eye-sized window and
+  `fps_max 90`.
+- **Start SteamVR only with the Quest already in Link.** Without a headset it takes
+  foreground focus, makes the desktop unusable, and gives nothing: `xrCreateInstance`
+  succeeds but `xrGetSystem` returns `XR_ERROR_FORM_FACTOR_UNAVAILABLE`.
+- CS2 dies when Steam does. If the game "just exited", check Steam is still running.
+
 ## Demos
 
 Use `pro_mirage.dem` (GOTV, MOUZ vs NAVI). A locally recorded bot demo **did not replay

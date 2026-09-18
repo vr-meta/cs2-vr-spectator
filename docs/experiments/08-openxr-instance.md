@@ -62,6 +62,36 @@ stopped responding and the headset stuttered. `scripts/launch-cs2-experiment.ps1
 gives nothing in return, as the first run shows. Start it only once the Quest is actually
 in Link. Same class of problem as the focus loss in `send-key.ps1`.
 
+## The problem this uncovered
+
+Bringing the instance up is enough to break the game. With SteamVR running,
+`console.log` fills with
+
+```
+CSwapChainBase::QueuePresentAndWait() looped for 23 iterations without a present event.
+```
+
+CS2 stops presenting frames, and because its main loop is stuck there it stops processing
+console commands too — which looks from outside like the console has died. It has not.
+Killing SteamVR restores the game immediately and completely; the demo resumes and the
+console answers again.
+
+No frames have been submitted at this point — there is no session and no swapchain — so
+this is contention, not something our code does with the headset. On a laptop with hybrid
+graphics and a Quest on Link, SteamVR's compositor, the Link encoder and CS2 are all
+competing, and CS2 loses.
+
+**This makes switching the active OpenXR runtime from SteamVR to Meta the next thing to
+try**, ahead of writing the session. `docs/environment.md` already noted that SteamVR
+adds a translation layer for a Link-connected Quest; it now also demonstrably stalls the
+game. The Meta runtime removes SteamVR's compositor from the picture entirely.
+Registry key: `HKLM\SOFTWARE\Khronos\OpenXR\1\ActiveRuntime`; Meta's runtime lives under
+`C:\Program Files\Meta Horizon\Support\oculus-runtime`.
+
+Note that what appears in the headset meanwhile is the runtime's own desktop view — a
+flat mirror of the monitor. Nothing this project renders reaches the headset until frame
+submission exists.
+
 ## Next
 
 With a headset attached, `xrGetSystem` should succeed and
