@@ -63,6 +63,29 @@ bool g_RenderedViewsValid = false;
 
 XrFrameState g_FrameState = { XR_TYPE_FRAME_STATE };
 bool g_FrameBegun = false;
+
+// Where xrWaitFrame and xrLocateViews happen.
+//
+// Originally both were on the render thread, inside the first eye's submission, because
+// keeping xrBeginFrame and xrEndFrame together is the simple thing to do. The cost is a
+// frame of latency by construction: the engine thread has already set this frame's eye
+// poses by the time the render thread locates the head, so every frame renders with the
+// previous frame's poses. That is issue #8, and at 21-26 ms a frame it is not small.
+//
+// The canonical OpenXR arrangement is the split one: xrWaitFrame on the thread that paces
+// the application, xrBeginFrame and xrEndFrame on the thread that renders. The spec
+// supports it explicitly - xrWaitFrame may run in parallel with the other two. Doing it
+// that way lets the poses be located at the top of the frame they belong to.
+//
+// Off by default until it has been worn. The two must stay matched one to one, which is
+// what g_FrameWaited is for: a frame the render thread never picks up must not cause a
+// second wait.
+bool g_LowLatency = false;
+bool g_FrameWaited = false;
+
+// Whether g_ProjViews describes anything. False before the first successful locate, and
+// the frame is then ended with no layer rather than with a made-up one.
+bool g_ProjViewsValid = false;
 int g_EyesCopied = 0;
 bool g_ReportedFirstSubmit = false;
 
@@ -780,6 +803,56 @@ void ProcessInput() {
     g_PrevSeekBack = b;
 }
 
+// Locate both eyes for a display time and publish them. Shared by the two threading
+// arrangements, so they cannot drift apart.
+void LocateViews(XrTime displayTime) {
+    XrViewLocateInfo locate = { XR_TYPE_VIEW_LOCATE_INFO };
+    locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locate.displayTime = displayTime;
+    locate.space = g_Space;
+
+    XrViewState viewState = { XR_TYPE_VIEW_STATE };
+    uint32_t got = 0;
+    XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
+
+    LARGE_INTEGER locateStart = StageStart();
+    XrResult r = xrLocateViews_(g_Session, &locate, &viewState, 2, &got, views);
+    g_StageLocate.Add(1000.0 * SecondsSince(locateStart));
+
+    if (XR_SUCCEEDED(r) && 2 == got
+        && (viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)
+        && (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
+        std::lock_guard<std::mutex> lock(g_ViewMutex);
+        g_Views[0] = views[0];
+        g_Views[1] = views[1];
+        g_ViewsValid = true;
+    }
+}
+
+// The low-latency half of the split: wait for the runtime's pacing and locate the head at
+// the top of the frame that is about to be drawn, rather than a frame behind.
+void EngineThread_WaitAndLocate() {
+    if (!g_LowLatency) return;
+    if (!g_SessionRunning || XR_NULL_HANDLE == g_Session || !xrWaitFrame_) return;
+
+    // One wait per begin, always. A frame the render thread never picked up has a wait
+    // outstanding; waiting again would hand the runtime two for one frame.
+    if (g_FrameWaited) return;
+
+    g_FrameState = { XR_TYPE_FRAME_STATE };
+    XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
+    LARGE_INTEGER waitStart = StageStart();
+    if (!Check(xrWaitFrame_(g_Session, &waitInfo, &g_FrameState), "xrWaitFrame")) return;
+    g_StageWaitFrame.Add(1000.0 * SecondsSince(waitStart));
+    g_FrameWaited = true;
+
+    // Input here too, which it was never going to hurt: one sync per frame either way, and
+    // a stick read at the top of the frame acts on the frame it was read for.
+    ProcessInput();
+
+    LocateViews(g_FrameState.predictedDisplayTime);
+}
+
 void PollEvents() {
     if (XR_NULL_HANDLE == g_Instance) return;
 
@@ -956,6 +1029,8 @@ void MirvVrXr_SessionStop() {
     if (XR_NULL_HANDLE != g_Session && xrDestroySession_) { xrDestroySession_(g_Session); g_Session = XR_NULL_HANDLE; }
     g_State = XR_SESSION_STATE_UNKNOWN;
     g_FrameBegun = false;
+    g_FrameWaited = false;
+    g_ProjViewsValid = false;
     {
         std::lock_guard<std::mutex> lock(g_ViewMutex);
         g_ViewsValid = false;
@@ -1019,6 +1094,10 @@ void MirvVrXr_EngineThread_Frame() {
         }
     }
 
+    // In low-latency mode this is where the frame's poses come from, located a few
+    // microseconds ago rather than a whole frame ago.
+    EngineThread_WaitAndLocate();
+
     XrView views[2];
     {
         std::lock_guard<std::mutex> lock(g_ViewMutex);
@@ -1057,37 +1136,26 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
     if (0 == eyeIndex) {
         if (!MirvVrXr_WantsPasses()) return;
 
-        g_FrameState = { XR_TYPE_FRAME_STATE };
-        XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
-        LARGE_INTEGER waitStart = StageStart();
-        if (!Check(xrWaitFrame_(g_Session, &waitInfo, &g_FrameState), "xrWaitFrame")) return;
-        g_StageWaitFrame.Add(1000.0 * SecondsSince(waitStart));
+        if (g_LowLatency) {
+            // The engine thread waited and located at the top of this frame. If it has
+            // not - the session only just started, say - there is nothing to begin.
+            if (!g_FrameWaited) return;
+            g_FrameWaited = false;
+        } else {
+            g_FrameState = { XR_TYPE_FRAME_STATE };
+            XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
+            LARGE_INTEGER waitStart = StageStart();
+            if (!Check(xrWaitFrame_(g_Session, &waitInfo, &g_FrameState), "xrWaitFrame")) return;
+            g_StageWaitFrame.Add(1000.0 * SecondsSince(waitStart));
+        }
 
         XrFrameBeginInfo beginInfo = { XR_TYPE_FRAME_BEGIN_INFO };
         if (!Check(xrBeginFrame_(g_Session, &beginInfo), "xrBeginFrame")) return;
         g_FrameBegun = true;
 
-        ProcessInput();
-
-        // Locate for this frame; the engine thread picks these up for the next one.
-        XrViewLocateInfo locate = { XR_TYPE_VIEW_LOCATE_INFO };
-        locate.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-        locate.displayTime = g_FrameState.predictedDisplayTime;
-        locate.space = g_Space;
-
-        XrViewState viewState = { XR_TYPE_VIEW_STATE };
-        uint32_t got = 0;
-        XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
-        LARGE_INTEGER locateStart = StageStart();
-        XrResult locateResult = xrLocateViews_(g_Session, &locate, &viewState, 2, &got, views);
-        g_StageLocate.Add(1000.0 * SecondsSince(locateStart));
-        if (XR_SUCCEEDED(locateResult) && 2 == got
-            && (viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT)
-            && (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT)) {
-            std::lock_guard<std::mutex> lock(g_ViewMutex);
-            g_Views[0] = views[0];
-            g_Views[1] = views[1];
-            g_ViewsValid = true;
+        if (!g_LowLatency) {
+            ProcessInput();
+            LocateViews(g_FrameState.predictedDisplayTime);
         }
 
         g_EyesCopied = 0;
@@ -1098,13 +1166,16 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         // time; reporting the fresh poses tells it no correction is needed, and the
         // world appears to swim as the head turns.
         XrView rendered[2];
+        g_ProjViewsValid = false;
         {
             std::lock_guard<std::mutex> lock(g_ViewMutex);
-            if (g_RenderedViewsValid) { rendered[0] = g_RenderedViews[0]; rendered[1] = g_RenderedViews[1]; }
-            else { rendered[0] = views[0]; rendered[1] = views[1]; }
+            if (g_RenderedViewsValid) { rendered[0] = g_RenderedViews[0]; rendered[1] = g_RenderedViews[1]; g_ProjViewsValid = true; }
+            else if (g_ViewsValid) { rendered[0] = g_Views[0]; rendered[1] = g_Views[1]; g_ProjViewsValid = true; }
         }
 
-        for (int eye = 0; eye < 2; eye++) {
+        // Nothing located yet. The frame still has to be ended -- leaving one open is what
+        // stalls the runtime -- so fall through with no layer rather than returning.
+        for (int eye = 0; g_ProjViewsValid && eye < 2; eye++) {
             g_ProjViews[eye] = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
             g_ProjViews[eye].pose = rendered[eye].pose;
 
@@ -1169,8 +1240,9 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
         endInfo.displayTime = g_FrameState.predictedDisplayTime;
         endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-        endInfo.layerCount = (2 == g_EyesCopied) ? 1 : 0;
-        endInfo.layers = (2 == g_EyesCopied) ? layers : nullptr;
+        bool haveLayer = (2 == g_EyesCopied) && g_ProjViewsValid;
+        endInfo.layerCount = haveLayer ? 1 : 0;
+        endInfo.layers = haveLayer ? layers : nullptr;
 
         LARGE_INTEGER endStart = StageStart();
         Check(xrEndFrame_(g_Session, &endInfo), "xrEndFrame");
@@ -1216,6 +1288,37 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         if (!_stricmp(arg1, "start"))   { MirvVrXr_SessionStart(); return; }
         if (!_stricmp(arg1, "stop"))    { MirvVrXr_SessionStop(); AfxVr_SetEye(1,false,0,0,0,0,0,0,0); AfxVr_SetEye(2,false,0,0,0,0,0,0,0); advancedfx::Message("AFXVR: session stopped.\n"); return; }
         if (!_stricmp(arg1, "quit"))    { MirvVrXr_Stop(); advancedfx::Message("AFXVR: disconnected.\n"); return; }
+        if (!_stricmp(arg1, "latency")) {
+            bool want = g_LowLatency;
+            if (3 <= args->ArgC()) {
+                want = (0 == _stricmp(args->ArgV(2), "low"));
+            } else {
+                want = !g_LowLatency;
+            }
+            if (want != g_LowLatency) {
+                // Switching mid-session would leave a wait outstanding on one side or the
+                // other. Cheap to be strict about.
+                if (g_SessionRunning) {
+                    advancedfx::Warning(
+                        "AFXVR: stop the session before changing this (mirv_vr_xr stop), or the\n"
+                        "AFXVR: outstanding xrWaitFrame ends up on the wrong thread.\n");
+                    return;
+                }
+                g_LowLatency = want;
+            }
+            advancedfx::Message(
+                "AFXVR: %s.\n"
+                "  %s\n",
+                g_LowLatency ? "low latency: wait and locate on the engine thread"
+                             : "safe: wait and locate on the render thread",
+                g_LowLatency
+                    ? "Poses belong to the frame being drawn. This is the canonical OpenXR\n"
+                      "  arrangement and it has not yet been worn - if the world swims or the\n"
+                      "  runtime complains about call order, switch back."
+                    : "Poses are a frame old by construction, which the runtime reprojects\n"
+                      "  away. Known to work.");
+            return;
+        }
         if (!_stricmp(arg1, "ui")) {
             if (3 <= args->ArgC()) {
                 // "in" keeps the UI in the eyes, "out" takes it out.
@@ -1260,6 +1363,7 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         "mirv_vr_xr fps [0|1] - log submitted frames per second, and where they go.\n"
         "mirv_vr_xr passes [n] - render n extra passes with no session, for debugging.\n"
         "mirv_vr_xr ui in|out - whether the HUD and demo menu are baked into the eyes.\n"
+        "mirv_vr_xr latency safe|low - which thread waits for and locates the head.\n"
         "\n"
         "Instance: %s, session: %s, state %i, submitting: %s\n"
         "Last measured: %.1f frames/s at %ux%u per eye.\n",
