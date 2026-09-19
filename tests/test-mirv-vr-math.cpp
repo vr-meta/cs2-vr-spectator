@@ -440,6 +440,8 @@ static void TestComposeSourceAngles();
 static void TestShouldRestoreBaseView();
 static void TestYawThenPitchQuat();
 static void TestRoomOffsetToWorld();
+static void TestRegionPlacementRoundTrip();
+static void TestRayQuadHit();
 
 static void RunTests() {
     TestAngleVectors();
@@ -458,6 +460,8 @@ static void RunTests() {
     TestShouldRestoreBaseView();
     TestYawThenPitchQuat();
     TestRoomOffsetToWorld();
+    TestRegionPlacementRoundTrip();
+    TestRayQuadHit();
 }
 
 CHECK_MAIN()
@@ -851,6 +855,239 @@ static void TestYawThenPitchQuat() {
     }
 }
 
+
+// ---------------------------------------------------------------------------------
+
+static void Normalise3(float v[3]) {
+    float length = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (length > 0.0f) { v[0] /= length; v[1] /= length; v[2] /= length; }
+}
+
+// The same quaternion PlaceRegion builds, so these point at the panels the headset
+// actually shows rather than at an idealised quad.
+static void RegionQuat(float azimuthDegrees, float elevationDegrees, float spread,
+                       float anchorYawRadians, float q[4]) {
+    const double d2r = 3.14159265358979323846 / 180.0;
+    YawThenPitchQuat((float)(anchorYawRadians + azimuthDegrees * spread * d2r),
+                     (float)(elevationDegrees * spread * d2r),
+                     q[0], q[1], q[2], q[3]);
+}
+
+static void TestRegionPlacementRoundTrip() {
+    check::Case("a panel dragged somewhere comes back as the numbers that put it there");
+
+    const float head[3] = { 0.4f, 1.3f, -0.9f };
+
+    // Every group in the shipped table, at both ends of the spread dial and at anchor
+    // yaws all the way round. A drag has to survive all of them: the numbers written back
+    // are what the NEXT frame rebuilds the pose from, so an inverse that is right only
+    // near yaw zero would move the panel the instant it was let go - which is exactly how
+    // the quaternion sign error hid, being zero at yaw zero too.
+    const float azimuths[]   = {  0.0f,  78.0f, -40.0f, 140.0f, -179.0f };
+    const float elevations[] = { 44.0f, -36.0f, -66.0f,  26.0f,    0.0f };
+    const float distances[]  = {  1.2f,   1.0f,  0.55f,   2.0f,    3.5f };
+    const float spreads[]    = {  1.0f,   0.8f,   1.3f };
+    const float anchors[]    = {  0.0f,   1.1f,  -2.6f,   3.0f };
+
+    for (int s = 0; s < 3; s++) {
+        for (int a = 0; a < 4; a++) {
+            for (int i = 0; i < 5; i++) {
+                float point[3];
+                RegionPlacementToPoint(head, anchors[a], spreads[s],
+                                       azimuths[i], elevations[i], distances[i], point);
+
+                float az = 0.0f, el = 0.0f, d = 0.0f;
+                PointToRegionPlacement(head, anchors[a], spreads[s], point, az, el, d);
+
+                CHECK_NEAR(d, distances[i], 1e-4);
+                CHECK_NEAR(el * spreads[s], elevations[i] * spreads[s], 1e-3);
+                // Azimuth is an angle: -179 and +181 are the same place.
+                CHECK_NEAR(NormalizeDegrees((az - azimuths[i]) * spreads[s]), 0.0f, 1e-3);
+            }
+        }
+    }
+
+    const float origin[3] = { 0.0f, 0.0f, 0.0f };
+
+    // Straight ahead at zero anchor yaw is -Z, which is OpenXR's forward.
+    {
+        float point[3];
+        RegionPlacementToPoint(origin, 0.0f, 1.0f, 0.0f, 0.0f, 2.0f, point);
+        CHECK_NEAR(point[0],  0.0f, 1e-5);
+        CHECK_NEAR(point[1],  0.0f, 1e-5);
+        CHECK_NEAR(point[2], -2.0f, 1e-5);
+    }
+
+    // Positive azimuth is to the left, which in OpenXR's axes is -X.
+    {
+        float point[3];
+        RegionPlacementToPoint(origin, 0.0f, 1.0f, 90.0f, 0.0f, 2.0f, point);
+        CHECK_NEAR(point[0], -2.0f, 1e-4);
+        CHECK_NEAR(point[2],  0.0f, 1e-4);
+    }
+
+    // Positive elevation is up.
+    {
+        float point[3];
+        RegionPlacementToPoint(origin, 0.0f, 1.0f, 0.0f, 90.0f, 2.0f, point);
+        CHECK_NEAR(point[1], 2.0f, 1e-4);
+    }
+
+    // Dragged into the viewer's own head: straight ahead, not whatever atan2(0,0) gives,
+    // so a panel pushed into the face does not reappear behind them.
+    {
+        float az = 9.0f, el = 9.0f, d = 9.0f;
+        PointToRegionPlacement(head, 0.5f, 1.0f, head, az, el, d);
+        CHECK_NEAR(d,  0.0f, 1e-6);
+        CHECK_NEAR(az, 0.0f, 1e-6);
+        CHECK_NEAR(el, 0.0f, 1e-6);
+    }
+}
+
+static void TestRayQuadHit() {
+    check::Case("a ray finds the panel it is pointed at, and only from the front");
+
+    const float head[3] = { 0.0f, 0.0f, 0.0f };
+    float t = 0.0f, u = 0.0f, v = 0.0f;
+
+    // The timeline as it actually hangs: below the line of sight, turned to face the
+    // viewer, 55 cm away.
+    const float az = 0.0f, el = -66.0f, dist = 0.55f, spread = 1.0f, anchor = 0.0f;
+    float centre[3], q[4];
+    RegionPlacementToPoint(head, anchor, spread, az, el, dist, centre);
+    RegionQuat(az, el, spread, anchor, q);
+
+    const float width = 0.5f, height = 0.09f;
+
+    float right[3], up[3];
+    QuatRotate(q[0], q[1], q[2], q[3], 1.0f, 0.0f, 0.0f, right[0], right[1], right[2]);
+    QuatRotate(q[0], q[1], q[2], q[3], 0.0f, 1.0f, 0.0f, up[0], up[1], up[2]);
+
+    // Pointed from the head straight at its centre.
+    {
+        float dir[3] = { centre[0], centre[1], centre[2] };
+        Normalise3(dir);
+        CHECK(RayQuadHit(head, dir, centre, q, width, height, t, u, v));
+        CHECK_NEAR(t, dist, 1e-4);   // the beam is as long as the panel is far
+        CHECK_NEAR(u, 0.5f, 1e-4);
+        CHECK_NEAR(v, 0.5f, 1e-4);
+    }
+
+    // A quarter right and a quarter up from centre, along the quad's own axes. Local +Y
+    // has to come out at v below a half, because v counts from the top the way the
+    // sheet's rects are written - get this upside down and every click lands mirrored.
+    {
+        float target[3], dir[3];
+        for (int i = 0; i < 3; i++) {
+            target[i] = centre[i] + right[i] * (0.25f * width) + up[i] * (0.25f * height);
+            dir[i] = target[i] - head[i];
+        }
+        Normalise3(dir);
+        CHECK(RayQuadHit(head, dir, centre, q, width, height, t, u, v));
+        CHECK_NEAR(u, 0.75f, 1e-3);
+        CHECK_NEAR(v, 0.25f, 1e-3);
+    }
+
+    // Just inside each edge hits, just outside misses. The edge is where a pointer feels
+    // wrong first, and it is the one thing an eye in a headset cannot judge.
+    {
+        const float inside[2]  = {  0.49f, -0.49f };
+        const float outside[2] = {  0.51f, -0.51f };
+
+        for (int k = 0; k < 2; k++) {
+            float target[3], dir[3];
+
+            for (int i = 0; i < 3; i++) target[i] = centre[i] + right[i] * (inside[k] * width);
+            for (int i = 0; i < 3; i++) dir[i] = target[i] - head[i];
+            Normalise3(dir);
+            CHECK(RayQuadHit(head, dir, centre, q, width, height, t, u, v));
+
+            for (int i = 0; i < 3; i++) target[i] = centre[i] + right[i] * (outside[k] * width);
+            for (int i = 0; i < 3; i++) dir[i] = target[i] - head[i];
+            Normalise3(dir);
+            CHECK(!RayQuadHit(head, dir, centre, q, width, height, t, u, v));
+
+            for (int i = 0; i < 3; i++) target[i] = centre[i] + up[i] * (inside[k] * height);
+            for (int i = 0; i < 3; i++) dir[i] = target[i] - head[i];
+            Normalise3(dir);
+            CHECK(RayQuadHit(head, dir, centre, q, width, height, t, u, v));
+
+            for (int i = 0; i < 3; i++) target[i] = centre[i] + up[i] * (outside[k] * height);
+            for (int i = 0; i < 3; i++) dir[i] = target[i] - head[i];
+            Normalise3(dir);
+            CHECK(!RayQuadHit(head, dir, centre, q, width, height, t, u, v));
+        }
+    }
+
+    // Pointed the other way: a miss, not a hit behind the hand.
+    {
+        float dir[3] = { -centre[0], -centre[1], -centre[2] };
+        Normalise3(dir);
+        CHECK(!RayQuadHit(head, dir, centre, q, width, height, t, u, v));
+        CHECK_NEAR(t, 0.0f, 1e-6);
+    }
+
+    // From behind the panel, pointed at it. Not clickable, deliberately: the pieces are
+    // spread around the viewer and a ray reaching the score strip from behind, through
+    // the back of the timeline, is not what the hand meant.
+    {
+        float behind[3], dir[3];
+        for (int i = 0; i < 3; i++) behind[i] = centre[i] + (centre[i] - head[i]);
+        for (int i = 0; i < 3; i++) dir[i] = centre[i] - behind[i];
+        Normalise3(dir);
+        CHECK(!RayQuadHit(behind, dir, centre, q, width, height, t, u, v));
+    }
+
+    // Parallel to the plane: no hit, and no division by a vanishing number on the way.
+    {
+        float from[3];
+        for (int i = 0; i < 3; i++) from[i] = centre[i] - right[i] - (centre[i] - head[i]) * 0.001f;
+        CHECK(!RayQuadHit(from, right, centre, q, width, height, t, u, v));
+    }
+
+    // A degenerate size is a miss, not a divide by zero.
+    {
+        float dir[3] = { centre[0], centre[1], centre[2] };
+        Normalise3(dir);
+        CHECK(!RayQuadHit(head, dir, centre, q, 0.0f, height, t, u, v));
+        CHECK(!RayQuadHit(head, dir, centre, q, width, 0.0f, t, u, v));
+    }
+
+    // Nearest hit wins. With two panels on one line of sight the distances have to order
+    // them, and that ordering is the whole of "which panel did the hand point at".
+    {
+        float nearPos[3], farPos[3], qn[4], qf[4];
+        RegionPlacementToPoint(head, 0.0f, 1.0f, 0.0f, 0.0f, 0.8f, nearPos);
+        RegionPlacementToPoint(head, 0.0f, 1.0f, 0.0f, 0.0f, 2.4f, farPos);
+        RegionQuat(0.0f, 0.0f, 1.0f, 0.0f, qn);
+        RegionQuat(0.0f, 0.0f, 1.0f, 0.0f, qf);
+
+        float dir[3] = { 0.0f, 0.0f, -1.0f };
+        float tNear = 0.0f, tFar = 0.0f;
+        CHECK(RayQuadHit(head, dir, nearPos, qn, 0.4f, 0.3f, tNear, u, v));
+        CHECK(RayQuadHit(head, dir, farPos,  qf, 0.4f, 0.3f, tFar,  u, v));
+        CHECK(tNear < tFar);
+        CHECK_NEAR(tNear, 0.8f, 1e-4);
+        CHECK_NEAR(tFar,  2.4f, 1e-4);
+    }
+
+    // A grab has to end where it began: hit a panel, convert the hit point back to
+    // placement numbers, and the panel must be describable as sitting exactly there.
+    {
+        float dir[3] = { centre[0], centre[1], centre[2] };
+        Normalise3(dir);
+        CHECK(RayQuadHit(head, dir, centre, q, width, height, t, u, v));
+
+        float hit[3];
+        for (int i = 0; i < 3; i++) hit[i] = head[i] + dir[i] * t;
+
+        float az2 = 0.0f, el2 = 0.0f, d2 = 0.0f;
+        PointToRegionPlacement(head, anchor, spread, hit, az2, el2, d2);
+        CHECK_NEAR(NormalizeDegrees(az2 - az), 0.0f, 1e-3);
+        CHECK_NEAR(el2, el, 1e-3);
+        CHECK_NEAR(d2, dist, 1e-4);
+    }
+}
 // ---------------------------------------------------------------------------------
 
 static void TestRoomOffsetToWorld() {

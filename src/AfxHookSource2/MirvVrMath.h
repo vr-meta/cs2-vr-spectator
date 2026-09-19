@@ -472,4 +472,132 @@ inline bool SteamInfPathFromExe(const char * exePath, char * out, size_t outSize
     return PathRelativeToFile(exePath, 2, "\\csgo\\steam.inf", out, outSize);
 }
 
+
+// ---------------------------------------------------------------------------------
+// Pointing at a panel
+// ---------------------------------------------------------------------------------
+
+// Where a piece of the HUD hangs, as a position.
+//
+// The panels are not stored as poses. They are stored as azimuth, elevation, distance and
+// width in a room-fixed yaw frame measured from the HEAD, which is what lets them keep
+// their arrangement when the viewer stands up, sits down or walks across the room. This is
+// the half of PlaceRegion that turns those numbers into a point.
+//
+// `spread` is the one dial that moves every group out of the middle of the view at once;
+// it multiplies both angles, so it has to appear in the inverse as well or a dragged panel
+// lands somewhere else the moment it is let go.
+inline void RegionPlacementToPoint(const float head[3], float anchorYawRadians, float spread,
+                                   float azimuthDegrees, float elevationDegrees,
+                                   float distanceMetres, float outPoint[3]) {
+    const double d2r = 3.14159265358979323846 / 180.0;
+
+    double yaw = (double)anchorYawRadians + (double)azimuthDegrees * spread * d2r;
+    double el  = (double)elevationDegrees * spread * d2r;
+    double cosEl = cos(el), sinEl = sin(el);
+
+    // OpenXR looks down -Z, so a yaw of zero is straight ahead at (0, 0, -distance).
+    outPoint[0] = head[0] + (float)(-sin(yaw) * cosEl * distanceMetres);
+    outPoint[1] = head[1] + (float)( sinEl            * distanceMetres);
+    outPoint[2] = head[2] + (float)(-cos(yaw) * cosEl * distanceMetres);
+}
+
+// And back again: the numbers that would put a piece at `point`.
+//
+// This is what makes a grabbed panel movable. A drag that ended in a pose would be thrown
+// away on the next frame, because the next frame rebuilds every pose from these four
+// numbers.
+inline void PointToRegionPlacement(const float head[3], float anchorYawRadians, float spread,
+                                   const float point[3],
+                                   float & outAzimuthDegrees, float & outElevationDegrees,
+                                   float & outDistanceMetres) {
+    const double r2d = 180.0 / 3.14159265358979323846;
+
+    double dx = (double)point[0] - head[0];
+    double dy = (double)point[1] - head[1];
+    double dz = (double)point[2] - head[2];
+
+    double distance = sqrt(dx * dx + dy * dy + dz * dz);
+    outDistanceMetres = (float)distance;
+
+    // On top of the viewer's head there is no direction to report. Say straight ahead
+    // rather than whatever atan2(0, 0) gives, so a panel dragged into the face does not
+    // reappear behind the viewer.
+    if (distance < 1e-6 || !(spread > 0.0f)) {
+        outAzimuthDegrees = 0.0f;
+        outElevationDegrees = 0.0f;
+        return;
+    }
+
+    double sinEl = dy / distance;
+    if (sinEl >  1.0) sinEl =  1.0;
+    if (sinEl < -1.0) sinEl = -1.0;
+    outElevationDegrees = (float)(asin(sinEl) * r2d / spread);
+
+    double yaw = atan2(-dx, -dz);
+    outAzimuthDegrees = (float)(NormalizeDegrees((float)((yaw - (double)anchorYawRadians) * r2d))
+                                / spread);
+}
+
+// Where a ray meets a quad layer, in the quad's own coordinates.
+//
+// An OpenXR quad occupies the XY plane of its pose, centred on the pose's position, and
+// shows only the face whose normal is its local +Z. That is the side the viewer is on,
+// because every piece is turned to face where the viewer stands - so a hit that counts is
+// a FRONT hit, and the back of a panel is not clickable. Deliberately: the pieces are
+// spread around the viewer and a ray reaching the score strip from behind, through the
+// back of the timeline, is not what the hand was pointing at.
+//
+// Misses, the back face, and a ray parallel to the plane all return false.
+//
+// On a hit, `outDistance` is how far along the ray the hit is - in metres only if
+// `rayDirection` is a unit vector, which is also what makes "nearest hit wins" mean what
+// it says when several panels overlap. (outU, outV) are texture coordinates: u from the
+// left edge, v from the TOP, matching the way the sheet's rects are written.
+inline bool RayQuadHit(const float rayOrigin[3], const float rayDirection[3],
+                       const float quadPosition[3], const float quadOrientation[4],
+                       float width, float height,
+                       float & outDistance, float & outU, float & outV) {
+    outDistance = 0.0f;
+    outU = 0.0f;
+    outV = 0.0f;
+    if (!(width > 0.0f) || !(height > 0.0f)) return false;
+
+    // Into the quad's frame: translate, then rotate by the conjugate, which is the inverse
+    // for the unit quaternions a pose carries.
+    float qx = -quadOrientation[0], qy = -quadOrientation[1], qz = -quadOrientation[2];
+    float qw =  quadOrientation[3];
+
+    float ox, oy, oz;
+    QuatRotate(qx, qy, qz, qw,
+               rayOrigin[0] - quadPosition[0],
+               rayOrigin[1] - quadPosition[1],
+               rayOrigin[2] - quadPosition[2],
+               ox, oy, oz);
+
+    float dx, dy, dz;
+    QuatRotate(qx, qy, qz, qw,
+               rayDirection[0], rayDirection[1], rayDirection[2],
+               dx, dy, dz);
+
+    // Parallel to the plane, or travelling away from it.
+    if (!(dz < -1e-6f)) return false;
+    // Starting behind it: that is the back face.
+    if (!(oz > 0.0f)) return false;
+
+    float t = -oz / dz;
+    if (!(t > 0.0f)) return false;
+
+    float hx = ox + t * dx;
+    float hy = oy + t * dy;
+    if (hx < -0.5f * width  || hx > 0.5f * width)  return false;
+    if (hy < -0.5f * height || hy > 0.5f * height) return false;
+
+    outDistance = t;
+    outU = hx / width + 0.5f;
+    outV = 0.5f - hy / height;
+    return true;
+}
+
 } // namespace AfxVrMath
+
