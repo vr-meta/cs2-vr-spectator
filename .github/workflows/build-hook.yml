@@ -180,6 +180,10 @@ jobs:
         env:
           AFXVR_OPENXR_DIR: ${{ github.workspace }}/openxr/pkg
         run: |
+          # AFXVR_VERSION is what the hook prints at startup and what a bug report quotes.
+          # Left unset here on purpose: this workflow builds main, not a release, and a
+          # build from main must not claim a release number. The release workflow passes
+          # -DAFXVR_VERSION=<tag>; everything else says 0.0.0-dev and means it.
           cmake --preset x64-release -DAFXVR_OPENXR_DIR="${{ github.workspace }}/openxr/pkg"
 
       - name: Build
@@ -209,4 +213,86 @@ jobs:
           path: |
             advancedfx/build/x64-release/AfxHookSource2/Release/AfxHookSource2.dll
             advancedfx/build/x64-release/AfxHookSource2/Release/AfxHookSource2.pdb
+          if-no-files-found: error
+
+      # Everything the hook cannot run without, in the one layout it can run from, so that
+      # assembling a release is copying a directory rather than knowing this list.
+      #
+      # The layout is forced, not chosen (docs/experiments/21-what-the-zip-has-to-contain.md):
+      # GetHlaeFolder() is computed from the hook DLL's own module path by stripping the file
+      # name and then one more directory, so resources\ has to be the PARENT of the directory
+      # the DLL sits in. And the DLL is found by GetModuleHandleW(L"AfxHookSource2.dll"), by
+      # that exact name, so it may not be renamed or version-stamped. Both failures are
+      # silent: no error, just no shaders.
+      - name: Stage the hook tree
+        shell: pwsh
+        run: |
+          $stage = "stage/hook"
+          New-Item -ItemType Directory -Force "$stage/x64" | Out-Null
+          New-Item -ItemType Directory -Force "$stage/resources/shaders" | Out-Null
+
+          # Ours, plus the five OpenEXR libraries the hook imports statically for image
+          # output - loaded whether or not anything is ever recorded, so they are not
+          # optional. They land in bin/Release, NOT beside the hook.
+          Copy-Item advancedfx/build/x64-release/AfxHookSource2/Release/AfxHookSource2.dll "$stage/x64/"
+          foreach ($n in 'OpenEXR-3_3','OpenEXRCore-3_3','Iex-3_3','IlmThread-3_3','Imath-3_1') {
+            Copy-Item "advancedfx/build/x64-release/bin/Release/$n.dll" "$stage/x64/"
+          }
+
+          # The OpenXR loader is opened by path at runtime, never linked, and the hook looks
+          # for it beside itself first. Apache-2.0, shipped rather than made a prerequisite.
+          Copy-Item openxr/pkg/native/x64/release/bin/openxr_loader.dll "$stage/x64/"
+
+          # The C++ runtime, beside the DLL, so that running this is not conditional on
+          # having installed a Microsoft redistributable. Taken from the toolchain's own
+          # redist directory rather than from System32: those are the files Microsoft
+          # licenses for redistribution, and System32's may be newer than we built against.
+          $redist = Get-ChildItem 'C:\Program Files*\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT' -Directory -ErrorAction SilentlyContinue |
+                    Sort-Object FullName | Select-Object -Last 1
+          if (-not $redist) { throw "VC143 x64 redist not found on the runner; the zip would need a redistributable installed." }
+          foreach ($n in 'MSVCP140.dll','VCRUNTIME140.dll','VCRUNTIME140_1.dll') {
+            Copy-Item (Join-Path $redist.FullName $n) "$stage/x64/"
+          }
+
+          # The six shaders the Source 2 hook actually loads, by name, from
+          # CampathDrawer.cpp and RenderSystemDX11Hooks.cpp. The ps20/vs20 ones in a full
+          # HLAE install are Source 1's and are not copied. The .h beside each .acs is a
+          # build artifact compiled into the DLL, not something opened at runtime.
+          foreach ($n in 'afx_line_vs_5_0','afx_line_ps_5_0','afx_drawtexture_vs_5_0',
+                         'afx_drawtexture_ps_5_0','afx_depth_vs_5_0','afx_depth_ps_5_0') {
+            Copy-Item "advancedfx/shaders/build/$n.acs" "$stage/resources/shaders/"
+          }
+
+          # CampathDrawer's font. Small, and its absence is a crash rather than a warning.
+          Copy-Item advancedfx/resources/resources/hexfont.tga "$stage/resources/"
+
+          # advancedfx's own licence travels with advancedfx's own code. The hook DLL is
+          # mostly theirs; MIT asks for the notice to go with it, and a release that drops
+          # it is not redistributable. resources\LICENSES in their tree covers NGettext,
+          # which is not shipped, so it is the root LICENSE that matters.
+          Copy-Item advancedfx/LICENSE "$stage/LICENSE-advancedfx.txt"
+
+          # Nothing else. AfxHook.dat is Source 1 and GoldSrc; AfxCppCli, NGettext, the
+          # other games' hooks and HLAE.exe itself are never loaded into cs2 - checked
+          # against a running game's module list, not guessed.
+          $missing = @()
+          foreach ($p in "$stage/x64/AfxHookSource2.dll", "$stage/x64/openxr_loader.dll",
+                         "$stage/x64/MSVCP140.dll", "$stage/resources/hexfont.tga",
+                         "$stage/resources/shaders/afx_depth_ps_5_0.acs") {
+            if (-not (Test-Path $p)) { $missing += $p }
+          }
+          if ($missing) { throw "staging incomplete: $($missing -join ', ')" }
+
+          Get-ChildItem $stage -Recurse -File |
+            ForEach-Object { "{0,10:N0}  {1}" -f $_.Length, (Resolve-Path $_.FullName -Relative) }
+          "total {0:N2} MB" -f ((Get-ChildItem $stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+
+      # Consumed by the release workflow, which unpacks it as hook\ inside the zip. Kept
+      # here rather than there so that a change to what the hook needs is made in the same
+      # place as the change that needed it.
+      - name: Upload the staged hook tree
+        uses: actions/upload-artifact@v4
+        with:
+          name: hook-tree
+          path: stage/hook
           if-no-files-found: error

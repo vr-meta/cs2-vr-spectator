@@ -1,34 +1,44 @@
 diff --git a/AfxHookSource2/CMakeLists.txt b/AfxHookSource2/CMakeLists.txt
-index 1d66528..d86c755 100644
+index 1d66528..3f2fe15 100644
 --- a/AfxHookSource2/CMakeLists.txt
 +++ b/AfxHookSource2/CMakeLists.txt
-@@ -59,6 +59,19 @@ SET(AFXHOOKSOURCE2SNIPPETS_OUTPUTS ${AFXHOOKSOURCE2SNIPPETS_OUTPUTS} PARENT_SCOP
+@@ -59,6 +59,28 @@ SET(AFXHOOKSOURCE2SNIPPETS_OUTPUTS ${AFXHOOKSOURCE2SNIPPETS_OUTPUTS} PARENT_SCOP
  
  add_definitions(-DGAME_CS2)
  
 +# cs2-vr-spectator: OpenXR headers. The loader is opened by explicit path at runtime
 +# rather than linked, so only the include directory is needed here.
-+if(NOT DEFINED AFXVR_OPENXR_DIR AND DEFINED ENV{AFXVR_OPENXR_DIR})
-+    set(AFXVR_OPENXR_DIR_DEFAULT "$ENV{AFXVR_OPENXR_DIR}")
-+else()
-+    set(AFXVR_OPENXR_DIR_DEFAULT "D:/Dev/cs2-vr-tools/openxr/pkg")
-+endif()
-+set(AFXVR_OPENXR_DIR "${AFXVR_OPENXR_DIR_DEFAULT}" CACHE PATH "OpenXR SDK root (headers under include/)")
++#
++# There is deliberately no default. It used to fall back to one developer's disk, which
++# meant that on anybody else's machine the wrong thing happened: the configure quoted a
++# path the reader had never heard of and could not be expected to create. Unset, the error
++# below is the whole answer.
++set(AFXVR_OPENXR_DIR "$ENV{AFXVR_OPENXR_DIR}" CACHE PATH "OpenXR SDK root (headers under include/)")
 +if(NOT EXISTS "${AFXVR_OPENXR_DIR}/include/openxr/openxr.h")
-+    message(FATAL_ERROR "cs2-vr-spectator: OpenXR headers not found at ${AFXVR_OPENXR_DIR}/include/openxr/openxr.h -- pass -DAFXVR_OPENXR_DIR=<sdk root>, or set the AFXVR_OPENXR_DIR environment variable. See cs2-vr-spectator/docs/install.md.")
++    message(FATAL_ERROR "cs2-vr-spectator: OpenXR headers not found. Pass -DAFXVR_OPENXR_DIR=<sdk root>, or set the AFXVR_OPENXR_DIR environment variable, so that <sdk root>/include/openxr/openxr.h exists. It is a nupkg from the KhronosGroup/OpenXR-SDK releases; cs2-vr-spectator's CONTRIBUTING.md has the download line. Looked at: '${AFXVR_OPENXR_DIR}'")
 +endif()
 +target_include_directories(${PROJECT_NAME} PRIVATE "${AFXVR_OPENXR_DIR}/include")
++
++# cs2-vr-spectator: what this build calls itself. Unset it stays "0.0.0-dev", which is what
++# MirvVrVersion.h says and what the hook then prints in every session - so a bug report
++# quoting that number is known to be somebody's own build rather than a download. The
++# release workflow passes -DAFXVR_VERSION=<tag>, and that is the only place a release
++# number is written down.
++if(AFXVR_VERSION)
++    target_compile_definitions(${PROJECT_NAME} PRIVATE AFXVR_VERSION="${AFXVR_VERSION}")
++endif()
 +
  #set_target_properties(
  #    ${PROJECT_NAME}
  #    PROPERTIES 
-@@ -248,6 +261,11 @@ target_sources(${PROJECT_NAME} PRIVATE
+@@ -248,6 +270,12 @@ target_sources(${PROJECT_NAME} PRIVATE
  
  	MirvTime.cpp
  	MirvTime.h
 +	MirvVr.cpp
 +	MirvVr.h
 +	MirvVrMath.h
++	MirvVrVersion.h
 +	MirvVrXr.cpp
 +	MirvVrXr.h
  
@@ -70,7 +80,7 @@ index cea3626..ad2a751 100644
          }
      }
 diff --git a/AfxHookSource2/RenderSystemDX11Hooks.cpp b/AfxHookSource2/RenderSystemDX11Hooks.cpp
-index 73b7c00..ce1c803 100644
+index 73b7c00..9c75388 100644
 --- a/AfxHookSource2/RenderSystemDX11Hooks.cpp
 +++ b/AfxHookSource2/RenderSystemDX11Hooks.cpp
 @@ -8,6 +8,8 @@
@@ -245,7 +255,7 @@ index 73b7c00..ce1c803 100644
          auto it = m_RecordingExtraPassesIterator;
          while(it != m_RecordingExtraPasses.end()) {
              it->EngineThread_BeginFrame();
-@@ -3041,6 +3159,36 @@ public:
+@@ -3041,6 +3159,43 @@ public:
      }    
  
      void EngineThread_BeginMainRenderPass() {
@@ -262,27 +272,34 @@ index 73b7c00..ce1c803 100644
 +        if (MirvVrXr_WantsPanel()) {
 +            auto & pMainPassCommands = g_RenderCommands.EngineThread_GetCommands();
 +
++            // cs2-vr-spectator: which frame this main pass belongs to, captured here on
++            // the engine thread and carried by value, exactly as the eye passes do it.
++            // Without it the callbacks read the CURRENT mode when they eventually run,
++            // and a pass queued while a map was loading can be cleared or submitted
++            // according to a mode that arrived after it.
++            unsigned long long vrPanelTicket = MirvVrXr_EngineThread_FrameTicket();
++
 +            // cs2-vr-spectator: between the world and the UI. Wiping the finished world
 +            // out of the back buffer here leaves the HUD drawing onto transparent black,
 +            // so the quad carries a HUD and not a second copy of the world hung in front
 +            // of the world. The monitor shows that same HUD-on-black while it is on.
 +            if (MirvVrXr_WantsPanelClear()) {
 +                pMainPassCommands.BeforeUi.Push(
-+                    [](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
-+                        MirvVrXr_RenderThread_ClearForPanel(pDeviceContext, pTexture);
++                    [vrPanelTicket](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
++                        MirvVrXr_RenderThread_ClearForPanel(pDeviceContext, pTexture, vrPanelTicket);
 +                    });
 +            }
 +
 +            pMainPassCommands.BeforePresent.Push(
-+                [](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
-+                    MirvVrXr_RenderThread_SubmitPanel(pDeviceContext, pTexture);
++                [vrPanelTicket](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
++                    MirvVrXr_RenderThread_SubmitPanel(pDeviceContext, pTexture, vrPanelTicket);
 +                });
 +        }
 +
          for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
              it->EngineThread_BeginFrame();
          }
-@@ -3563,6 +3711,10 @@ private:
+@@ -3563,6 +3718,10 @@ private:
      std::multiset<CStream,RenderPassCompare> m_RecordingExtraPasses;
      std::multiset<CStream,RenderPassCompare>::iterator m_RecordingExtraPassesIterator;
  

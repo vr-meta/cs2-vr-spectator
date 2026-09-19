@@ -58,7 +58,7 @@ const int kPanelSwapchain = 2;
 // pointing a quad at a corner of the sheet would draw whatever menu pixel happened to be
 // there.
 const int kCursorSwapchain = 3;
-const uint32_t kCursorTexels = 8;
+const uint32_t kCursorTexels = 32;
 
 // Enough for the HUD groups the sheet is cut into, with room to add one.
 const int kMaxPanelQuads = 8;
@@ -91,6 +91,11 @@ bool g_FrameBegun = false;
 // to the frame being ended.
 XrFrameState g_RtFrameState = { XR_TYPE_FRAME_STATE };
 
+struct CursorSnapshot {
+    bool hit = false;
+    XrPosef pose = {};
+};
+
 // What each frame was rendered with, kept until the render thread gets to it.
 //
 // The engine thread decides the poses for frame N and queues the passes; the render thread
@@ -100,15 +105,27 @@ XrFrameState g_RtFrameState = { XR_TYPE_FRAME_STATE };
 // is what judder is. So each pass carries a ticket, and the ticket names an entry here.
 //
 // Eight is several frames of slack; if the render thread ever falls further behind than
-// that the entry is simply gone and the submission falls back to the globals, which is the
-// old behaviour and no worse.
+// that the entry is simply gone and the projection falls back to the globals, which is
+// the old behaviour. Its overlays are omitted: neither a mode nor an aim can be borrowed
+// from another frame without putting the wrong thing over this image.
 struct FrameRecord {
     unsigned long long serial = 0;
     bool valid = false;
+    bool renderedValid = false;
     XrView rendered[2] = {};
     XrTime displayTime = 0;
     XrBool32 shouldRender = XR_FALSE;
     bool timingValid = false;   // only the low-latency path fills the timing in
+
+    // A mode change can reach the engine while the render thread still owes an eye from
+    // the old mode. Reading the live decision there abandoned that frame, or cut a team
+    // picker into HUD pieces. The sheet and its pointer travel with the same decision:
+    // moving the screen for the next frame must not move this frame's hit underneath it.
+    AfxVrMath::ModeResult mode = {};
+    bool sheetPlaced = false;
+    XrPosef sheetPose = {};
+    XrExtent2Df sheetSize = {};
+    CursorSnapshot cursor;
 
     // Where the game was aiming when this frame was composed, and which way the viewer
     // was facing. The crosshair is drawn from these and not from the globals: the render
@@ -127,7 +144,19 @@ FrameRecord g_FrameRing[kFrameRing];
 // The record the frame being submitted belongs to. Taken when the first eye arrives and
 // read when the layers are assembled with the second, because those are two calls.
 FrameRecord g_SubmittedFrame;
+unsigned long long g_SubmittedTicket = 0;
 unsigned long long g_FrameSerial = 0;
+
+bool ReadFrameRecord(unsigned long long ticket, FrameRecord & frame) {
+    std::lock_guard<std::mutex> lock(g_ViewMutex);
+    // A missing ticket must erase the previous answer. Projection poses have a fallback,
+    // but neither an aim nor a mode from a different frame describes this image.
+    frame = FrameRecord();
+    const FrameRecord & record = g_FrameRing[ticket % kFrameRing];
+    if (!ticket || !record.valid || record.serial != ticket) return false;
+    frame = record;
+    return true;
+}
 
 // How far behind the render thread was, in frames, when it submitted. Reported with the
 // frame rate: anything but a constant means the pose being reported does not belong to the
@@ -166,8 +195,9 @@ bool g_FrameWaited = false;
 bool g_MenuMode = false;
 
 // What the headset is showing and who the controllers belong to, decided once a frame by
-// AfxVrMath::DecideMode from five facts and nothing else. g_MenuMode above is kept as the
-// one thing the render thread reads without a lock: whether it owns the whole frame.
+// AfxVrMath::DecideMode from five facts and nothing else. These globals belong to the
+// engine thread; the render thread gets the decision through the pass's FrameRecord,
+// because even a locked read of the latest mode can describe a different frame.
 AfxVrMath::ModeResult g_Mode = {};
 AfxVrMath::ModeInputs g_ModeInputs = {};
 
@@ -197,6 +227,11 @@ bool SystemCursorShowing() {
 bool g_PlayingDemo = false;
 bool g_MenuPlaced = false;
 XrPosef g_MenuPose = {};
+XrExtent2Df g_MenuSize = {};
+// Only the aspect crosses back from the render thread, under g_ViewMutex. The engine
+// decides both the screen geometry and its hit test; a resize changes their shape
+// together on the next ticket instead of moving one while the other is being read.
+float g_MenuAspect = 1.0f;
 float g_MenuWidthDegrees = 70.0f;
 float g_MenuDistanceMetres = 2.0f;
 
@@ -421,10 +456,10 @@ bool g_AimValid[2] = { false, false };
 
 // Where the pointer last hit something, in the room. The render thread draws a dot there;
 // the engine thread is what decided it, because that is also where the mouse is moved
-// from and the two must not disagree.
-bool g_CursorHit = false;
-XrVector3f g_CursorPos = {};
-XrQuaternionf g_CursorOrientation = {};
+// from and the two must not disagree. Published complete under g_ViewMutex and then
+// copied into the ticket: publishing the hit first let the render thread draw a new
+// hit with an unfinished position and orientation, sometimes from two different hits.
+CursorSnapshot g_Cursor;
 int g_CursorHand = -1;
 float g_CursorU = 0.0f, g_CursorV = 0.0f;
 
@@ -646,10 +681,13 @@ float ShapeStick(float v) {
 // while wearing a headset, with no keyboard in reach. It has to be impossible by
 // construction, so every exit path calls one function and the list lives next to it.
 enum HeldKey {
-    kHeldForward = 0, kHeldBack, kHeldLeft, kHeldRight, kHeldCrouch, kHeldJump, kHeldCount
+    kHeldForward = 0, kHeldBack, kHeldLeft, kHeldRight,
+    kHeldCrouch, kHeldJump, kHeldUse, kHeldWalk, kHeldCount
 };
-const unsigned short kHeldVk[kHeldCount] = { 'W', 'S', 'A', 'D', VK_CONTROL, VK_SPACE };
-bool g_HeldKey[kHeldCount] = { false, false, false, false, false, false };
+const unsigned short kHeldVk[kHeldCount] = {
+    'W', 'S', 'A', 'D', VK_CONTROL, VK_SPACE, 'E', VK_SHIFT
+};
+bool g_HeldKey[kHeldCount] = { false, false, false, false, false, false, false, false };
 
 void SetHeldKey(int which, bool want) {
     if (which < 0 || which >= kHeldCount) return;
@@ -736,6 +774,7 @@ bool g_FovMutableKnown = false;
 bool g_PanelEnabled = false;
 bool g_PanelTransparent = true;
 bool g_PanelCopied = false;
+unsigned long long g_PanelTicket = 0;
 bool g_PanelPlaced = false;
 XrPosef g_PanelPose = {};
 float g_PanelWidthMetres = 1.6f;
@@ -772,6 +811,7 @@ struct PanelRegion {
     float distanceMetres;
     bool enabled;
     bool demoOnly;             // a piece that only exists while watching a recording
+    bool gameOnly;             // and one that only exists while playing
 };
 
 // Measured off docs/experiments/screenshots/exp16-sheet-full.png: the same 0.909 aspect as
@@ -785,9 +825,9 @@ struct PanelRegion {
 PanelRegion g_PanelRegions[] = {
     // Up high and wide, because it is what is being read at a glance. Both teams, the
     // score, the round timer, health and money.
-    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  44.0f, 40.0f, 1.2f, true,  false },
+    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  44.0f, 40.0f, 1.2f, true,  false, false },
     // Low and to the left, where a spectator's eyes go when they want the map.
-    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   78.0f, -36.0f, 20.0f, 1.0f, true,  false },
+    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   78.0f, -36.0f, 20.0f, 1.0f, true,  false, false },
     // Low and central, like a dashboard. It is also what a controller ray will click one
     // day, so close and below the line of sight is right.
     //
@@ -797,11 +837,23 @@ PanelRegion g_PanelRegions[] = {
     // freeze with no spectated target, so the strip did not exist to be measured. Without
     // it the viewer cannot see who they are watching, which is exactly what was needed to
     // tell whether the switch-player button had done anything.
-    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -66.0f, 50.0f, 0.55f, true,  true  },
+    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -66.0f, 50.0f, 0.55f, true,  true,  false },
     // Off, and NOT measured: there were no kills on screen when the sheet was captured, so
     // this rect is a guess at where the feed appears. Turn it on with mirv_vr_panel region
     // killfeed on and correct it with mirv_vr_panel rect.
-    { "killfeed",0.74f, 0.02f, 1.00f, 0.32f,  -40.0f,  26.0f, 24.0f, 2.0f, false, false },
+    { "killfeed",0.74f, 0.02f, 1.00f, 0.32f,  -40.0f,  26.0f, 24.0f, 2.0f, false, false, false },
+
+    // The player's own HUD, which only exists while playing and for which the spectator
+    // layout above has no place at all. Asked for from inside a bot game: "I cannot see
+    // what weapon I have or how many rounds are left" - and the hands are hidden, so there
+    // is not even a gun to look at.
+    //
+    // These two rects are ESTIMATES, unlike every other row here. The rest were measured
+    // off a screenshot; these cannot be, because they live in the bottom 42 per cent of
+    // the sheet, which the display clamps away and no desktop capture can reach. Correct
+    // them with mirv_vr_panel rect while wearing it, then write the numbers back here.
+    { "health",  0.00f, 0.88f, 0.30f, 1.00f,   30.0f, -42.0f, 20.0f, 0.9f, true,  false, true  },
+    { "ammo",    0.68f, 0.86f, 1.00f, 1.00f,  -30.0f, -42.0f, 20.0f, 0.9f, true,  false, true  },
 };
 const int kPanelRegionCount = (int)(sizeof(g_PanelRegions) / sizeof(g_PanelRegions[0]));
 
@@ -1372,6 +1424,10 @@ bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
 
     D3D11_TEXTURE2D_DESC probe = {};
     pTexture->GetDesc(&probe);
+    if (probe.Width && probe.Height) {
+        std::lock_guard<std::mutex> lock(g_ViewMutex);
+        g_MenuAspect = (float)probe.Height / (float)probe.Width;
+    }
 
     // The back buffer can change under us, and does: CS2's own video settings page changes
     // resolution without a restart, and the operator used it - from inside the headset,
@@ -1390,7 +1446,6 @@ bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
             probe.Width, probe.Height, g_SwapchainWidth, g_SwapchainHeight);
         DestroySwapchains();
         ReleaseCursorTexture();
-        g_MenuPlaced = false;   // the screen's shape follows the buffer's
     }
 
 
@@ -1479,6 +1534,11 @@ bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
 }
 
 void DestroySwapchains() {
+    // A copy belongs to an image in these swapchains, not merely to this frame. Keeping
+    // the flag after a resize submitted a new image that had never been released, and
+    // xrEndFrame rejected the world along with the stale panel.
+    g_PanelCopied = false;
+    g_PanelTicket = 0;
     for (int eye = 0; eye < kSwapchainCount; eye++) {
         if (g_Swapchain[eye] != XR_NULL_HANDLE && xrDestroySwapchain_) xrDestroySwapchain_(g_Swapchain[eye]);
         g_Swapchain[eye] = XR_NULL_HANDLE;
@@ -1780,26 +1840,85 @@ void MoveMouseToSheet(float u, float v, bool clickDown, bool clickUp) {
     SendInput(count, inputs, sizeof(INPUT));
 }
 
+void EngineThread_PlaceMenu() {
+    if (!g_Mode.sheet) return;
+
+    XrPosef mid = {};
+    float aspect;
+    {
+        std::lock_guard<std::mutex> lock(g_ViewMutex);
+        if (!g_ViewsValid) return;
+        mid = g_Views[0].pose;
+        mid.position.x = 0.5f * (g_Views[0].pose.position.x + g_Views[1].pose.position.x);
+        mid.position.y = 0.5f * (g_Views[0].pose.position.y + g_Views[1].pose.position.y);
+        mid.position.z = 0.5f * (g_Views[0].pose.position.z + g_Views[1].pose.position.z);
+        aspect = g_MenuAspect;
+    }
+
+    // Placed once, where the viewer was looking when the menu came up, and then left
+    // alone. A screen that follows the eyes cannot be looked away from, and a menu is
+    // exactly the thing somebody wants to glance away from and back to.
+    if (!g_MenuPlaced) {
+        const XrQuaternionf & q = mid.orientation;
+        double yaw = atan2(2.0 * (q.w * q.y + q.z * q.x), 1.0 - 2.0 * (q.x * q.x + q.y * q.y));
+
+        g_MenuPose.position.x = mid.position.x - (float)sin(yaw) * g_MenuDistanceMetres;
+        g_MenuPose.position.y = mid.position.y;
+        g_MenuPose.position.z = mid.position.z - (float)cos(yaw) * g_MenuDistanceMetres;
+        g_MenuPose.orientation.x = 0.0f;
+        g_MenuPose.orientation.y = (float)sin(yaw * 0.5);
+        g_MenuPose.orientation.z = 0.0f;
+        g_MenuPose.orientation.w = (float)cos(yaw * 0.5);
+        g_MenuPlaced = true;
+
+        advancedfx::Message("AFXVR: menu screen placed, %.0f degrees wide at %.1f m.\n",
+            g_MenuWidthDegrees, g_MenuDistanceMetres);
+    }
+
+    float halfWidth = tanf(0.5f * g_MenuWidthDegrees * (float)(M_PI / 180.0));
+    g_MenuSize.width = 2.0f * g_MenuDistanceMetres * halfWidth;
+    // The source aspect, whatever it is. The window is the eye size, so the sheet is
+    // taller than it is wide; stretching text to a friendlier shape is worse than an odd
+    // one.
+    g_MenuSize.height = g_MenuSize.width * aspect;
+}
+
+void PublishCursor(const CursorSnapshot & cursor) {
+    std::lock_guard<std::mutex> lock(g_ViewMutex);
+    g_Cursor = cursor;
+}
+
 // Point at the menu screen, and click it.
 //
 // Runs on the engine thread, with the aim poses located this frame and the screen's pose
 // already decided, so the ray and the thing it points at are from one instant. The render
 // thread only draws the answer.
 void EngineThread_PointAtMenu() {
-    bool wasHit = g_CursorHit;
-    g_CursorHit = false;
+    bool wasHit;
+    {
+        std::lock_guard<std::mutex> lock(g_ViewMutex);
+        wasHit = g_Cursor.hit;
+    }
+    CursorSnapshot cursor;
 
-    if (!g_MenuMode || !g_MenuPlaced) return;
+    // A loaded map still has a sheet when team select or the buy menu owns the mouse.
+    // Gating this on menu-only mode took gameplay input away without supplying a click.
+    // Let go when the sheet closes too, or a trigger held over the last button stays down.
+    if (!g_Mode.sheet || !g_Mode.pointer || !g_MenuPlaced) {
+        if (g_CursorPressed) {
+            MoveMouseToSheet(g_CursorU, g_CursorV, false, true);
+            g_CursorPressed = false;
+        }
+        PublishCursor(cursor);
+        return;
+    }
 
     float quad[4] = { g_MenuPose.orientation.x, g_MenuPose.orientation.y,
                       g_MenuPose.orientation.z, g_MenuPose.orientation.w };
     float centre[3] = { g_MenuPose.position.x, g_MenuPose.position.y, g_MenuPose.position.z };
 
-    float halfWidth = tanf(0.5f * g_MenuWidthDegrees * (float)(M_PI / 180.0));
-    float width = 2.0f * g_MenuDistanceMetres * halfWidth;
-    float height = (g_SwapchainWidth > 0)
-        ? width * (float)g_SwapchainHeight / (float)g_SwapchainWidth
-        : width;
+    float width = g_MenuSize.width;
+    float height = g_MenuSize.height;
 
     // The right hand wins a tie, because most people point with it and a cursor that
     // flickers between two hands resting on a desk is unusable. Otherwise the nearer hit.
@@ -1827,9 +1946,9 @@ void EngineThread_PointAtMenu() {
         bestT = t; bestHand = hand; bestU = u; bestV = v;
     }
 
-    // The trigger of the hand that is pointing. In menu mode there is no demo to seek
-    // through, so the seek actions are free and the trigger means what it means everywhere
-    // else: click the thing under the pointer.
+    // The trigger of the hand that is pointing. While a sheet owns the mouse the seek
+    // actions are free, even over a loaded map, and the trigger means what it means
+    // everywhere else: click the thing under the pointer.
     bool pressed = false;
     if (bestHand >= 0) {
         pressed = GetPressed(1 == bestHand ? g_SeekForwardAction : g_SeekBackAction);
@@ -1843,14 +1962,14 @@ void EngineThread_PointAtMenu() {
             g_CursorPressed = false;
         }
         if (wasHit) advancedfx::Message("AFXVR: pointer off the screen.\n");
+        PublishCursor(cursor);
         return;
     }
 
-    g_CursorHit = true;
     g_CursorHand = bestHand;
     g_CursorU = bestU;
     g_CursorV = bestV;
-    g_CursorOrientation = g_MenuPose.orientation;
+    cursor.pose.orientation = g_MenuPose.orientation;
 
     // The hit point, lifted a little towards the viewer so the dot is not fighting the
     // screen for the same depth.
@@ -1863,9 +1982,11 @@ void EngineThread_PointAtMenu() {
 
     float localX = (bestU - 0.5f) * width;
     float localY = (0.5f - bestV) * height;
-    g_CursorPos.x = centre[0] + right[0] * localX + up[0] * localY + normal[0] * kCursorLiftMetres;
-    g_CursorPos.y = centre[1] + right[1] * localX + up[1] * localY + normal[1] * kCursorLiftMetres;
-    g_CursorPos.z = centre[2] + right[2] * localX + up[2] * localY + normal[2] * kCursorLiftMetres;
+    cursor.pose.position.x = centre[0] + right[0] * localX + up[0] * localY + normal[0] * kCursorLiftMetres;
+    cursor.pose.position.y = centre[1] + right[1] * localX + up[1] * localY + normal[1] * kCursorLiftMetres;
+    cursor.pose.position.z = centre[2] + right[2] * localX + up[2] * localY + normal[2] * kCursorLiftMetres;
+    cursor.hit = true;
+    PublishCursor(cursor);
 
     bool pressEdge   =  pressed && !g_CursorPressed;
     bool releaseEdge = !pressed &&  g_CursorPressed;
@@ -1963,6 +2084,30 @@ float g_GazeTargetPitch = 0.0f;
 // wrong.
 bool g_AimGaze = true;
 
+// The gain to act on, which is not always the gain that was measured.
+//
+// A measurement can be poisoned by a view that could not move: dead, spectating a fixed
+// camera, frozen at a round start, or pitch against its own stop. Counts go out, the angle
+// does not change, and the honest conclusion from that evidence is "a count is worth zero
+// degrees" - after which the tracker refuses a zero gain, sends nothing, and there is
+// never any new evidence. The aim is dead for the rest of the session.
+//
+// Seen exactly that way from inside the headset, twice: "the crosshair has stopped moving
+// with the stick", with the log reading `hand 145.7/1.7  game 135.0/-0.0  sent 0/0  gain
+// 0.00000` - the hand alive, the game's view frozen, and nothing being sent.
+//
+// Not feeding those frames is the first line and is done elsewhere. This is the second: a
+// number far below anything a real mouse setting produces is not a measurement, it is the
+// residue of one, and the seed is a better answer than refusing to work.
+float EffectiveGain(const AfxVrMath::CountGainEstimator & estimator, float seed) {
+    float measured = estimator.DegreesPerCount();
+    if (fabsf(measured) < 0.2f * fabsf(seed)) return seed;
+    return measured;
+}
+
+const float kSeedGainYaw = -0.0275f;
+const float kSeedGainPitch = 0.0275f;
+
 void ResetAimLearning() {
     g_ServoYaw.Cancel();
     g_ServoPitch.Cancel();
@@ -1981,8 +2126,8 @@ void ResetAimLearning() {
     // setting. Being wrong by a factor of two only changes how fast the first correction
     // converges; the estimator measures the truth within a second of movement and
     // replaces it. Yaw is negative because a mouse moved right lowers a Source yaw.
-    g_GainYaw.Seed(-0.0275f);
-    g_GainPitch.Seed(0.0275f);
+    g_GainYaw.Seed(kSeedGainYaw);
+    g_GainPitch.Seed(kSeedGainPitch);
 
     g_GainInitialised = true;
 }
@@ -2008,6 +2153,11 @@ bool g_HandAimReady = false;     // the servo has been run, so the delay is know
 // Whether the hands and the gun belong to the body or to the headset while playing. Asked
 // for from inside the headset: "locking the hands to the headset is not a good idea".
 bool g_PlayFrameBody = true;
+
+// One line a second saying what hand aiming decided FROM. On, because the thing it is
+// diagnosing cannot be told from a thing that looks identical: the crosshair slides across
+// the picture when the ROOM turns, whether or not the hand is doing anything at all.
+bool g_HandAimLog = true;
 
 // Where the right hand points, as world angles, from the poses that travelled with this
 // frame rather than from whatever the engine thread has since moved on to.
@@ -2069,6 +2219,11 @@ void StopHandAim() {
 float g_AimDeadzoneDegrees = 30.0f;
 float g_AimSnapDegrees = 30.0f;
 
+// How far off the centre of the view the hand may pull the aim. Inside this the crosshair
+// moves with the hand; beyond it the hand is simply pointing outside the picture, and the
+// way to shoot something there is to look at it.
+float g_AimWindowDegrees = 22.0f;
+
 // Counts a second at full throw. A count is not a degree - the game's own sensitivity
 // decides that - so this is a number for the person holding the controller to turn, and
 // mirv_vr_aimspeed is how.
@@ -2089,6 +2244,9 @@ bool g_FireHeld = false;
 bool g_AltFireHeld = false;
 bool g_PrevWeaponNext = false;
 bool g_PrevWeaponPrev = false;
+bool g_PrevReload = false;
+bool g_PrevWalkToggle = false;
+ULONGLONG g_HandAimRetryAt = 0;
 bool g_PrevAimCentre = false;
 bool g_PrevTeamT = false;
 bool g_PrevTeamCt = false;
@@ -2163,11 +2321,24 @@ void PlayingInput(float dt) {
                         g_TrackYaw.lagFrames);
                 } else if (AfxVrMath::AimServo::kGaveUp == g_ServoYaw.outcome
                            || AfxVrMath::AimServo::kRefused == g_ServoYaw.outcome) {
-                    // Not listening, or a count is not yet worth a known angle. Try again
-                    // next frame rather than pushing counts at nothing.
+                    // Try again, on a slower beat.
+                    //
+                    // Cancel alone was a deadlock, and a review named it before a headset
+                    // did: Cancel does not clear the outcome, so the next frame reads the
+                    // same refusal, cancels again, and never starts anything. Worn, that is
+                    // "I can walk and shoot but the crosshair will not move", for ever,
+                    // with the log showing ready 0 and nothing ever sent.
+                    //
+                    // Putting it back to idle is what lets the next frame start a run. Half
+                    // a second between attempts, so a genuinely deaf game is not hammered
+                    // sixty times a second while the player is in a menu or dead.
                     g_ServoYaw.Cancel();
                     g_ServoPitch.Cancel();
-                } else {
+                    g_ServoYaw.outcome = AfxVrMath::AimServo::kIdle;
+                    g_ServoPitch.outcome = AfxVrMath::AimServo::kIdle;
+                    g_HandAimRetryAt = GetTickCount64() + 500;
+                } else if (GetTickCount64() >= g_HandAimRetryAt) {
+
                     g_GazeTargetYaw = handYaw;
                     g_GazeTargetPitch = handPitch;
                     g_ServoYaw.Start();
@@ -2176,30 +2347,66 @@ void PlayingInput(float dt) {
             }
             if (g_ServoYaw.Running()) {
                 sentX = g_ServoYaw.Step(AfxVrMath::NormalizeDegrees(g_GazeTargetYaw - base[1]),
-                                        g_GainYaw.DegreesPerCount());
+                                        EffectiveGain(g_GainYaw, kSeedGainYaw));
             }
             if (g_ServoPitch.Running()) {
                 sentY = g_ServoPitch.Step(g_GazeTargetPitch - base[0],
-                                          g_GainPitch.DegreesPerCount());
+                                          EffectiveGain(g_GainPitch, kSeedGainPitch));
             }
         } else {
-            sentX = g_TrackYaw.Step(handYaw, base[1], g_GainYaw.DegreesPerCount());
-            sentY = g_TrackPitch.Step(handPitch, base[0], g_GainPitch.DegreesPerCount());
+            // The hand aims inside the area you are looking at; the head decides where
+            // that area is.
+            //
+            // Asked for from inside the headset, after the first attempt: "the turning is
+            // horrible - past a point it starts turning my head, in jerks. Either turn only
+            // when the head turns, and with the stick; and let the hand only aim within the
+            // region we are looking at."
+            //
+            // So the target is the GAZE, with the hand allowed to pull it a limited
+            // distance off centre. Turning the head moves the target and the body follows
+            // it smoothly, through the same tracker - no threshold, no snap, nothing to
+            // cross. The stick turns the room, which turns the gaze, which the body
+            // follows. And the crosshair stays in front of you where it can be seen
+            // instead of wandering to the edge of the picture.
+            //
+            // The cone this replaces was not wrong in principle - it is what a stick-aimed
+            // headset needs - but with the hand aiming it put a lurch in the middle of
+            // every wide movement, which is exactly the thing VR must not do.
+            float headYaw = AfxVr_ViewYawDegrees();
+            float headPitch = AfxVr_ViewPitchDegrees();
+
+            float offYaw = AfxVrMath::NormalizeDegrees(handYaw - headYaw);
+            float offPitch = handPitch - headPitch;
+            if (offYaw >  g_AimWindowDegrees) offYaw =  g_AimWindowDegrees;
+            if (offYaw < -g_AimWindowDegrees) offYaw = -g_AimWindowDegrees;
+            if (offPitch >  g_AimWindowDegrees) offPitch =  g_AimWindowDegrees;
+            if (offPitch < -g_AimWindowDegrees) offPitch = -g_AimWindowDegrees;
+
+            float targetYaw = AfxVrMath::NormalizeDegrees(headYaw + offYaw);
+            float targetPitch = headPitch + offPitch;
+            if (targetPitch >  89.0f) targetPitch =  89.0f;
+            if (targetPitch < -89.0f) targetPitch = -89.0f;
+
+            sentX = g_TrackYaw.Step(targetYaw, base[1], EffectiveGain(g_GainYaw, kSeedGainYaw));
+            sentY = g_TrackPitch.Step(targetPitch, base[0], EffectiveGain(g_GainPitch, kSeedGainPitch));
         }
 
-        // The thumbstick goes back to what it is in every VR shooter, and in this
-        // project's own demo mode: turning. The deadzone cone belongs to stick aiming and
-        // is not wanted here - the hand decides where the aim is, and the stick decides
-        // which way the room faces.
-        if (GetVec2(g_TurnAction, x, y)) {
-            if (0.0f < g_SnapTurnDegrees) {
-                float step = AfxVrMath::SnapTurn(g_SnapTurn, x, g_SnapTurnDegrees);
-                if (step) AfxVr_AddYaw(step);
-            } else {
-                float t = ShapeStick(x);
-                if (t) AfxVr_AddYaw(-t * g_TurnSpeed * dt);
+        // What it decided FROM, not what it decided - the rule this project keeps learning.
+        // Once a second, so it can be left on while playing.
+        {
+            static ULONGLONG lastLogged = 0;
+            ULONGLONG now = GetTickCount64();
+            if (g_HandAimLog && now - lastLogged >= 1000) {
+                lastLogged = now;
+                advancedfx::Message(
+                    "AFXVR: hand %.1f/%.1f  game %.1f/%.1f  sent %i/%i  gain %.5f%s  lag %i  ready %i\n",
+                    handYaw, handPitch, base[1], base[0], sentX, sentY,
+                    EffectiveGain(g_GainYaw, kSeedGainYaw), g_GainYaw.Converged() ? " measured" : " seeded",
+                    g_TrackYaw.lagFrames, g_HandAimReady ? 1 : 0);
             }
         }
+
+
     } else if (kAimStick == g_AimMethod) {
         // Look at something and click the right stick to bring the aim to it. Refuses
         // itself until a count is worth a known number of degrees.
@@ -2216,17 +2423,17 @@ void PlayingInput(float dt) {
 
         if (g_ServoYaw.Running()) {
             sentX = g_ServoYaw.Step(AfxVrMath::NormalizeDegrees(g_GazeTargetYaw - base[1]),
-                                    g_GainYaw.DegreesPerCount());
+                                    EffectiveGain(g_GainYaw, kSeedGainYaw));
         }
         if (g_ServoPitch.Running()) {
-            sentY = g_ServoPitch.Step(g_GazeTargetPitch - base[0], g_GainPitch.DegreesPerCount());
+            sentY = g_ServoPitch.Step(g_GazeTargetPitch - base[0], EffectiveGain(g_GainPitch, kSeedGainPitch));
         }
 
         if (GetVec2(g_TurnAction, x, y)) {
             float turn = ShapeStick(x);
             float pitch = ShapeStick(y);
-            float gainYaw = g_GainYaw.DegreesPerCount();
-            float gainPitch = g_GainPitch.DegreesPerCount();
+            float gainYaw = EffectiveGain(g_GainYaw, kSeedGainYaw);
+            float gainPitch = EffectiveGain(g_GainPitch, kSeedGainPitch);
 
             if (!g_ServoYaw.Running()) {
                 float wanted = (0.0f != gainYaw && g_GainYaw.Converged())
@@ -2248,33 +2455,108 @@ void PlayingInput(float dt) {
         if (0.0f != step) AfxVr_AddYaw(step);
     }
 
+    // Turning, whatever is driving the aim - including nothing.
+    //
+    // This lived inside the hand and stick branches, so with aiming switched off, which is
+    // the default, the right stick did nothing at all in a game. Reported from the headset
+    // as "the right stick will not let me turn round": it was not that a hundred and eighty
+    // degrees was too far, it was that no angle worked.
+    //
+    // In stick-aim the stick is the aim and the body follows through the cone, so turning
+    // is handled there instead.
+    if (kAimStick != g_AimMethod && GetVec2(g_TurnAction, x, y)) {
+        if (0.0f < g_SnapTurnDegrees) {
+            float step = AfxVrMath::SnapTurn(g_SnapTurn, x, g_SnapTurnDegrees);
+            if (step) AfxVr_AddYaw(step);
+        } else {
+            float t = ShapeStick(x);
+            if (t) AfxVr_AddYaw(-t * g_TurnSpeed * dt);
+        }
+    }
+
     if (sentX || sentY) QueueMouseMove(sentX, sentY);
+
 
     // Everything sent this frame, servo, tracker and stick together: those bursts are the
     // best training data there is.
-    g_GainYaw.Feed(sentX, base[1]);
-    g_GainPitch.Feed(sentY, base[0]);
+    //
+    // Except at a stop. Source clamps pitch at plus or minus 89 degrees, so once the view
+    // is looking straight up or straight down, further counts change nothing - and an
+    // estimator told "we sent a hundred counts and the angle did not move" learns that a
+    // count is worth zero degrees. After that the tracker refuses a zero gain and the
+    // vertical is dead for the rest of the session while the horizontal carries on working.
+    //
+    // That is exactly what was reported from inside the headset: "at first it moved in all
+    // directions, then only horizontally". A clamp is not a measurement; feed nothing there.
+    //
+    // The same reasoning covers a view that is not ours to move at all - dead, spectating a
+    // fixed camera, or frozen at a round start. A whole second of counts against an angle
+    // that cannot move would teach the same lie, so a view that has not moved AT ALL while
+    // counts were being sent is treated as not listening rather than as infinitely heavy.
+    {
+        bool pitchAtStop = (base[0] >= 88.5f) || (base[0] <= -88.5f);
 
+        static float lastYaw = 0.0f, lastPitch = 0.0f;
+        static int frozenFrames = 0;
+        bool moved = (fabsf(AfxVrMath::NormalizeDegrees(base[1] - lastYaw)) > 0.001f)
+                  || (fabsf(base[0] - lastPitch) > 0.001f);
+        if (moved || (0 == sentX && 0 == sentY)) frozenFrames = 0;
+        else frozenFrames++;
+        lastYaw = base[1];
+        lastPitch = base[0];
+        bool deaf = frozenFrames > 15;
+
+        if (!deaf) {
+            g_GainYaw.Feed(sentX, base[1]);
+            if (!pitchAtStop) g_GainPitch.Feed(sentY, base[0]);
+        }
+    }
+
+
+    // The buttons.
+    //
+    //   left grip      crouch            right grip        jump
+    //   left trigger   use / defuse      right trigger     fire
+    //   left stick     walk              right stick       turn
+    //   left click     slow walk         right click       reload
+    //   X / Y          team, while a picker is up          A  next weapon
+    //                                                      B  alternative fire
+    //
+    // "Use" earns a trigger because it is the most needed contextual action in the game:
+    // defuse, plant, open, and pick a weapon off the ground - which CS2 does automatically
+    // only into an empty slot, so without this key a gun you are standing on stays there.
+    // Reported that way from the headset: "I step on a weapon and it does not pick up."
     SetHeldKey(kHeldCrouch, GetPressed(g_FreeLookAction));   // left grip
     SetHeldKey(kHeldJump,   GetPressed(g_ModeAction));       // right grip
+    SetHeldKey(kHeldUse,    GetPressed(g_SeekBackAction));   // left trigger
 
     bool fire = GetPressed(g_SeekForwardAction);             // right trigger
     if (fire != g_FireHeld) { g_FireHeld = fire; QueueMouseButton(false, fire); }
 
-    bool altFire = GetPressed(g_SeekBackAction);             // left trigger
+    bool altFire = GetPressed(g_SlowMoAction);               // B
     if (altFire != g_AltFireHeld) { g_AltFireHeld = altFire; QueueMouseButton(true, altFire); }
 
     bool next = GetPressed(g_PauseAction);                   // A
     if (next && !g_PrevWeaponNext) QueueMouseWheel(1);
     g_PrevWeaponNext = next;
 
-    bool prev = GetPressed(g_SlowMoAction);                  // B
-    if (prev && !g_PrevWeaponPrev) QueueMouseWheel(-1);
-    g_PrevWeaponPrev = prev;
+    // Reload on the right stick's click, asked for by name. A tap, not a hold.
+    bool reload = GetPressed(g_RecenterAction);
+    if (reload && !g_PrevReload) QueueKeyTap('R');
+    g_PrevReload = reload;
 
+    // Slow walk toggles rather than being held: Shift in this game is held for whole
+    // crossings, and a thumb resting on a stick click for that long is not a thing anyone
+    // should have to do.
+    bool walkPress = GetPressed(g_ResetAction);              // left stick click
+    if (walkPress && !g_PrevWalkToggle) {
+        SetHeldKey(kHeldWalk, !g_HeldKey[kHeldWalk]);
+        advancedfx::Message("AFXVR: %s.\n", g_HeldKey[kHeldWalk] ? "walking" : "running");
+    }
+    g_PrevWalkToggle = walkPress;
 }
 
-void ProcessInput() {
+void ProcessInput(const AfxVrMath::ModeResult & mode) {
 
     // Not focused any more - the runtime dashboard is up, or the headset came off - so
     // the controllers are not ours. Everything being held has to come up FIRST: the mode
@@ -2338,7 +2620,7 @@ void ProcessInput() {
     // team picker they cannot answer is stuck completely. jointeam is a plain console
     // command, so X and Y answer it directly - and those two buttons have no other job
     // while a modal is up, so this overloads nothing.
-    if (AfxVrMath::kVrModePlay == g_Mode.mode && g_Mode.pointer) {
+    if (AfxVrMath::kVrModePlay == mode.mode && mode.pointer) {
         bool t  = GetPressed(g_PrevAction);   // X
         bool ct = GetPressed(g_NextAction);   // Y
         if (t && !g_PrevTeamT) {
@@ -2361,7 +2643,7 @@ void ProcessInput() {
     // different layout rather than the same one with exceptions in it. While a sheet is up
     // neither applies: the pointer owns the mouse, and an absolute pointer fighting a
     // relative aim on one device is a fight the aim wins.
-    if (AfxVrMath::ModeTakesGameInput(g_Mode)) {
+    if (AfxVrMath::ModeTakesGameInput(mode)) {
         PlayingInput(dt);
         return;
     }
@@ -2369,7 +2651,7 @@ void ProcessInput() {
     ReleaseHeldKeys();
     ReleaseGameButtons();
 
-    if (AfxVrMath::kVrModePlay == g_Mode.mode) return;   // a map, but a sheet is up
+    if (mode.pointer || AfxVrMath::kVrModePlay == mode.mode) return;   // a sheet owns the mouse
 
     float x = 0.0f, y = 0.0f;
 
@@ -2721,15 +3003,53 @@ void EngineThread_WaitAndLocate() {
 
     // Input here too, which it was never going to hurt: one sync per frame either way, and
     // a stick read at the top of the frame acts on the frame it was read for.
-    ProcessInput();
+    ProcessInput(g_Mode);
 
     LocateViews(g_FrameState.predictedDisplayTime);
 
-    // The hands, at the same instant as the eyes, and then what they are pointing at. On
-    // this thread deliberately: the mouse is moved from here too, and a pointer decided in
-    // one place cannot disagree with the dot drawn from it.
+    // The hands, at the same instant as the eyes. The caller places the sheet and then
+    // tests these rays on this thread, so the mouse and the ticket's dot share one hit.
     LocateAim(g_FrameState.predictedDisplayTime);
-    EngineThread_PointAtMenu();
+}
+
+void PublishFrameRecord(const XrView * rendered) {
+    std::lock_guard<std::mutex> lock(g_ViewMutex);
+
+    // One entry per frame, complete, written under the lock in one go. The previous
+    // arrangement published the positions in one lock scope and the orientations in
+    // another, so a reader between the two got half of one frame and half of another.
+    // Publish even before the first locate succeeds: a menu pass still needs its own
+    // mode and timing, and returning the previous ticket would silently reuse its mode.
+    g_FrameSerial++;
+    FrameRecord & record = g_FrameRing[g_FrameSerial % kFrameRing];
+    record = FrameRecord();
+    record.serial = g_FrameSerial;
+    record.mode = g_Mode;
+    record.sheetPlaced = g_Mode.sheet && g_MenuPlaced;
+    record.sheetPose = g_MenuPose;
+    record.sheetSize = g_MenuSize;
+    record.cursor = g_Cursor;
+    record.displayTime = g_FrameState.predictedDisplayTime;
+    record.shouldRender = g_FrameState.shouldRender;
+    // Only meaningful in low-latency mode: there the engine thread did the xrWaitFrame
+    // this frame will be begun and ended against. In safe mode the render thread waits
+    // for itself and g_FrameState here is a frame old.
+    record.timingValid = g_LowLatency;
+
+    if (rendered) {
+        // Remember exactly what this frame is being rendered with, for the layer.
+        g_RenderedViews[0] = record.rendered[0] = rendered[0];
+        g_RenderedViews[1] = record.rendered[1] = rendered[1];
+        g_RenderedViewsValid = record.renderedValid = true;
+
+        float base[3];
+        AfxVr_GetBaseAngles(base);
+        record.aimYaw = base[1];
+        record.aimPitch = base[0];
+        record.bodyForwardWorld = BodyForwardWorldDegrees();
+        record.roomForwardRadians = RoomForwardYawRadians();
+    }
+    record.valid = true;
 }
 
 // "session state 1" is not a diagnosis. IDLE in particular means the runtime has taken
@@ -2990,7 +3310,8 @@ void PipeStart() {
 
     advancedfx::Message(
         "AFXVR: console pipe open at %ls, for this user only.\n"
-        "AFXVR: scripts/send-command.ps1 writes to it. mirv_vr_pipe 0 closes it.\n",
+        "AFXVR: scripts/send-command.ps1 writes to it, and so can anything else that opens a\n"
+        "AFXVR: named pipe. mirv_vr_pipe 0 closes it.\n",
         kPipeName);
 }
 
@@ -3028,13 +3349,34 @@ void EngineThread_Pipe() {
 // and the key needs the game window to have focus, which it does not while a headset is
 // being put on - both of those have cost a session already.
 //
-// The condition is not "the game is up", it is "a demo is playing": the view struct reads
-// like a camera, a demo tick is available, and that tick has MOVED since the last frame.
-// Started against the menu the viewer gets a menu; started against a demo that is loaded
-// but not yet running, the session begins before there is a camera worth wearing.
+// The preferred condition is not "the game is up", it is "a demo is playing": the view
+// struct reads like a camera, a demo tick is available, and that tick has MOVED since the
+// last frame. Started against a demo that is loaded but not yet running, the session begins
+// before there is a camera worth wearing.
+//
+// But that condition alone leaves the menu unreachable, and the menu is now a place we can
+// actually go: CS2's own interface on a quad, with a controller ray. Somebody who launched
+// without a demo - to pick a map, or to start a game against bots - has a headset on, no
+// demo tick to wait for, and NO CONSOLE to type mirv_vr_xr start into: the window is taller
+// than the display, Windows clamps it, and the input line is off-screen. So a second signal
+// is needed, and the only one available before a world exists is that the game is rendering
+// at all. This function is called once per frame from MirvVrXr_EngineThread_Frame, demo or
+// not, so counting its own calls is that signal.
+//
+// The two are not interchangeable and the log says which one fired. The frame count is the
+// slower of the two on purpose: with a demo loading, the tick starts moving long before
+// kAutoStartMenuFrames is reached, so the demo path still wins the race and the session
+// still begins on a real camera rather than on the loading screen behind it.
 int g_AutoStart = -1;          // -1 not read yet, 0 off, 1 armed
 bool g_AutoStartDone = false;
 int g_AutoStartLastTick = -1;
+int g_AutoStartFrames = 0;
+
+// About four seconds at a menu's frame rate. Long enough for the D3D11 device and the swap
+// chain to exist - SessionStart refuses without a device and would waste its one attempt -
+// and long enough for a demo that is going to load to have started ticking. Short enough
+// that somebody already wearing the headset does not conclude it is broken.
+const int kAutoStartMenuFrames = 240;
 
 void EngineThread_AutoStart() {
     if (g_AutoStartDone) return;
@@ -3045,8 +3387,9 @@ void EngineThread_AutoStart() {
             && 0 != atoi(value)) ? 1 : 0;
         if (1 == g_AutoStart) {
             advancedfx::Message(
-                "AFXVR: AFXVR_AUTOSTART is set. The headset session will start by itself once a\n"
-                "AFXVR: demo is playing. mirv_vr_autostart 0 stops that.\n");
+                "AFXVR: AFXVR_AUTOSTART is set. The headset session will start by itself: as soon\n"
+                "AFXVR: as a demo is running, or a few seconds in if there is no demo, so the menu\n"
+                "AFXVR: can be used from inside the headset. mirv_vr_autostart 0 stops that.\n");
         }
     }
     if (1 != g_AutoStart) return;
@@ -3054,19 +3397,38 @@ void EngineThread_AutoStart() {
     // Somebody got there first, by hand or by config. Nothing left to do.
     if (XR_NULL_HANDLE != g_Session) { g_AutoStartDone = true; return; }
 
-    if (0 == AfxVr_PlausibleViewCount()) return;
+    g_AutoStartFrames++;
 
     int tick = 0;
-    if (!g_MirvTime.GetCurrentDemoTick(tick)) { g_AutoStartLastTick = -1; return; }
-    if (-1 == g_AutoStartLastTick || tick == g_AutoStartLastTick) {
-        g_AutoStartLastTick = tick;
-        return;
+    bool haveDemo = g_MirvTime.GetCurrentDemoTick(tick);
+
+    if (haveDemo) {
+        // A demo: wait for the camera as well as for the clock.
+        if (0 == AfxVr_PlausibleViewCount()) return;
+        if (-1 == g_AutoStartLastTick || tick == g_AutoStartLastTick) {
+            g_AutoStartLastTick = tick;
+            return;
+        }
+    } else {
+        // No demo. Nothing here can be waited for except the game drawing frames, and the
+        // view struct is deliberately NOT required: at the menu there may be no 3D view
+        // being set up at all, and menu mode does not write one. Anything that does write
+        // it is still gated on the plausibility check, which has not been relaxed.
+        g_AutoStartLastTick = -1;
+        if (g_AutoStartFrames < kAutoStartMenuFrames) return;
     }
 
     // Once, whatever happens next: a session that refuses to start will refuse again sixty
     // times a second, and the person it is refusing for is wearing the headset.
     g_AutoStartDone = true;
-    advancedfx::Message("AFXVR: autostart: the demo is running at tick %i; starting the session.\n", tick);
+    if (haveDemo) {
+        advancedfx::Message(
+            "AFXVR: autostart: the demo is running at tick %i; starting the session.\n", tick);
+    } else {
+        advancedfx::Message(
+            "AFXVR: autostart: no demo after %i frames; starting the session so the menu can be\n"
+            "AFXVR: used from inside the headset.\n", g_AutoStartFrames);
+    }
     if (!MirvVrXr_SessionStart()) {
         advancedfx::Warning("AFXVR: autostart: it would not start. F9 tries again.\n");
     }
@@ -3085,8 +3447,9 @@ bool MirvVrXr_WantsPanel() {
     // Deliberately not gated on a session. The callbacks it queues each gate themselves,
     // and the alpha probe - the one thing that answers whether a transparent panel can
     // work at all - has to run at a desk with no headset in the building.
-    // In menu mode the main pass IS the picture, whether or not the HUD panel is on.
-    return g_PanelEnabled || g_MenuMode;
+    // A sheet needs the main pass whether or not the HUD panel is on: over a map it
+    // carries the team picker just as it carries the whole picture at the main menu.
+    return g_PanelEnabled || g_Mode.sheet;
 }
 
 bool MirvVrXr_WantsPasses() {
@@ -3238,7 +3601,8 @@ bool MirvVrXr_SessionStart() {
             "AFXVR: the headset. A session opened underneath it is not scheduled: xrWaitFrame\n"
             "AFXVR: takes hundreds of milliseconds, the frame rate collapses, and CS2 stops\n"
             "AFXVR: responding with its render thread parked inside the wait.\n"
-            "AFXVR: Close SteamVR. scripts/start-vr.ps1 refuses to launch while it is up.\n");
+            "AFXVR: Close SteamVR, then start the game again. Both launchers refuse while it\n"
+            "AFXVR: is up: cs2vr.exe in a release, scripts/start-vr.ps1 in the source tree.\n");
     }
 
     advancedfx::Message("AFXVR: session created; waiting for the runtime to make it ready.\n");
@@ -3397,7 +3761,46 @@ void MirvVrXr_EngineThread_Frame() {
         }
     }
 
+    // A camera that has jumped means the viewer is somewhere else entirely: respawned, or
+    // switched to watching another player, or teleported.
+    //
+    // The room offset must not survive that. It is measured from wherever the viewer was
+    // standing when it was last zeroed, and while they were dead and being carried around
+    // other people's cameras it went on accumulating - so the next spawn puts the eyes that
+    // far out of the new body. Reported from the headset: "I spawned not in my body but a
+    // metre to the right of it", and then the right guess about why: "maybe after I was
+    // killed and watched other players' cameras... maybe we need a reset each round."
+    //
+    // A jump is a better signal than a round, because it also catches the camera changes
+    // while dead, and it needs nothing from the game but the number already being read.
+    {
+        static float lastOrigin[3] = { 0.0f, 0.0f, 0.0f };
+        static bool haveLastOrigin = false;
+
+        float origin[3];
+        AfxVr_GetBaseOrigin(origin);
+
+        if (haveLastOrigin) {
+            float dx = origin[0] - lastOrigin[0];
+            float dy = origin[1] - lastOrigin[1];
+            float dz = origin[2] - lastOrigin[2];
+            // Two hundred units is about five metres - further than anybody runs in one
+            // frame, and far short of the distances a spawn or a camera change moves.
+            if (dx * dx + dy * dy + dz * dz > 200.0f * 200.0f) {
+                g_RoomRefValid = false;
+                if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
+                    advancedfx::Message("AFXVR: the camera jumped; standing where you stand now.\n");
+                }
+            }
+        }
+        lastOrigin[0] = origin[0];
+        lastOrigin[1] = origin[1];
+        lastOrigin[2] = origin[2];
+        haveLastOrigin = true;
+    }
+
     // What the headset is showing, and therefore who the controllers belong to. Decided
+
     // here, once a frame, before anything depends on it - the pass loop asks
     // MirvVrXr_WantsPasses immediately afterwards.
     {
@@ -3468,7 +3871,42 @@ void MirvVrXr_EngineThread_Frame() {
             AfxVr_SetHeadAnglesOncePerFrame(
                 !(AfxVrMath::kVrModePlay == next.mode && g_PlayFrameBody));
 
+            // Face the way the player is facing.
+            //
+            // Playing, the picture is the head plus the accumulated turn and does NOT
+            // include the game's own yaw - that is what frees the hands from the head. The
+            // cost is that the direction the map spawned the player in is not inherited by
+            // anything, so the viewer arrives looking wherever the room happened to face.
+            // Reported from the headset: "I spawned and the camera was looking at my own
+            // back."
+            //
+            // So turn the room onto the player once, on the way in. Not every frame: the
+            // whole point of this mode is that the world does not rotate unless the viewer
+            // asks, and following the player's yaw continuously would put every mouse
+            // movement back into the picture.
+            if (AfxVrMath::kVrModePlay == next.mode && AfxVrMath::kVrModePlay != g_Mode.mode) {
+                float base[3];
+                AfxVr_GetBaseAngles(base);
+                float turn = AfxVrMath::NormalizeDegrees(base[1] - BodyForwardWorldDegrees());
+                if (0.0f != turn) AfxVr_AddYaw(turn);
+
+                // And stand where the player stands.
+                //
+                // The room's origin is captured on the session's first frame. Everything the
+                // viewer has walked or leaned since is added to the camera - so arriving in a
+                // game after wandering a metre across the room puts the eyes a metre out of
+                // the body, looking at it from outside. Reported exactly that way: "I spawned
+                // not in my body but about a metre to the right of it, I can see myself."
+                //
+                // Zeroing it here means the room's origin is wherever the viewer happens to
+                // be standing when the map starts, which is the only defensible answer: there
+                // is no other moment that means anything to them.
+                g_RoomRefValid = false;
+            }
+
+
             if (AfxVrMath::kVrModePlay == next.mode) {
+
                 if (!g_FreeLookWasOn) {
                     g_FreeLookBeforePlay = AfxVr_GetFreeLook();
                     g_FreeLookWasOn = true;
@@ -3491,7 +3929,7 @@ void MirvVrXr_EngineThread_Frame() {
                     SetFocus(hwnd);
                 }
             }
-            if (!next.worldInEyes) g_MenuPlaced = false;
+            if (next.sheet && (!g_Mode.sheet || next.mode != g_Mode.mode)) g_MenuPlaced = false;
         }
 
         g_ModeInputs = in;
@@ -3503,19 +3941,20 @@ void MirvVrXr_EngineThread_Frame() {
     // In low-latency mode this is where the frame's poses come from, located a few
     // microseconds ago rather than a whole frame ago.
     EngineThread_WaitAndLocate();
+    EngineThread_PlaceMenu();
+    EngineThread_PointAtMenu();
 
     XrView views[2];
+    bool haveViews;
     {
         std::lock_guard<std::mutex> lock(g_ViewMutex);
-        if (!g_ViewsValid) return;
-        views[0] = g_Views[0];
-        views[1] = g_Views[1];
-
-        // Remember exactly what this frame is being rendered with, for the layer.
-        g_RenderedViews[0] = views[0];
-        g_RenderedViews[1] = views[1];
-        g_RenderedViewsValid = true;
+        haveViews = g_ViewsValid;
+        if (haveViews) {
+            views[0] = g_Views[0];
+            views[1] = g_Views[1];
+        }
     }
+    if (!haveViews) { PublishFrameRecord(nullptr); return; }
 
     // The head is the midpoint between the eyes: the spectator camera stays where the
     // demo put it, and each eye is offset from it.
@@ -3619,9 +4058,14 @@ void MirvVrXr_EngineThread_Frame() {
         float ry = base.position.y - g_RoomRefPos.y;
         float rz = base.position.z - g_RoomRefPos.z;
 
+        // Three metres while watching, where the viewer is a floating camera and walking
+        // across the room is a feature. A THIRD of a metre while playing: there the eyes
+        // belong to a body with a hitbox, and leaning out of it would let someone see round
+        // a corner their character is not round.
+        float limit = (AfxVrMath::kVrModePlay == g_Mode.mode) ? 0.35f : kRoomOffsetLimitMetres;
         float distance = sqrtf(rx * rx + ry * ry + rz * rz);
-        if (distance > kRoomOffsetLimitMetres) {
-            float k = kRoomOffsetLimitMetres / distance;
+        if (distance > limit) {
+            float k = limit / distance;
             rx *= k; ry *= k; rz *= k;
         }
 
@@ -3635,37 +4079,9 @@ void MirvVrXr_EngineThread_Frame() {
 
     // What the projection layer reports has to be what was rendered, so publish the
     // orientations actually used rather than the raw ones.
-    {
-        std::lock_guard<std::mutex> lock(g_ViewMutex);
-        g_RenderedViews[0].pose.orientation = renderOrientation[0];
-        g_RenderedViews[1].pose.orientation = renderOrientation[1];
-
-        // One entry per frame, complete, written under the lock in one go. The previous
-        // arrangement published the positions in one lock scope and the orientations in
-        // another, so a reader between the two got half of one frame and half of another.
-        g_FrameSerial++;
-        FrameRecord & record = g_FrameRing[g_FrameSerial % kFrameRing];
-        record.serial = g_FrameSerial;
-        record.rendered[0] = g_RenderedViews[0];
-        record.rendered[1] = g_RenderedViews[1];
-        record.displayTime = g_FrameState.predictedDisplayTime;
-        record.shouldRender = g_FrameState.shouldRender;
-        // Only meaningful in low-latency mode: there the engine thread did the xrWaitFrame
-        // this frame will be begun and ended against. In safe mode the render thread waits
-        // for itself and g_FrameState here is a frame old.
-        record.timingValid = g_LowLatency;
-
-        {
-            float base[3];
-            AfxVr_GetBaseAngles(base);
-            record.aimYaw = base[1];
-            record.aimPitch = base[0];
-            record.bodyForwardWorld = BodyForwardWorldDegrees();
-            record.roomForwardRadians = RoomForwardYawRadians();
-        }
-
-        record.valid = true;
-    }
+    views[0].pose.orientation = renderOrientation[0];
+    views[1].pose.orientation = renderOrientation[1];
+    PublishFrameRecord(views);
 }
 
 unsigned long long MirvVrXr_EngineThread_FrameTicket() {
@@ -3688,13 +4104,23 @@ void MirvVrXr_ReleasePanelClearView() {
     g_PanelClearFor = nullptr;
 }
 
-bool MirvVrXr_WantsPanelClear() {
+static bool ModeWantsPanelClear(const AfxVrMath::ModeResult & mode) {
     // Never in menu mode: there the whole window is the point, world and all.
-    return g_PanelEnabled && g_PanelTransparent && !g_MenuMode;
+    // Over a world the sheet must retain alpha even when the optional HUD panel is off
+    // or opaque; otherwise team select hides the stereo world behind a second picture.
+    if (mode.sheet) return !mode.sheetOpaque;
+    return g_PanelEnabled && g_PanelTransparent;
 }
 
-void MirvVrXr_RenderThread_ClearForPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
-    if (!MirvVrXr_WantsPanelClear() || !pContext || !pTexture) return;
+bool MirvVrXr_WantsPanelClear() {
+    return ModeWantsPanelClear(g_Mode);
+}
+
+void MirvVrXr_RenderThread_ClearForPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture,
+                                        unsigned long long ticket) {
+    FrameRecord frame;
+    if (!pContext || !pTexture || !ReadFrameRecord(ticket, frame)) return;
+    if (!ModeWantsPanelClear(frame.mode)) return;
 
     if (pTexture != g_PanelClearFor) {
         MirvVrXr_ReleasePanelClearView();
@@ -3829,7 +4255,36 @@ bool EnsureCursorTexture(ID3D11Device * pDevice, DXGI_FORMAT format) {
     if (g_CursorWhite) return true;
     if (!pDevice) return false;
 
-    std::vector<unsigned char> texels(kCursorTexels * kCursorTexels * 4, 0xFF);
+    // An actual crosshair, not a white square.
+    //
+    // A square was what the first version drew, and worn it reads as a blob rather than as
+    // an aiming mark: "the cursor is a square, it should be a crosshair". Four bars with a
+    // gap in the middle, which is what every game draws and what lets you see the thing you
+    // are about to shoot instead of covering it up.
+    //
+    // Drawn here rather than loaded, because a file is a thing that can be missing and this
+    // is thirty-two pixels of arithmetic.
+    std::vector<unsigned char> texels(kCursorTexels * kCursorTexels * 4, 0);
+    const int centre = (int)kCursorTexels / 2;
+    const int gap = 3;                       // clear space around the exact centre
+    const int arm = (int)kCursorTexels / 2;  // out to the edge
+    const int halfThickness = 1;
+
+    for (int i = gap; i < arm; i++) {
+        for (int t = -halfThickness; t <= halfThickness; t++) {
+            const int spots[4][2] = {
+                { centre + i, centre + t }, { centre - i, centre + t },
+                { centre + t, centre + i }, { centre + t, centre - i }
+            };
+            for (int s = 0; s < 4; s++) {
+                int px = spots[s][0], py = spots[s][1];
+                if (px < 0 || py < 0 || px >= (int)kCursorTexels || py >= (int)kCursorTexels) continue;
+                unsigned char * p = &texels[(py * (int)kCursorTexels + px) * 4];
+                p[0] = p[1] = p[2] = 0xFF;
+                p[3] = 0xFF;
+            }
+        }
+    }
 
     D3D11_TEXTURE2D_DESC desc = {};
     desc.Width = kCursorTexels;
@@ -3854,8 +4309,9 @@ bool EnsureCursorTexture(ID3D11Device * pDevice, DXGI_FORMAT format) {
 
 // Copies the white patch into the cursor swapchain and fills in the quad that shows it.
 // Returns false if there is nothing to draw.
-bool BuildCursorQuad(ID3D11DeviceContext * pContext, XrCompositionLayerQuad & quad) {
-    if (!g_CursorHit) return false;
+bool BuildCursorQuad(ID3D11DeviceContext * pContext, XrCompositionLayerQuad & quad,
+                     const FrameRecord & frame) {
+    if (!frame.valid || !frame.mode.sheet || !frame.mode.pointer || !frame.cursor.hit) return false;
     if (XR_NULL_HANDLE == g_Swapchain[kCursorSwapchain]) return false;
     if (!EnsureCursorTexture(g_pDevice, g_SwapchainFormat)) return false;
 
@@ -3879,8 +4335,7 @@ bool BuildCursorQuad(ID3D11DeviceContext * pContext, XrCompositionLayerQuad & qu
     quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     quad.space = g_Space;
     quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-    quad.pose.position = g_CursorPos;
-    quad.pose.orientation = g_CursorOrientation;
+    quad.pose = frame.cursor.pose;
     quad.subImage.swapchain = g_Swapchain[kCursorSwapchain];
     quad.subImage.imageRect.offset = { 0, 0 };
     quad.subImage.imageRect.extent = { (int32_t)kCursorTexels, (int32_t)kCursorTexels };
@@ -3909,9 +4364,13 @@ float g_CrosshairDistanceMetres = 10.0f;
 float g_CrosshairSizeDegrees = 0.8f;
 
 bool BuildCrosshairQuad(ID3D11DeviceContext * pContext, XrCompositionLayerQuad & quad,
-                        const FrameRecord & frame) {
+                        const FrameRecord & frame, unsigned long long ticket) {
     if (!g_CrosshairEnabled) return false;
-    if (AfxVrMath::kVrModePlay != g_Mode.mode || g_Mode.pointer) return false;
+    // Fallback projection views do not supply an aim. A zero or expired ticket used to
+    // leave the last submitted record here, drawing that frame's crosshair over a new
+    // world; even the two eyes must name the same record before its aim can be used.
+    if (!ticket || !frame.valid || !frame.renderedValid || frame.serial != ticket) return false;
+    if (AfxVrMath::kVrModePlay != frame.mode.mode || frame.mode.pointer) return false;
     if (XR_NULL_HANDLE == g_Swapchain[kCursorSwapchain]) return false;
     if (!g_PanelFollowValid) return false;
     if (!EnsureCursorTexture(g_pDevice, g_SwapchainFormat)) return false;
@@ -3970,7 +4429,28 @@ bool BuildCrosshairQuad(ID3D11DeviceContext * pContext, XrCompositionLayerQuad &
     return true;
 }
 
-static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
+static bool BuildSheetQuad(XrCompositionLayerQuad & quad, const FrameRecord & frame) {
+    if (!frame.valid || !frame.mode.sheet || !frame.sheetPlaced) return false;
+    if (XR_NULL_HANDLE == g_Swapchain[kPanelSwapchain] || !g_SwapchainWidth || !g_SwapchainHeight) return false;
+
+    // The whole window, with exactly the pose and size the engine hit-tested. Cutting it
+    // into the HUD groups would drop the middle of team select; the sheet is one extra quad
+    // over the eyes, while the existing groups remain the path when no sheet is requested.
+    quad = XrCompositionLayerQuad{ XR_TYPE_COMPOSITION_LAYER_QUAD };
+    quad.layerFlags = frame.mode.sheetOpaque ? 0 : XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.space = g_Space;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.pose = frame.sheetPose;
+    quad.subImage.swapchain = g_Swapchain[kPanelSwapchain];
+    quad.subImage.imageRect.offset = { 0, 0 };
+    quad.subImage.imageRect.extent = { (int32_t)g_SwapchainWidth, (int32_t)g_SwapchainHeight };
+    quad.subImage.imageArrayIndex = 0;
+    quad.size = frame.sheetSize;
+    return true;
+}
+
+static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture,
+                                   const FrameRecord & frame) {
     // A frame may already be open, and that is exactly the case this has to handle rather
     // than step around.
     //
@@ -3984,9 +4464,15 @@ static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture
     if (!g_FrameBegun) {
         if (g_LowLatency) {
             if (!g_FrameWaited) return;
+            if (frame.timingValid) {
+                g_RtFrameState = { XR_TYPE_FRAME_STATE };
+                g_RtFrameState.predictedDisplayTime = frame.displayTime;
+                g_RtFrameState.shouldRender = frame.shouldRender;
+            } else {
+                std::lock_guard<std::mutex> lock(g_ViewMutex);
+                g_RtFrameState = g_FrameState;
+            }
             g_FrameWaited = false;
-            std::lock_guard<std::mutex> lock(g_ViewMutex);
-            g_RtFrameState = g_FrameState;
         } else {
             g_FrameState = { XR_TYPE_FRAME_STATE };
             XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
@@ -4021,7 +4507,7 @@ static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture
     // The eye swapchains are made here too. They are not used in this mode, but making
     // them now means going back to a demo does not cost a frame of nothing while they are
     // created - and it keeps one place that knows how big the back buffer is.
-    bool haveSheet = EnsureSwapchains(pTexture)
+    bool haveSheet = EnsureSwapchains(pTexture) && g_RtFrameState.shouldRender
         && XR_NULL_HANDLE != g_Swapchain[kPanelSwapchain]
         && g_SwapchainWidth > 0 && g_SwapchainHeight > 0;
 
@@ -4045,65 +4531,17 @@ static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture
         }
     }
 
-    // Placed once, where the viewer was looking when the menu came up, and then left
-    // alone. A screen that follows the eyes cannot be looked away from, and a menu is
-    // exactly the thing somebody wants to glance away from and back to.
-    if (haveSheet && !g_MenuPlaced) {
-        XrPosef mid = {};
-        bool haveViews = false;
-        {
-            std::lock_guard<std::mutex> lock(g_ViewMutex);
-            if (g_ViewsValid) {
-                mid = g_Views[0].pose;
-                mid.position.x = 0.5f * (g_Views[0].pose.position.x + g_Views[1].pose.position.x);
-                mid.position.y = 0.5f * (g_Views[0].pose.position.y + g_Views[1].pose.position.y);
-                mid.position.z = 0.5f * (g_Views[0].pose.position.z + g_Views[1].pose.position.z);
-                haveViews = true;
-            }
-        }
-        if (haveViews) {
-            const XrQuaternionf & q = mid.orientation;
-            double yaw = atan2(2.0 * (q.w * q.y + q.z * q.x), 1.0 - 2.0 * (q.x * q.x + q.y * q.y));
-
-            g_MenuPose.position.x = mid.position.x - (float)sin(yaw) * g_MenuDistanceMetres;
-            g_MenuPose.position.y = mid.position.y;
-            g_MenuPose.position.z = mid.position.z - (float)cos(yaw) * g_MenuDistanceMetres;
-            g_MenuPose.orientation.x = 0.0f;
-            g_MenuPose.orientation.y = (float)sin(yaw * 0.5);
-            g_MenuPose.orientation.z = 0.0f;
-            g_MenuPose.orientation.w = (float)cos(yaw * 0.5);
-            g_MenuPlaced = true;
-
-            advancedfx::Message("AFXVR: menu screen placed, %.0f degrees wide at %.1f m.\n",
-                g_MenuWidthDegrees, g_MenuDistanceMetres);
-        }
-    }
-
     XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-    quad.layerFlags = 0;   // opaque: this IS the picture, there is nothing behind it
-    quad.space = g_Space;
-    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-    quad.pose = g_MenuPose;
-    quad.subImage.swapchain = g_Swapchain[kPanelSwapchain];
-    quad.subImage.imageRect.offset = { 0, 0 };
-    quad.subImage.imageRect.extent = { (int32_t)g_SwapchainWidth, (int32_t)g_SwapchainHeight };
-    quad.subImage.imageArrayIndex = 0;
-
-    float halfWidth = tanf(0.5f * g_MenuWidthDegrees * (float)(M_PI / 180.0));
-    quad.size.width = 2.0f * g_MenuDistanceMetres * halfWidth;
-    // The source aspect, whatever it is. The window is the eye size, so the sheet is
-    // taller than it is wide; stretching text to a friendlier shape is worse than an odd
-    // one.
-    quad.size.height = quad.size.width * (float)g_SwapchainHeight / (float)g_SwapchainWidth;
+    haveSheet = haveSheet && BuildSheetQuad(quad, frame);
 
     // The dot goes on top of the sheet, so it is submitted after it: layer order is paint
     // order, and a cursor behind the thing it points at is not a cursor.
     XrCompositionLayerQuad cursor = {};
-    bool haveCursor = BuildCursorQuad(pContext, cursor);
+    bool haveCursor = haveSheet && BuildCursorQuad(pContext, cursor, frame);
 
     const XrCompositionLayerBaseHeader * layers[2];
     int layerCount = 0;
-    if (haveSheet && g_MenuPlaced) {
+    if (haveSheet) {
         layers[layerCount++] = (XrCompositionLayerBaseHeader*)&quad;
         if (haveCursor) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&cursor;
     }
@@ -4119,6 +4557,7 @@ static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture
     // the silence it exists to fix.
     Check(xrEndFrame_(g_Session, &endInfo), "xrEndFrame (menu)");
     g_FrameBegun = false;
+    g_PanelCopied = false;
 
     ULONGLONG now = GetTickCount64();
     if (0 == g_FpsWindowStart) g_FpsWindowStart = now;
@@ -4136,9 +4575,14 @@ static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture
     }
 }
 
-void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
+void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture,
+                                     unsigned long long ticket) {
+    g_PanelCopied = false;
+    g_PanelTicket = 0;
     if (!pContext || !pTexture) return;
-    if (!g_PanelEnabled && !g_MenuMode) return;
+    FrameRecord frame;
+    bool haveRecord = ReadFrameRecord(ticket, frame);
+    if (!g_PanelEnabled && !frame.mode.sheet) return;
 
     // Before the session gate: the whole value of the probe is that it answers the
     // question without a headset.
@@ -4147,7 +4591,7 @@ void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Tex
         ProbePanelAlpha(pContext, pTexture);
     }
 
-    if (!g_SessionRunning) return;
+    if (!g_SessionRunning || !haveRecord) return;
 
     // No map: the whole frame happens here, because nothing else will.
     //
@@ -4157,15 +4601,15 @@ void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Tex
     // called CSGOMainMenu, the name test fails, and nothing is captured. The patch falls
     // back to the swap chain's own buffer 0 when there is no capture, which is the
     // finished frame and is what this wants.
-    if (g_MenuMode) {
-        RenderThread_MenuFrame(pContext, pTexture);
+    if (!frame.mode.worldInEyes && frame.mode.sheet) {
+        RenderThread_MenuFrame(pContext, pTexture, frame);
         return;
     }
 
 
 
 
-    if (XR_NULL_HANDLE == g_Swapchain[kPanelSwapchain]) return; // first frame, not made yet
+    if (!EnsureSwapchains(pTexture) || XR_NULL_HANDLE == g_Swapchain[kPanelSwapchain]) return;
 
     // This runs during the main pass, which comes before the eyes and therefore before
     // xrBeginFrame. That is allowed: acquiring, waiting on and releasing a swapchain image
@@ -4178,13 +4622,18 @@ void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Tex
 
     XrSwapchainImageWaitInfo wait = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
     wait.timeout = XR_INFINITE_DURATION;
+    bool copied = false;
     if (Check(xrWaitSwapchainImage_(g_Swapchain[kPanelSwapchain], &wait), "xrWaitSwapchainImage (panel)")) {
         pContext->CopyResource(g_SwapchainImages[kPanelSwapchain][imageIndex], pTexture);
-        g_PanelCopied = true;
+        copied = true;
     }
 
     XrSwapchainImageReleaseInfo release = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
-    xrReleaseSwapchainImage_(g_Swapchain[kPanelSwapchain], &release);
+    if (Check(xrReleaseSwapchainImage_(g_Swapchain[kPanelSwapchain], &release), "xrReleaseSwapchainImage (panel)")
+        && copied) {
+        g_PanelCopied = true;
+        g_PanelTicket = ticket;
+    }
 }
 
 void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture,
@@ -4196,20 +4645,30 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
     if (!g_SessionRunning) return;
 
     if (0 == eyeIndex) {
-        if (!MirvVrXr_WantsPasses()) return;
+        ReadFrameRecord(ticket, g_SubmittedFrame);
+        g_SubmittedTicket = ticket;
+        // The pass loop already chose to queue these eyes. The current engine mode can
+        // have changed since then; only this ticket can decide whether they own a world.
+        // With a missing ticket keep the old projection fallback, but no mode overlays.
+        if (g_SubmittedFrame.valid && !g_SubmittedFrame.mode.worldInEyes && g_ForcedPasses <= 0) return;
 
         if (g_LowLatency) {
             // The engine thread waited and located at the top of this frame. If it has
             // not - the session only just started, say - there is nothing to begin.
             if (!g_FrameWaited) return;
-            g_FrameWaited = false;
-
             // Take a copy now. The engine thread is free to wait again for the next frame
             // the moment g_FrameWaited is cleared, and it writes g_FrameState when it
             // does - so the display time this frame is ended with must not be read from
             // there later on.
-            std::lock_guard<std::mutex> lock(g_ViewMutex);
-            g_RtFrameState = g_FrameState;
+            if (g_SubmittedFrame.timingValid) {
+                g_RtFrameState = { XR_TYPE_FRAME_STATE };
+                g_RtFrameState.predictedDisplayTime = g_SubmittedFrame.displayTime;
+                g_RtFrameState.shouldRender = g_SubmittedFrame.shouldRender;
+            } else {
+                std::lock_guard<std::mutex> lock(g_ViewMutex);
+                g_RtFrameState = g_FrameState;
+            }
+            g_FrameWaited = false;
         } else {
             g_FrameState = { XR_TYPE_FRAME_STATE };
             XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
@@ -4226,7 +4685,7 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         g_FrameBegun = true;
 
         if (!g_LowLatency) {
-            ProcessInput();
+            ProcessInput(g_SubmittedFrame.mode);
             LocateViews(g_RtFrameState.predictedDisplayTime);
         }
 
@@ -4242,15 +4701,16 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         {
             std::lock_guard<std::mutex> lock(g_ViewMutex);
 
-            const FrameRecord & record = g_FrameRing[ticket % kFrameRing];
-            if (0 != ticket && record.valid && record.serial == ticket) {
+            const FrameRecord & record = g_SubmittedFrame;
+            if (record.valid) {
                 // A copy, so everything the crosshair needs comes from one instant and
                 // not from whatever the engine thread has moved on to. It outlives this
                 // block because the layers are assembled when the SECOND eye arrives.
-                g_SubmittedFrame = record;
-                rendered[0] = record.rendered[0];
-                rendered[1] = record.rendered[1];
-                g_ProjViewsValid = true;
+                if (record.renderedValid) {
+                    rendered[0] = record.rendered[0];
+                    rendered[1] = record.rendered[1];
+                    g_ProjViewsValid = true;
+                }
 
                 // In low-latency mode the engine thread did this frame's xrWaitFrame, so
                 // the time it predicted travels with the frame too. In safe mode the
@@ -4410,7 +4870,12 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
 
     if (!g_FrameBegun) return;
 
-    bool canCopy = g_RtFrameState.shouldRender && XR_NULL_HANDLE != g_Swapchain[eyeIndex];
+    // Never finish a stereo pair with an eye from another ticket. End the outstanding
+    // frame empty instead; otherwise both the projection and the crosshair claim one
+    // frame's camera for an image partly rendered by another.
+    bool sameTicket = ticket == g_SubmittedTicket;
+    if (!sameTicket) { g_EyesCopied = 0; g_ProjViewsValid = false; }
+    bool canCopy = sameTicket && g_RtFrameState.shouldRender && XR_NULL_HANDLE != g_Swapchain[eyeIndex];
 
     if (canCopy) {
         LARGE_INTEGER copyStart = StageStart();
@@ -4468,9 +4933,14 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         XrCompositionLayerQuad quads[kMaxPanelQuads];
         int quadCount = 0;
 
-        bool havePanel = g_PanelEnabled && g_PanelShown && g_PanelCopied && g_PanelPlaced
+        bool havePanelImage = g_SubmittedFrame.valid && g_PanelTicket == g_SubmittedFrame.serial && g_PanelCopied
             && XR_NULL_HANDLE != g_Swapchain[kPanelSwapchain]
             && g_SwapchainWidth > 0 && g_SwapchainHeight > 0;
+        bool havePanel = havePanelImage && !g_SubmittedFrame.mode.sheet
+            && g_PanelEnabled && g_PanelShown && g_PanelPlaced;
+        bool haveSheet = havePanelImage && g_SubmittedFrame.mode.worldInEyes
+            && BuildSheetQuad(quads[quadCount], g_SubmittedFrame);
+        if (haveSheet) quadCount++;
 
         // From the same poses the frame is being submitted with, so the panels and the
         // world cannot disagree about where the head is.
@@ -4496,7 +4966,8 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
                 // The timeline and the strip naming who is being watched exist only in a
                 // recording. In a game they are not there to copy, and the rect would
                 // carry whatever the player's own HUD happens to put in those rows.
-                if (region.demoOnly && !g_PlayingDemo) continue;
+                if (region.demoOnly && AfxVrMath::kVrModeWatch != g_SubmittedFrame.mode.mode) continue;
+                if (region.gameOnly && AfxVrMath::kVrModePlay != g_SubmittedFrame.mode.mode) continue;
 
                 int x0 = (int)(region.u0 * (float)g_SwapchainWidth  + 0.5f);
                 int x1 = (int)(region.u1 * (float)g_SwapchainWidth  + 0.5f);
@@ -4540,8 +5011,8 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             quad.size.height = g_PanelWidthMetres * (float)g_SwapchainHeight / (float)g_SwapchainWidth;
         }
 
-        // The world, the HUD groups, and the crosshair.
-        const XrCompositionLayerBaseHeader * layers[2 + kMaxPanelQuads];
+        // The world, the sheet or HUD groups, and the pointer or crosshair.
+        const XrCompositionLayerBaseHeader * layers[3 + kMaxPanelQuads];
         int layerCount = 0;
 
         XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
@@ -4553,13 +5024,19 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         // Where the bullet would go, which is not the centre of the picture as soon as the
         // stick aims and the head looks.
         XrCompositionLayerQuad crosshair = {};
-        bool haveCrosshair = haveWorld && BuildCrosshairQuad(pContext, crosshair, g_SubmittedFrame);
+        bool haveCrosshair = haveWorld && BuildCrosshairQuad(pContext, crosshair, g_SubmittedFrame, ticket);
+
+        // As in the menu-only path, the pointer is painted after the whole-window sheet.
+        // It must not appear on a failed panel copy or on the cut-up HUD in its place.
+        XrCompositionLayerQuad cursor = {};
+        bool haveCursor = haveWorld && haveSheet && BuildCursorQuad(pContext, cursor, g_SubmittedFrame);
 
         if (haveWorld) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&layer;
         // Only with a world layer under them: a frame of nothing but HUD quads is a frame
         // with no world in it, which is worse than a frame with no HUD.
         if (haveWorld) {
             for (int i = 0; i < quadCount; i++) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&quads[i];
+            if (haveCursor) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&cursor;
             if (haveCrosshair) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&crosshair;
         }
 
@@ -4811,7 +5288,7 @@ CON_COMMAND(mirv_vr_aim, "cs2-vr-spectator: what moves the aim while playing a m
         "\n"
         "Current: %s, a count is worth %.5f degrees%s\n",
         kAimHand == g_AimMethod ? "hand" : (kAimStick == g_AimMethod ? "stick" : "off"),
-        g_GainYaw.DegreesPerCount(),
+        EffectiveGain(g_GainYaw, kSeedGainYaw),
         g_GainYaw.Converged() ? " (measured)" : " (not measured yet)");
 }
 
@@ -4838,6 +5315,11 @@ CON_COMMAND(mirv_vr_pointer, "cs2-vr-spectator: the controller ray that points a
         }
     }
 
+    CursorSnapshot cursor;
+    {
+        std::lock_guard<std::mutex> lock(g_ViewMutex);
+        cursor = g_Cursor;
+    }
     advancedfx::Message(
         "mirv_vr_pointer post|send  - how a hit becomes a mouse.\n"
         "mirv_vr_pointer size <m>   - how big the dot is. Now %.0f mm.\n"
@@ -4855,7 +5337,7 @@ CON_COMMAND(mirv_vr_pointer, "cs2-vr-spectator: the controller ray that points a
         "Currently: %s, pointing at %s\n",
         g_CursorSizeMetres * 1000.0f,
         kPointerPost == g_PointerInput ? "post" : "send",
-        g_CursorHit ? "the screen" : "nothing");
+        cursor.hit ? "the screen" : "nothing");
 }
 
 CON_COMMAND(mirv_vr_menu, "cs2-vr-spectator: the game's own window on one screen, when there is no demo to show.")
@@ -4938,6 +5420,10 @@ CON_COMMAND(mirv_vr_autostart, "cs2-vr-spectator: start the headset session by i
         g_AutoStart = (0 != atoi(args->ArgV(1))) ? 1 : 0;
         g_AutoStartDone = false;
         g_AutoStartLastTick = -1;
+        // Re-arming means re-arming both signals. Leaving the frame count where it was
+        // would make a hand re-arm fire on the very next frame, which is the one case
+        // where the person doing it has not had time to put the headset on.
+        g_AutoStartFrames = 0;
     }
 
     advancedfx::Message(
@@ -4946,9 +5432,13 @@ CON_COMMAND(mirv_vr_autostart, "cs2-vr-spectator: start the headset session by i
         "Armed from the environment by AFXVR_AUTOSTART=1, which is how a launcher will do it;\n"
         "this command overrides that from a config.\n"
         "\n"
-        "It waits for a demo to be PLAYING, not merely for the game to be up: the view struct\n"
-        "has to read like a camera and the demo tick has to have moved. Started any earlier\n"
-        "the viewer gets the menu background, or a frozen first frame.\n"
+        "With a demo it waits for it to be PLAYING, not merely loaded: the view struct has to\n"
+        "read like a camera and the demo tick has to have moved. Started any earlier the\n"
+        "viewer gets a frozen first frame.\n"
+        "\n"
+        "With no demo it starts a few seconds in anyway, and the headset shows CS2's own menu\n"
+        "on a quad with a controller ray. That is not a fallback, it is the only way in: a\n"
+        "worn launch has no reachable console to type this into.\n"
         "\n"
         "It fires once. If the session will not start it says so and stops trying, because\n"
         "the person it would be complaining to has a headset on.\n"

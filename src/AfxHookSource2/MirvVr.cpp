@@ -2,6 +2,7 @@
 
 #include "MirvVr.h"
 #include "MirvVrMath.h"
+#include "MirvVrVersion.h"
 
 #include "WrpConsole.h"
 
@@ -33,8 +34,9 @@
 #define AFXVR_OFS_ORIGIN  0x4a0
 #define AFXVR_OFS_ANGLES  0x4b8
 
-// The CS2 ClientVersion the offsets above were measured against.
-#define AFXVR_TESTED_CLIENT_VERSION "2000908"
+// The CS2 ClientVersion the offsets above were measured against is AFXVR_TESTED_CLIENT_VERSION,
+// in MirvVrVersion.h, next to this project's own version. They are two halves of one fact -
+// which build of the hook was made for which build of the game - and a release names both.
 
 int g_AfxVrLogUntilFrame = 0;
 
@@ -198,6 +200,20 @@ bool g_HudFix = false;
 // guessing again.
 bool g_WeaponFov = false;
 
+// This is a borrowed field, even while the experimental switch is on. The first eye
+// used to overwrite it permanently: the other eye then saw our value as the original,
+// the main pass inherited it, and switching the experiment off left it in the game.
+// Keep the engine's value until it is restored, independently of the base camera's
+// dirty flag, since the engine can replace that camera without replacing this field.
+float g_OriginalWeaponFov = 0.0f;
+bool g_HaveOriginalWeaponFov = false;
+
+void RestoreWeaponFov() {
+    if (!g_HaveOriginalWeaponFov || !g_ViewStruct) return;
+    *(float*)((unsigned char*)g_ViewStruct + AFXVR_OFS_WEAPONFOV) = g_OriginalWeaponFov;
+    g_HaveOriginalWeaponFov = false;
+}
+
 // Whether the head's orientation is written into the once-per-frame view as well as into
 // each eye. On for watching, where the listener wants it and there are no hands; off while
 // playing, where it is what glues the gun to the headset.
@@ -248,6 +264,14 @@ void CheckGameBuildOnce() {
     if (g_CheckedGameBuild) return;
     g_CheckedGameBuild = true;
 
+    // Who we are, before anything that can fail. This is the first line of ours in
+    // console.log and it is the line a bug report has to start with: without it, a report
+    // about a build nobody can identify costs a round of questions before it can even be
+    // reproduced. It is printed unconditionally - a session that never starts still has to
+    // say which hook did not start it.
+    advancedfx::Message("AFXVR: cs2-vr-spectator %s, built for CS2 %s. %s\n",
+        AFXVR_VERSION, AFXVR_TESTED_CLIENT_VERSION, AFXVR_PROJECT_URL);
+
     char exePath[MAX_PATH] = "";
     if (0 == GetModuleFileNameA(NULL, exePath, sizeof(exePath))) return;
 
@@ -270,9 +294,10 @@ void CheckGameBuildOnce() {
         advancedfx::Warning(
             "AFXVR: CS2 build %s, but the view field offsets were measured on %s.\n"
             "AFXVR: They may have moved. If the camera behaves oddly or the game crashes on\n"
-            "AFXVR: entering VR, that is the first thing to suspect. Re-measuring is described\n"
-            "AFXVR: in docs/05-view-setup-point.md; mirv_vr_selftest reports what is read back.\n",
-            g_GameClientVersion, AFXVR_TESTED_CLIENT_VERSION);
+            "AFXVR: entering VR, that is the first thing to suspect: this release is for one\n"
+            "AFXVR: game build. mirv_vr_selftest reports what is read back. A newer release,\n"
+            "AFXVR: or how to re-measure the offsets, is at %s\n",
+            g_GameClientVersion, AFXVR_TESTED_CLIENT_VERSION, AFXVR_PROJECT_URL);
     }
 }
 
@@ -361,6 +386,7 @@ void RoomOffsetWorld(float out[3]) {
 } // namespace
 
 void AfxVr_BeforeViewSetupRead(void * pViewStruct) {
+    if (pViewStruct == g_ViewStruct) RestoreWeaponFov();
     if (!g_Dirty || pViewStruct != g_ViewStruct) return;
 
     float * pOrigin = (float*)((unsigned char*)pViewStruct + AFXVR_OFS_ORIGIN);
@@ -406,6 +432,9 @@ void AfxVr_SetRoomIpdScale(float scale) { g_IpdScaleForRoom = scale; }
 
 bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz,
                           float & rx, float & ry, float & rz, float & fov) {
+    // A replacement view owns a different original. Never restore an old view's field
+    // into a new allocation, or dereference the old one after the engine replaced it.
+    if (pViewStruct != g_ViewStruct) g_HaveOriginalWeaponFov = false;
     g_ViewStruct = pViewStruct;
     g_BaseOrigin[0] = tx; g_BaseOrigin[1] = ty; g_BaseOrigin[2] = tz;
     g_BaseAngles[0] = rx; g_BaseAngles[1] = ry; g_BaseAngles[2] = rz;
@@ -495,6 +524,10 @@ bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz
 void AfxVr_OnBeginRenderPass(int passIndex) {
     if (nullptr == g_ViewStruct) return;
     if (passIndex < 0 || passIndex > 3) return;
+
+    // Restore before the early gates too: disabling the last eye must not leave its
+    // weapon frustum in the main pass just because there is no eye left to render.
+    if (!g_Eyes[passIndex].enabled || !g_WeaponFov) RestoreWeaponFov();
 
     // What the engine left in the fov field for this frame's passes. Captured before
     // anything of ours is written over it, and handed back to any pass that has no eye.
@@ -602,6 +635,10 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     // an assumption, and the reason this is a switch rather than unconditional.
     if (g_WeaponFov) {
         float * pWeaponFov = (float*)((unsigned char*)g_ViewStruct + AFXVR_OFS_WEAPONFOV);
+        if (!g_HaveOriginalWeaponFov) {
+            g_OriginalWeaponFov = *pWeaponFov;
+            g_HaveOriginalWeaponFov = true;
+        }
         *pWeaponFov = *pFov;
     }
 
@@ -643,7 +680,10 @@ void AfxVr_SetEye(int passIndex, bool enabled,
 
 void AfxVr_SetFreeLook(bool enabled) { g_FreeLook = enabled; }
 
-void AfxVr_SetWeaponFov(bool enabled) { g_WeaponFov = enabled; }
+void AfxVr_SetWeaponFov(bool enabled) {
+    if (!enabled) RestoreWeaponFov();
+    g_WeaponFov = enabled;
+}
 void AfxVr_SetHeadAnglesOncePerFrame(bool enabled) { g_HeadAnglesOncePerFrame = enabled; }
 bool AfxVr_GetHeadAnglesOncePerFrame() { return g_HeadAnglesOncePerFrame; }
 bool AfxVr_GetWeaponFov() { return g_WeaponFov; }
@@ -676,6 +716,12 @@ float AfxVr_ViewYawDegrees() { return g_LastViewYaw; }
 float AfxVr_ViewPitchDegrees() { return g_LastViewPitch; }
 
 float AfxVr_BaseYawDegrees() { return g_BaseAngles[1]; }
+
+void AfxVr_GetBaseOrigin(float out[3]) {
+    out[0] = g_BaseOrigin[0];
+    out[1] = g_BaseOrigin[1];
+    out[2] = g_BaseOrigin[2];
+}
 
 bool AfxVr_GetFreeLook() { return g_FreeLook; }
 
@@ -899,15 +945,37 @@ CON_COMMAND(mirv_vr_ipd, "cs2-vr-spectator: place the two eyes symmetrically, gi
         "A 63 mm interpupillary distance is 2.5 units. 0 disables.\n");
 }
 
+CON_COMMAND(mirv_vr_version, "cs2-vr-spectator: which build of the hook this is, and which game build it is for.")
+{
+    CheckGameBuildOnce();
+
+    // Deliberately three lines and no cleverness: this is what a bug report is asked to
+    // paste, so it has to be complete on its own and the same every time. The startup
+    // banner says the same thing, but by the time something has gone wrong the log may
+    // have been truncated, or the person may have joined a session already running.
+    advancedfx::Message(
+        "cs2-vr-spectator %s\n"
+        "  built for CS2   %s\n"
+        "  this game is    %s%s\n"
+        "  %s\n",
+        AFXVR_VERSION,
+        AFXVR_TESTED_CLIENT_VERSION,
+        g_GameClientVersion[0] ? g_GameClientVersion : "unknown (steam.inf not read)",
+        g_GameClientVersion[0] ? (g_GameBuildMatches ? "  - match" : "  - MISMATCH") : "",
+        AFXVR_PROJECT_URL);
+}
+
 CON_COMMAND(mirv_vr_selftest, "cs2-vr-spectator: report whether the hard-coded view offsets still look right.")
 {
     CheckGameBuildOnce();
 
     advancedfx::Message(
         "mirv_vr_selftest\n"
+        "  hook version    %s\n"
         "  game build      %s\n"
         "  offsets built for %s%s\n"
         "  offsets         fov +0x%x, origin +0x%x, angles +0x%x (from CViewRender+0x10)\n",
+        AFXVR_VERSION,
         g_GameClientVersion[0] ? g_GameClientVersion : "unknown (steam.inf not read)",
         AFXVR_TESTED_CLIENT_VERSION,
         g_GameClientVersion[0] ? (g_GameBuildMatches ? "  - match" : "  - MISMATCH") : "",

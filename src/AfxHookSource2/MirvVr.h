@@ -138,6 +138,10 @@ float AfxVr_ViewPitchDegrees();
 // The yaw the game itself is using: the player's aim, or the demo camera's.
 float AfxVr_BaseYawDegrees();
 
+// Where the engine last put the camera. A big jump between frames means the viewer is
+// somewhere else entirely - respawned, switched to another player, teleported.
+void AfxVr_GetBaseOrigin(float out[3]);
+
 // Whether the weapon model is projected with the same frustum as the world.
 void AfxVr_SetWeaponFov(bool enabled);
 bool AfxVr_GetWeaponFov();

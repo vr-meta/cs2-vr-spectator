@@ -90,3 +90,49 @@ they only see what a session actually exercised: a path opened by a code path no
 in the table because they were found by reading, not by watching. If something is missing
 from a release it will be one of that kind, and Process Monitor is still the way to catch
 it.
+
+## Addendum, later the same day: the shader list, narrowed by reading
+
+The twelve files above are what a full HLAE install has in `resources\shaders\`. That is
+the folder's contents, not this hook's needs, and the difference matters when the
+difference is what somebody downloads.
+
+`LoadFromAcsShaderFileInMemory` is called with a literal name in exactly six places, all in
+Source 2's own translation units:
+
+| File | Called from |
+| --- | --- |
+| `afx_line_vs_5_0.acs`, `afx_line_ps_5_0.acs` | `CampathDrawer.cpp` |
+| `afx_drawtexture_vs_5_0.acs`, `afx_drawtexture_ps_5_0.acs` | `CampathDrawer.cpp` |
+| `afx_depth_vs_5_0.acs` | `RenderSystemDX11Hooks.cpp` |
+| `afx_depth_ps_5_0.acs` | `RenderSystemDX11Hooks.cpp` |
+
+The `ps20`/`vs20` pairs are Source 1's DX9 path and are never reached from a Source 2
+process. The `.h` beside each `.acs` in `shaders\build\` is a build artifact — it is
+compiled into the DLL, not opened at runtime.
+
+Six files, 187 KB, and five of the six are under 5 KB: `afx_depth_ps_5_0.acs` is 175 KB of
+it on its own, being a combo of every permutation.
+
+## Where CI finds all of it
+
+Written down because the paths are not where one would guess, and the release workflow
+consumes a staged tree rather than this list — `build-hook.yml`, step *Stage the hook tree*,
+which fails loudly if any of it moves:
+
+| In the zip | Built or fetched at |
+| --- | --- |
+| `hook\x64\AfxHookSource2.dll` | `build\x64-release\AfxHookSource2\Release\` |
+| `hook\x64\{OpenEXR,OpenEXRCore}-3_3.dll`, `Iex-3_3`, `IlmThread-3_3`, `Imath-3_1` | `build\x64-release\bin\Release\` — **not** beside the hook |
+| `hook\x64\openxr_loader.dll` | the OpenXR SDK nupkg, `native\x64\release\bin\` |
+| `hook\x64\{MSVCP140,VCRUNTIME140,VCRUNTIME140_1}.dll` | the toolchain's own redist dir, `VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT` — the copies Microsoft licenses for redistribution, rather than System32's |
+| `hook\resources\shaders\*.acs` | advancedfx `shaders\build\`, the six above |
+| `hook\resources\hexfont.tga` | advancedfx `resources\resources\` |
+
+Staged and measured on the development machine: 11.2 MB, against about 200 MB for the two
+HLAE installs it replaces.
+
+`resources\AfxHookSource2\` is not created. The hook adds it as a `GAME` search path at
+startup whether or not it exists, and `snippets\` under it serves `mirv_script_load`, which
+nothing here calls — and which is not in the advancedfx source tree at all, only in HLAE's
+release package.

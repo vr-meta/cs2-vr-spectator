@@ -39,8 +39,10 @@ bool MirvVrXr_WantsPasses();
 // would mean the session could never start.
 void MirvVrXr_EngineThread_Frame();
 
-// Engine thread, when a pass is queued: which frame's pose and timing that pass is being
-// rendered with. The number is opaque; hand it back to MirvVrXr_RenderThread_SubmitEye.
+// Engine thread, when a pass is queued: which frame's pose, timing and mode that pass is
+// being rendered with. The number is opaque; hand it back to the eye submission and to
+// the main pass's panel clear and submission. All three must carry the queued ticket,
+// because reading the current mode at either callback can describe the next frame.
 //
 // It exists because the render thread runs behind the engine thread by an amount that
 // varies from frame to frame. Everything the projection layer has to report - the pose
@@ -61,9 +63,11 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
 
 // Render thread, from the MAIN pass's BeforePresent command. The main pass is the one
 // image that still has the HUD and the demo menu composited into it once the eyes have
-// stopped taking them, so it is what the quad layer carries. Does nothing unless the panel
-// is switched on with mirv_vr_panel.
-void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture);
+// stopped taking them, so it is what the quad layer carries. Used when the HUD panel is
+// switched on with mirv_vr_panel or when this ticket requests the whole-window sheet.
+// `ticket` is captured when this MAIN pass was queued, just as it is for the eyes.
+void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture,
+                                      unsigned long long ticket);
 
 // True while the panel wants the main pass handed over. Asked by the pass loop so the
 // callback is not queued for nothing. Not gated on a session: what it queues gates itself,
@@ -80,7 +84,10 @@ bool MirvVrXr_WantsPanel();
 //
 // The cost is that the monitor shows the HUD on black while the panel is on. The monitor
 // is not the deliverable.
-void MirvVrXr_RenderThread_ClearForPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture);
+// Use the same queued ticket as SubmitPanel: clearing according to a later mode can
+// erase a menu background or leave an opaque world behind a transparent sheet.
+void MirvVrXr_RenderThread_ClearForPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture,
+                                       unsigned long long ticket);
 
 // True while that clear is wanted. Separate from MirvVrXr_WantsPanel because it needs no
 // session: the whole point is to be able to look at what the panel would carry from a

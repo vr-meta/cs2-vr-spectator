@@ -74,14 +74,20 @@ Build:
 ```powershell
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cd D:\Dev\cs2-vr-tools\advancedfx
-cmake --preset x64-release
+cmake --preset x64-release -DAFXVR_OPENXR_DIR="D:/Dev/cs2-vr-tools/openxr/pkg"
 # ShaderBuilder is invoked by bare name, so its output directory has to be on PATH
 $env:Path = "D:\Dev\cs2-vr-tools\advancedfx\build\x64-release\ShaderBuilder;$env:Path"
 cmake --build --preset x64-release --target AfxHookSource2
 ```
 
-If the OpenXR headers live somewhere else, pass
-`-DAFXVR_OPENXR_DIR=<path>` to the configure step.
+`AFXVR_OPENXR_DIR` has no default and the configure stops without it. It used to fall back
+to the path above, which is one developer's disk: on anybody else's machine that produced
+a configure error quoting a directory they had never heard of. An environment variable of
+the same name works instead of the `-D`, and is the tidier answer if you build often.
+
+The version the hook prints at startup comes from `-DAFXVR_VERSION=<string>`. Leave it out
+and it says `0.0.0-dev`, which is the point: a bug report quoting that number is known to
+be somebody's own build rather than a download. Only the release workflow sets it.
 
 Copy the result, and the OpenXR loader, into the self-built HLAE:
 
