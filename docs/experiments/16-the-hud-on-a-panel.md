@@ -57,12 +57,48 @@ percent it is antialiasing fringe, not a masked channel.
 
 ![The main pass with the world wiped out](screenshots/exp16-panel-transparent.png)
 
-Score, round timer, both teams with names, health and money, radar, kill feed, crosshair.
-On nothing. This is the whole of the user's "the score is not visible": it was there all
-along, at screen depth in both eyes, outside the lenses' frustum, under `cl_drawhud 0`.
+Score, round timer, both teams with names, health and money, radar, kill feed. On nothing.
+This is the whole of the user's "the score is not visible": it was there all along, at
+screen depth in both eyes, outside the lenses' frustum, under `cl_drawhud 0`.
 
-The side effect is that the **monitor** now shows this too, because the main pass is what
-the monitor presents. The monitor is not the deliverable.
+The side effect is that the **monitor** shows this too whenever the main pass is the last
+pass presented. The monitor is not the deliverable.
+
+## Cutting it up, and a measurement that was wrong twice
+
+One quad carrying the whole sheet is a portrait rectangle with an empty middle, parked at
+eye height: the score floats at the horizon in the middle of the map, the timeline lies
+across the floor, and the whole of it is too small to read. Roughly 2° per player on the
+team strip against the Quest's ~25 px/deg — names truncated, money a few pixels tall.
+Making the sheet twice as big to fix that walls off the view.
+
+So each group gets its own quad, cut out of the same swapchain image with its own
+`imageRect`, its own place and its own angular size. Everything not named is never shown,
+which is also how the overhead name tags and the `TrueView` debug text stay off the panel
+without hunting for a cvar.
+
+That needs the rectangles as fractions of the sheet — and the sheet is what neither of the
+two attempts at measuring it had actually seen. `grab-cs2-window.ps1` takes the window as
+the *screen* shows it, and a 2528x2780 window on a 2560x1600 display is cut off at 58% of
+its height. Every fraction below v = 0.58 in the first table was invented. The honest
+capture is the same 0.909 aspect at a size that fits:
+
+![The whole sheet](screenshots/exp16-sheet-full.png)
+
+(Captured with a session running, so what the monitor presented was an eye pass rather than
+the cleared main pass. Irrelevant here: Panorama lays the HUD out from the window's shape,
+so the positions are the same whatever is underneath, and positions are all this is for.)
+
+| group | u | v | placed |
+| --- | --- | --- | --- |
+| score | 0.26–0.74 | 0.00–0.18 | up at +16°, 46° wide, 2.0 m |
+| radar | 0.00–0.21 | 0.00–0.28 | left at +30°, down 18°, 26° wide, 1.6 m |
+| bar | 0.00–1.00 | 0.93–1.00 | down at −32°, 54° wide, 1.4 m — a dashboard, and what a controller ray will click |
+| killfeed | 0.74–1.00 | 0.02–0.32 | **off, and a guess**: there were no kills on screen when the sheet was captured |
+
+`mirv_vr_panel layout` prints them, `region` moves one, `rect` re-cuts one, and `sheet`
+puts the single quad back. They are fractions, so the resolution does not matter — but
+`hud_scaling` and the window's **aspect** both do.
 
 ## How it is done
 

@@ -506,20 +506,27 @@ struct PanelRegion {
     bool enabled;
 };
 
-// Measured off a 2528x2780 capture of the sheet. Re-measure with mirv_vr_panel alpha and a
-// screenshot if the window shape or hud_scaling changes - these are fractions, so only the
-// layout matters, not the resolution.
+// Measured off docs/experiments/screenshots/exp16-sheet-full.png: the same 0.909 aspect as
+// the headset window, at 1264x1390 so the whole sheet fits on the screen and can be
+// captured. That detail matters - the first attempt read fractions off a 2560x1600 grab of
+// a 2528x2780 window, which is the top 58% of the sheet, and every number below v = 0.58
+// was invented.
+//
+// They are fractions, so the resolution does not matter, but hud_scaling and the window's
+// ASPECT both do: Panorama lays out to the shape of the window.
 PanelRegion g_PanelRegions[] = {
-    // Up high and wide, because it is the thing being read at a glance.
-    { "score",   0.26f, 0.00f, 0.71f, 0.17f,    0.0f,  18.0f, 44.0f, 2.0f, true  },
+    // Up high and wide, because it is what is being read at a glance. Both teams, the
+    // score, the round timer, health and money.
+    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  16.0f, 46.0f, 2.0f, true  },
     // Low and to the left, where a spectator's eyes go when they want the map.
-    { "radar",   0.00f, 0.00f, 0.22f, 0.28f,   26.0f, -20.0f, 24.0f, 1.6f, true  },
-    // Low and central, like a dashboard. It is also what a controller ray will click, so
-    // close and below the line of sight is right.
-    { "bar",     0.00f, 0.80f, 1.00f, 1.00f,    0.0f, -30.0f, 52.0f, 1.4f, true  },
-    // Off by default: a spectator rarely needs their own weapon column, and the region it
-    // sits in is where the overhead name tags land.
-    { "weapons", 0.85f, 0.60f, 1.00f, 0.90f,  -26.0f, -20.0f, 16.0f, 1.6f, false },
+    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   30.0f, -18.0f, 26.0f, 1.6f, true  },
+    // Low and central, like a dashboard. It is also what a controller ray will click one
+    // day, so close and below the line of sight is right.
+    { "bar",     0.00f, 0.93f, 1.00f, 1.00f,    0.0f, -32.0f, 54.0f, 1.4f, true  },
+    // Off, and NOT measured: there were no kills on screen when the sheet was captured, so
+    // this rect is a guess at where the feed appears. Turn it on with mirv_vr_panel region
+    // killfeed on and correct it with mirv_vr_panel rect.
+    { "killfeed",0.74f, 0.02f, 1.00f, 0.32f,  -30.0f,  10.0f, 24.0f, 2.0f, false },
 };
 const int kPanelRegionCount = (int)(sizeof(g_PanelRegions) / sizeof(g_PanelRegions[0]));
 

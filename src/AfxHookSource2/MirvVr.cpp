@@ -66,6 +66,19 @@ struct Head {
 };
 Head g_Head;
 
+// Passes still owed a report of what was in the fov field when they began, from
+// mirv_vr_fovraw.
+//
+// The number handed to the engine at the view-setup trampoline is in Source's 4:3
+// convention - 90 means 90 at 4:3, and the engine widens it for the window's aspect
+// afterwards. What is not known is whether that widening happens in place, in the same
+// field, before the passes run. If it does, the per-pass write is in the wrong convention
+// and the eyes render an angle the crop does not expect - which makes the world the wrong
+// size and leaves a residue on every head turn that no reprojection can remove.
+//
+// One printed float settles it. 90 means the field is untouched since the trampoline.
+int g_RawFovProbe = 0;
+
 bool g_FreeLook = false;
 
 // How much of the demo camera's own orientation the headset sits on top of, when free
@@ -294,7 +307,13 @@ bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz
     ry = angles[1];
     rz = angles[2];
 
-    if (0.0f < g_Head.fov) fov = g_Head.fov;
+    // Deliberately NOT the field of view. The head is written here for the consumers that
+    // read the camera once a frame - the audio listener, the world-to-screen matrix,
+    // culling - and none of them wants an eye's frustum. Writing it made the picture worse
+    // the moment it shipped, which says something the passes alone never revealed: the
+    // engine derives something from this number once a frame that reaches the eye image.
+    // Until a desk measurement says what, this leaves it alone.
+    (void)g_Head.fov;
 
     // The same flag the passes set, and for the same reason: the next frame's
     // AfxVr_BeforeViewSetupRead has to put the base camera back before the engine reads
@@ -306,8 +325,23 @@ bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz
 }
 
 void AfxVr_OnBeginRenderPass(int passIndex) {
-    if (nullptr == g_ViewStruct || !AnyEyeEnabled()) return;
+    if (nullptr == g_ViewStruct) return;
     if (passIndex < 0 || passIndex > 3) return;
+
+    // Before anything is written, and before the early returns, because the whole point is
+    // to see what the engine left there.
+    if (0 < g_RawFovProbe && 0 == passIndex) {
+        g_RawFovProbe--;
+        float raw = *(float*)((unsigned char*)g_ViewStruct + AFXVR_OFS_FOV);
+        advancedfx::Message(
+            "AFXVR: pass 0 entry fov field = %.4f, the trampoline was handed %.4f.\n"
+            "  Equal means the field is still in Source's 4:3 convention at pass time and\n"
+            "  the per-pass write is right. Different means the engine rescaled it in place\n"
+            "  for the window's aspect, and the passes must write the scaled number.\n",
+            raw, g_BaseFov);
+    }
+
+    if (!AnyEyeEnabled()) return;
 
     // Gate on what came back out of the struct rather than on a version number: a build
     // can change without moving these fields, and these fields can move without the tool
@@ -429,6 +463,15 @@ CON_COMMAND(mirv_vr_freelook, "cs2-vr-spectator: follow a player's position but 
         "  player does not drag the viewer's head around with their aim.\n"
         "Current value: %s\n",
         AfxVr_GetFreeLook() ? "1" : "0");
+}
+
+CON_COMMAND(mirv_vr_fovraw, "cs2-vr-spectator: what is in the fov field when a pass begins, before we write to it.")
+{
+    int n = (2 <= args->ArgC()) ? atoi(args->ArgV(1)) : 1;
+    if (n < 1) n = 1;
+    if (n > 30) n = 30;
+    g_RawFovProbe = n;
+    advancedfx::Message("mirv_vr_fovraw: reporting the next %i main pass(es).\n", n);
 }
 
 CON_COMMAND(mirv_vr_horizon, "cs2-vr-spectator: how much of the demo camera's own tilt the headset inherits.")

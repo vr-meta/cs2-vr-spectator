@@ -87,15 +87,24 @@ $gameArgs = @(
 
 # With a VR runtime up, an uncapped CS2 and the compositor fight over the GPU and both
 # stall: the game stops pumping messages and the headset stutters. Cap the game.
+#
 # Per-eye resolution is the window size, because submission is a copy of the back buffer.
-# A square window keeps the reported frustum square, and the window cannot be taller than
-# the display - so on a 2560x1600 panel 1600x1600 is the ceiling. Going beyond that needs
-# rendering to an off-screen target instead of the back buffer.
+# The window may exceed the display - it is only clipped for viewing, and the back buffer
+# is whole - so the ceiling is not the panel size. The default is what the Quest 3 asks
+# for. It used to be 1600x1600, from back when the window was believed to be limited by
+# the display, and leaving it stale is how a session ends up at a quarter of the pixels.
 if ($VrReady) {
-    if (-not $PSBoundParameters.ContainsKey('Width'))  { $Width  = 1600 }
-    if (-not $PSBoundParameters.ContainsKey('Height')) { $Height = 1600 }
+    if (-not $PSBoundParameters.ContainsKey('Width'))  { $Width  = 2528 }
+    if (-not $PSBoundParameters.ContainsKey('Height')) { $Height = 2780 }
     if (0 -eq $FpsMax) { $FpsMax = 90 }
     $gameArgs += '-noborder'   # a title bar would eat rows we cannot spare
+}
+
+# CS2 remembers the last window size in its own video settings, so a launch that does not
+# state one inherits whatever the previous launch used - including a half-size desk
+# measurement. Always state it.
+if ($VrReady -and $Fullscreen) {
+    throw "-VrReady and -Fullscreen together leave the eye size to whatever CS2 remembered. State a window size."
 }
 
 if (-not $Fullscreen) { $gameArgs += @('-windowed', '-w', "$Width", '-h', "$Height") }
