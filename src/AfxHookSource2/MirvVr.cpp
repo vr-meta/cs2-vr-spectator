@@ -197,6 +197,11 @@ bool g_HudFix = false;
 // The next step is measuring what that float does - one pass, one value, look - not
 // guessing again.
 bool g_WeaponFov = false;
+
+// Whether the head's orientation is written into the once-per-frame view as well as into
+// each eye. On for watching, where the listener wants it and there are no hands; off while
+// playing, where it is what glues the gun to the headset.
+bool g_HeadAnglesOncePerFrame = true;
 bool g_WarnedNoMakeMatrix = false;
 
 void RebuildViewMatrices() {
@@ -438,9 +443,28 @@ bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz
     ty = g_BaseOrigin[1] + g_MoveOffset[1] + room[1];
     tz = g_BaseOrigin[2] + g_MoveOffset[2] + room[2];
 
-    rx = angles[0];
-    ry = angles[1];
-    rz = angles[2];
+    // The orientation, for everything that reads the camera once a frame rather than once
+    // a pass - unless the hands are supposed to belong to the body.
+    //
+    // Reported worn, of a game being played: "locking the hands to the headset is not a
+    // good idea, I would have the hands tied to the body and the head not". The engine
+    // places the weapon model from THIS view during its own frame setup, so writing the
+    // head's orientation here puts the gun on the head. Before the head was written here
+    // at all the gun sat along the game's aim; the audio fix moved it, for a different
+    // consumer, and took the hands with it.
+    //
+    // Leaving the angles alone in play mode gives them back: the eyes still get the head,
+    // because that is a separate write once per pass, while everything the client builds
+    // once a frame follows the aim. Note what this costs - the listener is one of those
+    // consumers, so in play mode the sound field follows the gun hand rather than the
+    // head. Worth saying out loud, because "the sound follows the head" was confirmed
+    // worn earlier today and this gives part of it back in one mode.
+    if (g_HeadAnglesOncePerFrame) {
+        rx = angles[0];
+        ry = angles[1];
+        rz = angles[2];
+    }
+
 
     // Deliberately NOT the field of view. The head is written here for the consumers that
     // read the camera once a frame - the audio listener, the world-to-screen matrix,
@@ -609,6 +633,8 @@ void AfxVr_SetEye(int passIndex, bool enabled,
 void AfxVr_SetFreeLook(bool enabled) { g_FreeLook = enabled; }
 
 void AfxVr_SetWeaponFov(bool enabled) { g_WeaponFov = enabled; }
+void AfxVr_SetHeadAnglesOncePerFrame(bool enabled) { g_HeadAnglesOncePerFrame = enabled; }
+bool AfxVr_GetHeadAnglesOncePerFrame() { return g_HeadAnglesOncePerFrame; }
 bool AfxVr_GetWeaponFov() { return g_WeaponFov; }
 
 // What the engine last put in the view struct, before anything of ours went into it.

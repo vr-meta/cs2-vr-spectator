@@ -141,6 +141,11 @@ float AfxVr_BaseYawDegrees();
 // Whether the weapon model is projected with the same frustum as the world.
 void AfxVr_SetWeaponFov(bool enabled);
 bool AfxVr_GetWeaponFov();
+
+// Whether the head is written into the once-per-frame view. Off while playing puts the
+// hands and the gun back on the body instead of on the headset.
+void AfxVr_SetHeadAnglesOncePerFrame(bool enabled);
+bool AfxVr_GetHeadAnglesOncePerFrame();
 bool AfxVr_GetFreeLook();
 
 // Align the free-look forward direction with where the demo camera is currently facing,

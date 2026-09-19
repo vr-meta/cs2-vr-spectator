@@ -1986,6 +1986,10 @@ AfxVrMath::AimTracker g_TrackYaw;
 AfxVrMath::AimTracker g_TrackPitch;
 bool g_HandAimReady = false;     // the servo has been run, so the delay is known
 
+// Whether the hands and the gun belong to the body or to the headset while playing. Asked
+// for from inside the headset: "locking the hands to the headset is not a good idea".
+bool g_PlayFrameBody = true;
+
 // Where the right hand points, as world angles, from the poses that travelled with this
 // frame rather than from whatever the engine thread has since moved on to.
 //
@@ -3419,6 +3423,12 @@ void MirvVrXr_EngineThread_Frame() {
             //
             // Watching a demo it goes back off: there the base camera IS the shot, and
             // ignoring it would throw away the recording's own framing.
+            // The hands and the gun are placed from the once-per-frame view, so writing the
+            // head into it puts them on the headset. Off while playing gives them back to
+            // the body; the eyes are a separate write and keep the head either way.
+            AfxVr_SetHeadAnglesOncePerFrame(
+                !(AfxVrMath::kVrModePlay == next.mode && g_PlayFrameBody));
+
             if (AfxVrMath::kVrModePlay == next.mode) {
                 if (!g_FreeLookWasOn) {
                     g_FreeLookBeforePlay = AfxVr_GetFreeLook();
@@ -4692,7 +4702,40 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
 // "this feels wrong" and an answer, when the only instrument is a person wearing the
 // headset and the only way to test is to change it and look again.
 
+CON_COMMAND(mirv_vr_playframe, "cs2-vr-spectator: whether the hands belong to the body or to the headset.")
+{
+    if (2 <= args->ArgC()) {
+        const char * arg1 = args->ArgV(1);
+        if (!_stricmp(arg1, "body")) g_PlayFrameBody = true;
+        else if (!_stricmp(arg1, "head")) g_PlayFrameBody = false;
+        AfxVr_SetHeadAnglesOncePerFrame(
+            !(AfxVrMath::kVrModePlay == g_Mode.mode && g_PlayFrameBody));
+    }
+
+    advancedfx::Message(
+        "mirv_vr_playframe body|head - where the weapon model and the arms live.\n"
+        "\n"
+        "The engine places them from the view it builds once a frame. This project writes\n"
+        "the head into that view, for the audio listener and the client's matrices - and\n"
+        "the hands came along, so the gun is glued to the headset and turns with it.\n"
+        "\n"
+        "body: leave that view's ANGLES to the game while playing. The gun goes back onto\n"
+        "      the aim, so it stays where the hands are when you look away from it. The\n"
+        "      eyes are a separate write and still get the head.\n"
+        "head: as before.\n"
+        "\n"
+        "The cost of body, said plainly: the listener is one of those once-a-frame\n"
+        "consumers, so in a game the sound field may follow the gun hand rather than the\n"
+        "head. That is a partial give-back of something confirmed worn this morning, and\n"
+        "it is not yet known whether a live game takes the listener from this view at all.\n"
+        "\n"
+        "Watching a demo is untouched either way.\n"
+        "Current value: %s\n",
+        g_PlayFrameBody ? "body" : "head");
+}
+
 CON_COMMAND(mirv_vr_aim, "cs2-vr-spectator: what moves the aim while playing a map.")
+
 {
     if (2 <= args->ArgC()) {
         const char * arg1 = args->ArgV(1);
