@@ -1153,4 +1153,98 @@ struct AimTracker {
     }
 };
 
+
+// ---------------------------------------------------------------------------------
+// Field of view
+// ---------------------------------------------------------------------------------
+//
+// Source is handed ONE angle and renders it horizontally; the vertical follows from the
+// shape of the image. Nothing here can change that, so all of these exist to answer one
+// question - what number do we hand it - and every one of them was got wrong at least
+// once with a headset on. That is why they are down here with tests rather than up in
+// MirvVrXr.cpp with the globals they used to read.
+//
+// Angles in: radians, OpenXR's units. Angles out: degrees, Source's.
+
+// The widest symmetric frustum that covers an asymmetric one. CS2 can only express a
+// single fov, so the eye is rendered wider than needed and the angles actually rendered
+// are reported back to the compositor - correct, at the cost of edge pixels.
+inline float SymmetricFovDegrees(float angleLeft, float angleRight) {
+    float a = fabsf(angleLeft), b = fabsf(angleRight);
+    float half = a > b ? a : b;
+    return (float)(2.0 * (double)half * 180.0 / 3.14159265358979323846);
+}
+
+// The engine's chain, forwards: what it actually renders horizontally when handed
+// `askedDegrees` into an image of this shape.
+//
+// The 0.75 is the 4:3 convention. The number in the fov field is the horizontal angle a
+// 4:3 image would have had: the engine derives a vertical from it, then the real
+// horizontal from the real aspect. An aspect of zero or less means the swapchain does not
+// exist yet, and the only honest answer then is the question.
+inline float RenderedFovForAsked(float askedDegrees, float aspect) {
+    const double d2r = 3.14159265358979323846 / 180.0, r2d = 180.0 / 3.14159265358979323846;
+    if (aspect <= 0.0f) return askedDegrees;
+    double halfY = atan(tan(0.5 * (double)askedDegrees * d2r) * 0.75);
+    double halfX = atan(tan(halfY) * (double)aspect);
+    return (float)(2.0 * halfX * r2d);
+}
+
+// The same chain backwards: the angle to hand the engine so that it renders
+// `wantedDegrees` horizontally. The exact inverse of RenderedFovForAsked, which is what
+// the round-trip test checks - the two were written weeks apart and only one of them
+// could be right.
+inline float SourceFovForWanted(float wantedDegrees, float aspect) {
+    const double d2r = 3.14159265358979323846 / 180.0, r2d = 180.0 / 3.14159265358979323846;
+    if (aspect <= 0.0f) return wantedDegrees;
+    double halfX = 0.5 * (double)wantedDegrees * d2r;
+    double halfY = atan(tan(halfX) / (double)aspect);
+    double half43 = atan(tan(halfY) / 0.75);
+    return (float)(2.0 * half43 * r2d);
+}
+
+// The smallest symmetric horizontal angle that contains the runtime's frustum AND leaves
+// the vertical tall enough once this image's shape has had its way with it.
+//
+// Horizontally that is just the wider of the two angles. Vertically there is no choice to
+// make, so if the image is too wide the vertical comes out short and there is nothing
+// drawn where the headset wants to look.
+//
+// Measured, on the day a window was changed from 2528x2780 to 2560x1600 to make CS2's menu
+// fit on the monitor. The Quest 3 wants 110 degrees vertically (up 44, down 55, so 55
+// either side of a symmetric frustum). At the tall window a 108 degree horizontal gave 113
+// vertical - enough, narrowly, which is why nobody had to think about it. At the wide one
+// it gives 81: twenty-nine degrees short, and the operator's words were "everything at the
+// edges is badly distorted".
+//
+// So ask for whichever horizontal angle satisfies BOTH, and let the crop throw away what
+// is not needed. The cost is pixels: at 1.6:1 about 40 per cent of each row is rendered
+// and discarded. The cure for that is a window whose shape matches the headset's frustum -
+// tan(54)/tan(55), about 0.96:1, which is what 2528x2780 nearly was - not a smaller field
+// of view.
+inline float ContainingFovDegrees(float angleLeft, float angleRight,
+                                  float angleUp, float angleDown, float aspect) {
+    const double r2d = 180.0 / 3.14159265358979323846;
+    double halfH = 0.5 * (double)SymmetricFovDegrees(angleLeft, angleRight) / r2d;
+
+    float up = fabsf(angleUp), down = fabsf(angleDown);
+    double halfV = (up > down) ? up : down;
+
+    if (aspect > 0.0f) {
+        double neededH = atan(tan((double)halfV) * (double)aspect);
+        if (neededH > halfH) halfH = neededH;
+    }
+    return (float)(2.0 * halfH * r2d);
+}
+
+// Every angle handed to the engine passes through this. Zero degrees, or four hundred, is
+// not a field of view - it is a bug reaching another program's memory. The bounds differ
+// between the two callers, because what we ask the engine for may legitimately exceed
+// what we wanted: undoing the 4:3 convention inflates it.
+inline float ClampFovDegrees(float degrees, float lo, float hi) {
+    if (degrees < lo) return lo;
+    if (degrees > hi) return hi;
+    return degrees;
+}
+
 } // namespace AfxVrMath

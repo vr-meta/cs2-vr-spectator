@@ -449,6 +449,7 @@ static void TestStickToGameFrame();
 static void TestCountGainEstimator();
 static void TestAimServo();
 static void TestAimTracker();
+static void TestFieldOfView();
 
 static void RunTests() {
     TestAngleVectors();
@@ -476,6 +477,7 @@ static void RunTests() {
     TestCountGainEstimator();
     TestAimServo();
     TestAimTracker();
+    TestFieldOfView();
 }
 
 CHECK_MAIN()
@@ -1926,4 +1928,80 @@ static void TestAimTracker() {
         t.Step(-20.0f, -20.0f, -0.0275f);
         CHECK_NEAR(t.SmoothedTarget(), -20.0, 1e-5);
     }
+}
+
+static void TestFieldOfView() {
+    using namespace AfxVrMath;
+    check::Case("the field of view survives the engine's 4:3 convention in both directions");
+
+    const double kPi = 3.14159265358979323846;
+    // The Quest 3's left eye, as the Oculus runtime reports it. Asymmetric horizontally
+    // because the lens sits outboard of the pupil, and taller below than above.
+    const float kLeft = (float)(-54.0 * kPi / 180.0);
+    const float kRight = (float)( 40.0 * kPi / 180.0);
+    const float kUp = (float)( 44.0 * kPi / 180.0);
+    const float kDown = (float)(-55.0 * kPi / 180.0);
+
+    // Symmetric means the wider half doubled, whichever side it is on, and the sign of
+    // either angle is irrelevant - OpenXR reports left negative, and a runtime that did
+    // not would still be describing the same frustum.
+    CHECK_NEAR(SymmetricFovDegrees(kLeft, kRight), 108.0, 1e-3);
+    CHECK_NEAR(SymmetricFovDegrees(kRight, kLeft), 108.0, 1e-3);
+    CHECK_NEAR(SymmetricFovDegrees(-kLeft, -kRight), 108.0, 1e-3);
+    CHECK_NEAR(SymmetricFovDegrees(0.0f, 0.0f), 0.0, 1e-6);
+
+    // The two halves of the engine's chain are inverses. This is the whole point of having
+    // both: they were written weeks apart, and the round trip is the only cheap way to
+    // know that the second one undoes the first rather than something adjacent to it.
+    const float aspects[] = { 0.5f, 0.75f, 4.0f / 3.0f, 2528.0f / 2780.0f, 2560.0f / 1600.0f, 3.0f };
+    for (size_t i = 0; i < sizeof(aspects) / sizeof(aspects[0]); i++) {
+        for (float wanted = 20.0f; wanted <= 150.0f; wanted += 10.0f) {
+            float asked = SourceFovForWanted(wanted, aspects[i]);
+            CHECK_NEAR(RenderedFovForAsked(asked, aspects[i]), (double)wanted, 1e-2);
+        }
+    }
+
+    // At exactly 4:3 the convention is the identity: the number in the field IS the
+    // horizontal angle. If this one ever fails, the 0.75 has been applied twice.
+    CHECK_NEAR(RenderedFovForAsked(90.0f, 4.0f / 3.0f), 90.0, 1e-3);
+    CHECK_NEAR(SourceFovForWanted(90.0f, 4.0f / 3.0f), 90.0, 1e-3);
+
+    // A swapchain that does not exist yet has no shape, and the honest answer is then the
+    // question. Zero and negative both, because an unset width and a garbage one arrive
+    // the same way.
+    CHECK_NEAR(RenderedFovForAsked(77.0f, 0.0f), 77.0, 1e-6);
+    CHECK_NEAR(SourceFovForWanted(77.0f, -1.0f), 77.0, 1e-6);
+
+    // The measurement that made ContainingFovDegrees exist. A 108 degree horizontal is
+    // enough at the tall window and twenty-nine degrees short at the wide one, so the
+    // wide one has to be told to ask for more.
+    {
+        const float tall = 2528.0f / 2780.0f;
+        const float wide = 2560.0f / 1600.0f;
+
+        // Tall: the horizontal frustum already dominates, so nothing is added.
+        CHECK_NEAR(ContainingFovDegrees(kLeft, kRight, kUp, kDown, tall), 108.0, 1e-3);
+
+        // Wide: the vertical would come out short, so the ask grows. What it grows TO is
+        // the angle whose vertical is exactly the 55 degrees the headset wants.
+        float wideAsk = ContainingFovDegrees(kLeft, kRight, kUp, kDown, wide);
+        CHECK(wideAsk > 108.0f);
+        double halfV = atan(tan(0.5 * (double)wideAsk * kPi / 180.0) / (double)wide);
+        CHECK_NEAR(halfV * 180.0 / kPi, 55.0, 1e-3);
+    }
+
+    // And the failure it was written against, stated as itself: at the wide window, a
+    // frustum chosen on the horizontal alone leaves the vertical far short of what the
+    // headset asked for. 81 degrees against the 110 it wants.
+    {
+        const float wide = 2560.0f / 1600.0f;
+        double halfV = atan(tan(0.5 * 108.0 * kPi / 180.0) / (double)wide);
+        CHECK(2.0 * halfV * 180.0 / kPi < 82.0);
+    }
+
+    // Clamping is where a bug stops before it reaches another program's memory.
+    CHECK_NEAR(ClampFovDegrees(90.0f, 10.0f, 170.0f), 90.0, 1e-6);
+    CHECK_NEAR(ClampFovDegrees(0.0f, 10.0f, 170.0f), 10.0, 1e-6);
+    CHECK_NEAR(ClampFovDegrees(400.0f, 10.0f, 170.0f), 170.0, 1e-6);
+    CHECK_NEAR(ClampFovDegrees(-1.0f, 10.0f, 178.0f), 10.0, 1e-6);
 }

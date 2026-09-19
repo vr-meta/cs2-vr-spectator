@@ -1176,13 +1176,11 @@ void XrPoseToEye(const XrPosef & pose, const XrPosef & base,
     dRoll  = (float)(-roll  * r2d);
 }
 
-// The widest symmetric frustum that covers the runtime's asymmetric one. CS2 can only
-// express a single fov, so the eye is rendered wider than needed and the angles actually
-// rendered are reported back to the compositor - correct, at the cost of edge pixels.
+// The arithmetic all four of these do lives in MirvVrMath.h, where tests/ compiles it
+// without a headset. What is left here is the part that cannot: reading an XrFovf, and
+// reading the globals that a person wearing the headset has been turning.
 float SymmetricFovDegrees(const XrFovf & fov) {
-    float a = fabsf(fov.angleLeft), b = fabsf(fov.angleRight);
-    float half = a > b ? a : b;
-    return (float)(2.0 * half * 180.0 / M_PI);
+    return AfxVrMath::SymmetricFovDegrees(fov.angleLeft, fov.angleRight);
 }
 
 // A headset's frustum is not centred on the eye's forward axis. The Quest 3 reports
@@ -1349,72 +1347,28 @@ float AspectOfImage() {
 
 // The engine's chain, forwards: what it actually renders when handed `askedDegrees`.
 float RenderedFovForAsked(float askedDegrees) {
-    const double d2r = M_PI / 180.0, r2d = 180.0 / M_PI;
-    double aspect = AspectOfImage();
-    if (aspect <= 0.0) return askedDegrees;
-    double halfY = atan(tan(0.5 * askedDegrees * d2r) * 0.75);
-    double halfX = atan(tan(halfY) * aspect);
-    return (float)(2.0 * halfX * r2d);
+    return AfxVrMath::RenderedFovForAsked(askedDegrees, AspectOfImage());
 }
 
 // The angle to hand the engine so that it renders `wantedDegrees` horizontally.
 float SourceFovForWanted(float wantedDegrees) {
-    const double d2r = M_PI / 180.0, r2d = 180.0 / M_PI;
-    double halfX = 0.5 * wantedDegrees * d2r;
-    double aspect = AspectOfImage();
-    if (aspect <= 0.0) return wantedDegrees;
-
-    // Undo the engine's chain: vertical from the wanted horizontal at this aspect, then
-    // the 4:3 horizontal that would have produced that vertical.
-    double halfY = atan(tan(halfX) / aspect);
-    double half43 = atan(tan(halfY) / 0.75);
-    return (float)(2.0 * half43 * r2d);
+    return AfxVrMath::SourceFovForWanted(wantedDegrees, AspectOfImage());
 }
 
 // What the frustum should be: the smallest symmetric one containing the runtime's
-// asymmetric recommendation, unless overridden.
-//
-// Horizontally that is just the wider of the two angles. Vertically there is no choice to
-// make: Source is handed ONE angle and renders it horizontally, and the vertical follows
-// from the shape of the image. So if the image is too wide, the vertical comes out short
-// and there is nothing drawn where the headset wants to look.
-//
-// Measured, on the day a window was changed from 2528x2780 to 2560x1600 to make CS2's menu
-// fit on the monitor. The Quest 3 wants 110 degrees vertically (up 44, down 55, so 55
-// either side of a symmetric frustum). At the tall window a 108 degree horizontal gave 113
-// vertical - enough, narrowly, which is why nobody had to think about it. At the wide one
-// it gives 81: twenty-nine degrees short, and the operator's words were "everything at the
-// edges is badly distorted".
-//
-// So ask for whichever horizontal angle satisfies BOTH, and let the crop throw away what
-// is not needed. The cost is pixels: at 1.6:1 about 40 per cent of each row is rendered
-// and discarded. The cure for that is a window whose shape matches the headset's frustum -
-// tan(54)/tan(55), about 0.96:1, which is what 2528x2780 nearly was - not a smaller field
-// of view.
+// asymmetric recommendation and still tall enough at this image's shape - unless an
+// override says otherwise. AfxVrMath::ContainingFovDegrees carries the reasoning and the
+// measurement it came from; what is here is the override and the calibration dial, which
+// is everything about this function that a test could not see.
 float WantedFovDegrees(const XrFovf & fov) {
     if (g_FovOverrideDegrees > 0.0f) {
-        float forced = g_FovOverrideDegrees * g_FovScale;
-        if (forced < 10.0f) forced = 10.0f;
-        if (forced > 170.0f) forced = 170.0f;
-        return forced;
+        return AfxVrMath::ClampFovDegrees(g_FovOverrideDegrees * g_FovScale, 10.0f, 170.0f);
     }
 
-    double halfH = 0.5 * SymmetricFovDegrees(fov) * (M_PI / 180.0);
+    float degrees = AfxVrMath::ContainingFovDegrees(
+        fov.angleLeft, fov.angleRight, fov.angleUp, fov.angleDown, AspectOfImage());
 
-    float up = fabsf(fov.angleUp), down = fabsf(fov.angleDown);
-    double halfV = (up > down) ? up : down;
-
-    double aspect = AspectOfImage();
-    if (aspect > 0.0) {
-        double neededH = atan(tan(halfV) * aspect);
-        if (neededH > halfH) halfH = neededH;
-    }
-
-    float degrees = (float)(2.0 * halfH * 180.0 / M_PI);
-    degrees *= g_FovScale;
-    if (degrees < 10.0f) degrees = 10.0f;
-    if (degrees > 170.0f) degrees = 170.0f;
-    return degrees;
+    return AfxVrMath::ClampFovDegrees(degrees * g_FovScale, 10.0f, 170.0f);
 }
 
 // What to hand the engine. Differs from WantedFovDegrees when the aspect fix is on, and by
@@ -1423,10 +1377,9 @@ float EffectiveFovDegrees(const XrFovf & fov) {
     float wanted = WantedFovDegrees(fov);
     float asked = g_SourceAspectFix ? SourceFovForWanted(wanted) : wanted;
 
-    asked *= g_AskScale;
-    if (asked < 10.0f) asked = 10.0f;
-    if (asked > 178.0f) asked = 178.0f;
-    return asked;
+    // 178 rather than 170: undoing the 4:3 convention inflates the number, and an ask that
+    // is legitimately wider than any field of view we wanted is not the same thing as a bug.
+    return AfxVrMath::ClampFovDegrees(asked * g_AskScale, 10.0f, 178.0f);
 }
 
 void DestroySwapchains();
