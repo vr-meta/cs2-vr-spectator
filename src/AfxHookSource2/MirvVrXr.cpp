@@ -1968,6 +1968,73 @@ void ResetAimLearning() {
     g_GainInitialised = true;
 }
 
+// How the aim is driven.
+//
+//   hand   the right controller points, as every VR shooter does and as UEVR's
+//          "Aim Method: Right Controller" does for flat games. The game's own aim is
+//          servoed onto the direction the hand points; the crosshair shows where that
+//          actually is, which during motion trails the hand by a frame or two.
+//   stick  the right thumbstick moves the aim, with the deadzone cone. What was built
+//          first, from a misreading: the user said "joystick" and meant the controller.
+//   off    nothing touches the mouse.
+//
+// Off until it has been worn once, because it sends input into a game somebody is inside.
+enum AimMethod { kAimOff = 0, kAimHand = 1, kAimStick = 2 };
+int g_AimMethod = kAimOff;
+
+AfxVrMath::AimTracker g_TrackYaw;
+AfxVrMath::AimTracker g_TrackPitch;
+bool g_HandAimReady = false;     // the servo has been run, so the delay is known
+
+// Where the right hand points, as world angles, from the poses that travelled with this
+// frame rather than from whatever the engine thread has since moved on to.
+//
+// Not the hand's direction copied onto the eye: the hand is half a metre from the eye, so
+// two parallel lines miss by that much at every distance. Aim the eye at a point fifteen
+// metres along the hand's ray instead, and the two cross where it matters.
+bool HandAimWorld(float & outYaw, float & outPitch) {
+    if (!g_AimValid[1]) return false;
+    if (!g_PanelFollowValid) return false;
+
+    float direction[3];
+    AfxVrMath::QuatRotate(g_AimPose[1].orientation.x, g_AimPose[1].orientation.y,
+                          g_AimPose[1].orientation.z, g_AimPose[1].orientation.w,
+                          0.0f, 0.0f, -1.0f, direction[0], direction[1], direction[2]);
+
+    const float reach = 15.0f;
+    float px = g_AimPose[1].position.x + direction[0] * reach;
+    float py = g_AimPose[1].position.y + direction[1] * reach;
+    float pz = g_AimPose[1].position.z + direction[2] * reach;
+
+    float ex = px - g_PanelFollowPos.x;
+    float ey = py - g_PanelFollowPos.y;
+    float ez = pz - g_PanelFollowPos.z;
+
+    double horizontal = sqrt((double)ex * ex + (double)ez * ez);
+    if (horizontal < 1e-4 && fabs((double)ey) < 1e-4) return false;
+
+    // Out of the room and into the world, the same mapping the crosshair uses backwards.
+    double xrYaw = atan2(-(double)ex, -(double)ez);
+    double xrPitch = atan2((double)ey, horizontal);
+
+    outYaw = AfxVrMath::NormalizeDegrees(
+        BodyForwardWorldDegrees()
+        + (float)((xrYaw - RoomForwardYawRadians()) * 180.0 / M_PI));
+    // Source counts pitch positive downwards.
+    outPitch = (float)(-xrPitch * 180.0 / M_PI);
+    if (outPitch >  89.0f) outPitch =  89.0f;
+    if (outPitch < -89.0f) outPitch = -89.0f;
+    return true;
+}
+
+void StopHandAim() {
+    g_HandAimReady = false;
+    g_ServoYaw.Cancel();
+    g_ServoPitch.Cancel();
+    g_TrackYaw.Reset();
+    g_TrackPitch.Reset();
+}
+
 // Aiming with the stick while the head keeps the picture.
 //
 // Decided by the person who wears it, against the alternative of making the head aim. The
@@ -2037,11 +2104,10 @@ void PlayingInput(float dt) {
     if (GetVec2(g_MoveAction, x, y)) WalkFromStick(x, y);
     else ReleaseHeldKeys();
 
-    // The aim, as a mouse. The picture does not move with it - in this mode the view is
-    // the head alone (free look), so the stick moves the crosshair across a still world.
+    // The aim.
     //
     // The angles are read BEFORE anything is sent this frame: that is what the gain
-    // estimator needs, and reading them after would attribute this frame's counts to a
+    // estimator needs, and reading them afterwards would credit this frame's counts to a
     // turn that has not happened yet.
     float base[3];
     AfxVr_GetBaseAngles(base);
@@ -2049,75 +2115,118 @@ void PlayingInput(float dt) {
 
     int sentX = 0, sentY = 0;
 
-    // Look at something, click the right stick, and the aim comes to it. Refuses itself
-    // until a count is worth a known number of degrees, which is a second of ordinary
-    // aiming - a press before then does nothing rather than something wrong.
-    bool gaze = GetPressed(g_RecenterAction);
-    if (gaze && !g_PrevAimCentre && g_AimGaze) {
-        g_GazeTargetYaw = AfxVr_ViewYawDegrees();
-        g_GazeTargetPitch = AfxVr_ViewPitchDegrees();
-        if (g_GazeTargetPitch >  89.0f) g_GazeTargetPitch =  89.0f;
-        if (g_GazeTargetPitch < -89.0f) g_GazeTargetPitch = -89.0f;
-        g_ServoYaw.Start();
-        g_ServoPitch.Start();
-        advancedfx::Message("AFXVR: bringing the aim to %.1f / %.1f.\n",
-            g_GazeTargetYaw, g_GazeTargetPitch);
-    }
-    g_PrevAimCentre = gaze;
-
-    if (g_ServoYaw.Running()) {
-        sentX = g_ServoYaw.Step(AfxVrMath::NormalizeDegrees(g_GazeTargetYaw - base[1]),
-                                g_GainYaw.DegreesPerCount());
-    }
-    if (g_ServoPitch.Running()) {
-        sentY = g_ServoPitch.Step(g_GazeTargetPitch - base[0], g_GainPitch.DegreesPerCount());
-    }
-
-    // The stick, on whichever axis the servo is not driving. Both on one device would
-    // fight, and the servo would read the stick's counts as its own correction landing.
-    if (GetVec2(g_TurnAction, x, y)) {
-        float turn = ShapeStick(x);
-        float pitch = ShapeStick(y);
-
-        // Degrees a second once a count is worth a known amount; counts a second until
-        // then, which is the old behaviour and depends on the player's sensitivity.
-        float gainYaw = g_GainYaw.DegreesPerCount();
-        float gainPitch = g_GainPitch.DegreesPerCount();
-
-        if (!g_ServoYaw.Running()) {
-            float wanted = (0.0f != gainYaw && g_GainYaw.Converged())
-                ? (turn * g_AimDegreesPerSecond * dt / gainYaw) * -1.0f
-                : turn * g_AimSpeed * dt;
-            sentX = AfxVrMath::TakeWholeUnits(wanted, g_AimCarryX);
+    if (kAimHand == g_AimMethod) {
+        float handYaw = 0.0f, handPitch = 0.0f;
+        if (!HandAimWorld(handYaw, handPitch)) {
+            StopHandAim();
+        } else if (!g_HandAimReady) {
+            // Bring the aim onto the hand once, with the servo, because it measures the
+            // delay while it does it - and the tracker needs that number and does not
+            // measure it for itself.
+            if (!g_ServoYaw.Running() && !g_ServoPitch.Running()) {
+                if (AfxVrMath::AimServo::kReached == g_ServoYaw.outcome
+                    && AfxVrMath::AimServo::kReached == g_ServoPitch.outcome) {
+                    g_TrackYaw.Reset();
+                    g_TrackPitch.Reset();
+                    g_TrackPitch.wraps = false;
+                    g_TrackYaw.lagFrames = g_ServoYaw.lagFrames > 0 ? g_ServoYaw.lagFrames : 2;
+                    g_TrackPitch.lagFrames = g_TrackYaw.lagFrames;
+                    g_HandAimReady = true;
+                    advancedfx::Message("AFXVR: aiming with the hand; the game answers in %i frame(s).\n",
+                        g_TrackYaw.lagFrames);
+                } else if (AfxVrMath::AimServo::kGaveUp == g_ServoYaw.outcome
+                           || AfxVrMath::AimServo::kRefused == g_ServoYaw.outcome) {
+                    // Not listening, or a count is not yet worth a known angle. Try again
+                    // next frame rather than pushing counts at nothing.
+                    g_ServoYaw.Cancel();
+                    g_ServoPitch.Cancel();
+                } else {
+                    g_GazeTargetYaw = handYaw;
+                    g_GazeTargetPitch = handPitch;
+                    g_ServoYaw.Start();
+                    g_ServoPitch.Start();
+                }
+            }
+            if (g_ServoYaw.Running()) {
+                sentX = g_ServoYaw.Step(AfxVrMath::NormalizeDegrees(g_GazeTargetYaw - base[1]),
+                                        g_GainYaw.DegreesPerCount());
+            }
+            if (g_ServoPitch.Running()) {
+                sentY = g_ServoPitch.Step(g_GazeTargetPitch - base[0],
+                                          g_GainPitch.DegreesPerCount());
+            }
+        } else {
+            sentX = g_TrackYaw.Step(handYaw, base[1], g_GainYaw.DegreesPerCount());
+            sentY = g_TrackPitch.Step(handPitch, base[0], g_GainPitch.DegreesPerCount());
         }
-        if (!g_ServoPitch.Running()) {
-            float wanted = (0.0f != gainPitch && g_GainPitch.Converged())
-                ? (-pitch * g_AimDegreesPerSecond * dt / gainPitch)
-                : -pitch * g_AimSpeed * dt;
-            sentY = AfxVrMath::TakeWholeUnits(wanted, g_AimCarryY);
+
+        // The thumbstick goes back to what it is in every VR shooter, and in this
+        // project's own demo mode: turning. The deadzone cone belongs to stick aiming and
+        // is not wanted here - the hand decides where the aim is, and the stick decides
+        // which way the room faces.
+        if (GetVec2(g_TurnAction, x, y)) {
+            if (0.0f < g_SnapTurnDegrees) {
+                float step = AfxVrMath::SnapTurn(g_SnapTurn, x, g_SnapTurnDegrees);
+                if (step) AfxVr_AddYaw(step);
+            } else {
+                float t = ShapeStick(x);
+                if (t) AfxVr_AddYaw(-t * g_TurnSpeed * dt);
+            }
         }
+    } else if (kAimStick == g_AimMethod) {
+        // Look at something and click the right stick to bring the aim to it. Refuses
+        // itself until a count is worth a known number of degrees.
+        bool gaze = GetPressed(g_RecenterAction);
+        if (gaze && !g_PrevAimCentre && g_AimGaze) {
+            g_GazeTargetYaw = AfxVr_ViewYawDegrees();
+            g_GazeTargetPitch = AfxVr_ViewPitchDegrees();
+            if (g_GazeTargetPitch >  89.0f) g_GazeTargetPitch =  89.0f;
+            if (g_GazeTargetPitch < -89.0f) g_GazeTargetPitch = -89.0f;
+            g_ServoYaw.Start();
+            g_ServoPitch.Start();
+        }
+        g_PrevAimCentre = gaze;
+
+        if (g_ServoYaw.Running()) {
+            sentX = g_ServoYaw.Step(AfxVrMath::NormalizeDegrees(g_GazeTargetYaw - base[1]),
+                                    g_GainYaw.DegreesPerCount());
+        }
+        if (g_ServoPitch.Running()) {
+            sentY = g_ServoPitch.Step(g_GazeTargetPitch - base[0], g_GainPitch.DegreesPerCount());
+        }
+
+        if (GetVec2(g_TurnAction, x, y)) {
+            float turn = ShapeStick(x);
+            float pitch = ShapeStick(y);
+            float gainYaw = g_GainYaw.DegreesPerCount();
+            float gainPitch = g_GainPitch.DegreesPerCount();
+
+            if (!g_ServoYaw.Running()) {
+                float wanted = (0.0f != gainYaw && g_GainYaw.Converged())
+                    ? (turn * g_AimDegreesPerSecond * dt / gainYaw) * -1.0f
+                    : turn * g_AimSpeed * dt;
+                sentX = AfxVrMath::TakeWholeUnits(wanted, g_AimCarryX);
+            }
+            if (!g_ServoPitch.Running()) {
+                float wanted = (0.0f != gainPitch && g_GainPitch.Converged())
+                    ? (-pitch * g_AimDegreesPerSecond * dt / gainPitch)
+                    : -pitch * g_AimSpeed * dt;
+                sentY = AfxVrMath::TakeWholeUnits(wanted, g_AimCarryY);
+            }
+        }
+
+        // And the body follows only when the aim reaches the edge of the cone.
+        float relative = AfxVrMath::NormalizeDegrees(base[1] - BodyForwardWorldDegrees());
+        float step = AfxVrMath::BodyTurnStep(relative, g_AimDeadzoneDegrees, g_AimSnapDegrees);
+        if (0.0f != step) AfxVr_AddYaw(step);
     }
 
     if (sentX || sentY) QueueMouseMove(sentX, sentY);
 
-    // Everything sent this frame, servo and stick together: the servo's bursts are the
+    // Everything sent this frame, servo, tracker and stick together: those bursts are the
     // best training data there is.
     g_GainYaw.Feed(sentX, base[1]);
     g_GainPitch.Feed(sentY, base[0]);
-
-    // And the body follows only when the aim reaches the edge of the cone.
-    {
-        float base[3];
-        AfxVr_GetBaseAngles(base);
-        float relative = AfxVrMath::NormalizeDegrees(base[1] - BodyForwardWorldDegrees());
-        float step = AfxVrMath::BodyTurnStep(relative, g_AimDeadzoneDegrees, g_AimSnapDegrees);
-        if (0.0f != step) {
-            AfxVr_AddYaw(step);
-            if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
-                advancedfx::Message("AFXVR: aim %.1f deg off the body, turning %.1f\n", relative, step);
-            }
-        }
-    }
 
     SetHeldKey(kHeldCrouch, GetPressed(g_FreeLookAction));   // left grip
     SetHeldKey(kHeldJump,   GetPressed(g_ModeAction));       // right grip
@@ -4583,7 +4692,49 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
 // "this feels wrong" and an answer, when the only instrument is a person wearing the
 // headset and the only way to test is to change it and look again.
 
+CON_COMMAND(mirv_vr_aim, "cs2-vr-spectator: what moves the aim while playing a map.")
+{
+    if (2 <= args->ArgC()) {
+        const char * arg1 = args->ArgV(1);
+        int wanted = g_AimMethod;
+        if (!_stricmp(arg1, "hand"))       wanted = kAimHand;
+        else if (!_stricmp(arg1, "stick")) wanted = kAimStick;
+        else if (!_stricmp(arg1, "off"))   wanted = kAimOff;
+
+        if (wanted != g_AimMethod) {
+            g_AimMethod = wanted;
+            StopHandAim();
+            ResetAimLearning();
+        }
+    }
+
+    advancedfx::Message(
+        "mirv_vr_aim hand|stick|off\n"
+        "\n"
+        "hand  - the right controller points and the game's aim follows it, which is what\n"
+        "        every VR shooter does and what UEVR calls \"Aim Method: Right Controller\".\n"
+        "        The right thumbstick turns the room, as it does in a demo. The crosshair\n"
+        "        is the only truthful sign of where a shot goes: during a fast movement\n"
+        "        the game's aim trails the hand by a frame or two, and the crosshair shows\n"
+        "        where it actually IS rather than where the hand is pointing.\n"
+        "stick - the right thumbstick moves the aim, inside a thirty degree cone in which\n"
+        "        the world holds still. Built first, from a misreading of \"joystick\".\n"
+        "off   - nothing of ours touches the mouse.\n"
+        "\n"
+        "Both driven methods work by sending mouse counts, so they need to know what a\n"
+        "count is worth in degrees - the player's own sensitivity, which also changes when\n"
+        "a weapon is scoped. That is measured from ordinary aiming rather than configured;\n"
+        "until it has converged, aiming falls back to counts a second and the aim-to-look\n"
+        "click refuses itself.\n"
+        "\n"
+        "Current: %s, a count is worth %.5f degrees%s\n",
+        kAimHand == g_AimMethod ? "hand" : (kAimStick == g_AimMethod ? "stick" : "off"),
+        g_GainYaw.DegreesPerCount(),
+        g_GainYaw.Converged() ? " (measured)" : " (not measured yet)");
+}
+
 CON_COMMAND(mirv_vr_pointer, "cs2-vr-spectator: the controller ray that points at the screen.")
+
 {
     int argc = args->ArgC();
     if (2 <= argc) {

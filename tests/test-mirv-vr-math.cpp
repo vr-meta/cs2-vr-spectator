@@ -448,6 +448,7 @@ static void TestTakeWholeUnits();
 static void TestStickToGameFrame();
 static void TestCountGainEstimator();
 static void TestAimServo();
+static void TestAimTracker();
 
 static void RunTests() {
     TestAngleVectors();
@@ -474,6 +475,7 @@ static void RunTests() {
     TestStickToGameFrame();
     TestCountGainEstimator();
     TestAimServo();
+    TestAimTracker();
 }
 
 CHECK_MAIN()
