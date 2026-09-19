@@ -600,9 +600,9 @@ struct PanelRegion {
 PanelRegion g_PanelRegions[] = {
     // Up high and wide, because it is what is being read at a glance. Both teams, the
     // score, the round timer, health and money.
-    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  58.0f, 40.0f, 2.0f, true  },
+    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  58.0f, 40.0f, 1.2f, true  },
     // Low and to the left, where a spectator's eyes go when they want the map.
-    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   78.0f, -36.0f, 20.0f, 1.6f, true  },
+    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   78.0f, -36.0f, 20.0f, 1.0f, true  },
     // Low and central, like a dashboard. It is also what a controller ray will click one
     // day, so close and below the line of sight is right.
     //
@@ -612,7 +612,7 @@ PanelRegion g_PanelRegions[] = {
     // freeze with no spectated target, so the strip did not exist to be measured. Without
     // it the viewer cannot see who they are watching, which is exactly what was needed to
     // tell whether the switch-player button had done anything.
-    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -66.0f, 50.0f, 1.4f, true  },
+    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -66.0f, 50.0f, 0.75f, true },
     // Off, and NOT measured: there were no kills on screen when the sheet was captured, so
     // this rect is a guess at where the feed appears. Turn it on with mirv_vr_panel region
     // killfeed on and correct it with mirv_vr_panel rect.
@@ -640,6 +640,31 @@ float g_PanelSpread = 1.0f;
 // not cost a frame of stale sheet, and it comes back exactly where it was rather than
 // being re-placed in front of wherever you happen to be looking.
 bool g_PanelShown = true;
+
+// The HUD follows the viewer's position, and only the viewer's position.
+//
+// World-locked in both was wrong in a way that took a worn screenshot to see. The anchor is
+// captured when the session becomes FOCUSED - the moment the headset goes on a face, which
+// is standing at the desk - and the viewer then steps back and sits down. Measured from
+// that screenshot: the head ended up 1.05 m behind the anchor, consistently across all
+// three groups. Everything followed. The timeline specified at 66 degrees below and 1.4 m
+// out was lying on the floor ahead instead of in the lap; and since every quad is turned to
+// face the ANCHOR, from a metre behind it they were all seen obliquely - the operator's
+// "turned at a strange angle".
+//
+// Following the position and keeping the yaw gives a cockpit: the angles are true angles
+// from the eyes whatever the body does, every quad faces the viewer by construction, and
+// "look down and the bar is in my lap" holds while sitting, standing or leaning. The
+// orientation stays world-locked, because a panel that follows the eyes cannot be looked
+// away from and looking away from the HUD is most of what a viewer does.
+bool g_PanelFollow = true;
+XrVector3f g_PanelFollowPos = {};
+bool g_PanelFollowValid = false;
+
+// Low-passed, or head bob shows on a quad three quarters of a metre away. About a sixth of
+// a second at this frame rate, which reads as a cockpit settling rather than as lag.
+const float kPanelFollowAlpha = 0.2f;
+
 
 
 // Frames of alpha reporting still owed, from mirv_vr_panel alpha.
@@ -1567,10 +1592,15 @@ XrPosef PlaceRegion(const PanelRegion & region) {
 
     double cosEl = cos(el), sinEl = sin(el);
 
+    // Where the viewer is now, not where they were when the anchor was placed. Only the
+    // yaw comes from the anchor.
+    const XrVector3f & from = (g_PanelFollow && g_PanelFollowValid)
+        ? g_PanelFollowPos : g_PanelPose.position;
+
     XrPosef pose = {};
-    pose.position.x = g_PanelPose.position.x + (float)(-sin(yaw) * cosEl * region.distanceMetres);
-    pose.position.y = g_PanelPose.position.y + (float)( sinEl            * region.distanceMetres);
-    pose.position.z = g_PanelPose.position.z + (float)(-cos(yaw) * cosEl * region.distanceMetres);
+    pose.position.x = from.x + (float)(-sin(yaw) * cosEl * region.distanceMetres);
+    pose.position.y = from.y + (float)( sinEl            * region.distanceMetres);
+    pose.position.z = from.z + (float)(-cos(yaw) * cosEl * region.distanceMetres);
 
     // qYaw about Y, then qPitch about the quad's OWN X - composed with the same helper the
     // eye code uses, rather than expanded by hand.
@@ -2398,9 +2428,9 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         // fail by construction.
         if (g_Monoscopic && g_ProjViewsValid) {
             XrVector3f mid;
-            mid.x = 0.5f * (rendered[0].pose.position.x + rendered[1].pose.position.x);
-            mid.y = 0.5f * (rendered[0].pose.position.y + rendered[1].pose.position.y);
-            mid.z = 0.5f * (rendered[0].pose.position.z + rendered[1].pose.position.z);
+            mid.x = 0.5f * (g_ProjViews[0].pose.position.x + g_ProjViews[1].pose.position.x);
+            mid.y = 0.5f * (g_ProjViews[0].pose.position.y + g_ProjViews[1].pose.position.y);
+            mid.z = 0.5f * (g_ProjViews[0].pose.position.z + g_ProjViews[1].pose.position.z);
             rendered[0].pose.position = mid;
             rendered[1].pose.position = mid;
         }
@@ -2588,6 +2618,23 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         bool havePanel = g_PanelEnabled && g_PanelShown && g_PanelCopied && g_PanelPlaced
             && XR_NULL_HANDLE != g_Swapchain[kPanelSwapchain]
             && g_SwapchainWidth > 0 && g_SwapchainHeight > 0;
+
+        // From the same poses the frame is being submitted with, so the panels and the
+        // world cannot disagree about where the head is.
+        if (g_ProjViewsValid) {
+            XrVector3f mid;
+            mid.x = 0.5f * (g_ProjViews[0].pose.position.x + g_ProjViews[1].pose.position.x);
+            mid.y = 0.5f * (g_ProjViews[0].pose.position.y + g_ProjViews[1].pose.position.y);
+            mid.z = 0.5f * (g_ProjViews[0].pose.position.z + g_ProjViews[1].pose.position.z);
+            if (!g_PanelFollowValid) {
+                g_PanelFollowPos = mid;
+                g_PanelFollowValid = true;
+            } else {
+                g_PanelFollowPos.x += (mid.x - g_PanelFollowPos.x) * kPanelFollowAlpha;
+                g_PanelFollowPos.y += (mid.y - g_PanelFollowPos.y) * kPanelFollowAlpha;
+                g_PanelFollowPos.z += (mid.z - g_PanelFollowPos.z) * kPanelFollowAlpha;
+            }
+        }
 
         if (havePanel && g_PanelCutUp) {
             for (int i = 0; i < kPanelRegionCount && quadCount < kMaxPanelQuads; i++) {
@@ -3072,6 +3119,15 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
             return;
         }
 
+        if (!_stricmp(arg1, "follow") || !_stricmp(arg1, "fixed")) {
+            g_PanelFollow = (0 == _stricmp(arg1, "follow"));
+            advancedfx::Message("mirv_vr_panel: %s\n",
+                g_PanelFollow
+                    ? "following you - the angles are true angles from your eyes wherever you stand."
+                    : "fixed in the room at the anchor, whatever you do with your body.");
+            return;
+        }
+
         if (!_stricmp(arg1, "show") || !_stricmp(arg1, "hide")) {
             g_PanelShown = (0 == _stricmp(arg1, "show"));
             advancedfx::Message("mirv_vr_panel: %s.\n", g_PanelShown ? "shown" : "hidden");
@@ -3192,6 +3248,9 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
         "mirv_vr_panel rect <g> <u0> <v0> <u1> <v1>    - which part of the sheet it is.\n"
         "mirv_vr_panel spread <k>  - how far out of the way every group sits, in one number.\n"
         "mirv_vr_panel show|hide   - without moving anything. Also the right stick click.\n"
+        "mirv_vr_panel follow|fixed- whether it comes with you when you move, keeping its\n"
+        "                            direction. Following is the default and is what makes\n"
+        "                            \"look down and it is in my lap\" true after you sit.\n"
         "\n"
         "The timeline, the scoreboard and the speed controls are a flat overlay the game\n"
         "draws at screen depth. Copied into each eye, that is doubled, at the wrong\n"
