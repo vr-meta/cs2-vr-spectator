@@ -58,6 +58,11 @@ void AfxVr_SetHead(bool enabled, float dPitch, float dYaw, float dRoll, float fo
 void AfxVr_SetRoomScale(bool enabled);
 bool AfxVr_GetRoomScale();
 
+// How many times the view struct has read back as a camera. Counted whether or not VR is
+// on, because the thing that wants to know - starting a session with nobody at the
+// keyboard - has to decide before anything has been enabled.
+unsigned int AfxVr_PlausibleViewCount();
+
 // The same factor mirv_vr_ipd applies to the eye separation. A lean has to be scaled with
 // it: world scale is one number, and eyes scaled while the head is not give the wrong
 // parallax for the stereo the viewer is actually shown.

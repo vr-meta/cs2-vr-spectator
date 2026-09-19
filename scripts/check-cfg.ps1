@@ -75,7 +75,37 @@ foreach ($file in $Path) {
     }
 }
 
+# Every exec names a file that exists, in the directory the configs are actually installed
+# to. CS2 resolves exec against cfg\, not against the file doing the exec'ing, so moving
+# these into cfg\cs2vr\ means every exec has to say cs2vr/ - and one that does not fails
+# silently, in a headset, with the layout half loaded.
+$sourceDir = Join-Path (Split-Path -Parent $PSCommandPath) 'cs2'
+
+foreach ($file in $Path) {
+    $name = Split-Path -Leaf $file
+    $n = 0
+    foreach ($line in (Get-Content -LiteralPath $file)) {
+        $n++
+        $t = $line.Trim()
+        if ($t -match '^//') { continue }
+        foreach ($m in [regex]::Matches($t, '(?<![a-zA-Z_])exec\s+([A-Za-z0-9_/\.-]+)')) {
+            $target = $m.Groups[1].Value -replace '\.cfg$', ''
+            if ($target -notlike 'cs2vr/*') {
+                Write-Host "$name : line $n execs '$target', which is not under cs2vr/ - CS2 resolves exec against cfg\, so it would miss" -ForegroundColor Red
+                $problems++
+                continue
+            }
+            $leaf = $target.Substring('cs2vr/'.Length)
+            if (-not (Test-Path (Join-Path $sourceDir "$leaf.cfg"))) {
+                Write-Host "$name : line $n execs '$target', and scripts\cs2\$leaf.cfg does not exist" -ForegroundColor Red
+                $problems++
+            }
+        }
+    }
+}
+
 # Reserved keys: the ones the operator reaches for without looking. A diagnostics layout is
+
 # allowed to change nearly everything - that is the point of it - but not these.
 #
 # PgDn swaps the layout, not the operator's fingers. The day this was written, RIGHTARROW

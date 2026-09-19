@@ -83,12 +83,19 @@ cmake --build --preset x64-release --target AfxHookSource2
 If the OpenXR headers live somewhere else, pass
 `-DAFXVR_OPENXR_DIR=<path>` to the configure step.
 
-Copy the result into the self-built HLAE:
+Copy the result, and the OpenXR loader, into the self-built HLAE:
 
 ```powershell
 Copy-Item D:\Dev\cs2-vr-tools\advancedfx\build\x64-release\AfxHookSource2\Release\AfxHookSource2.dll `
           D:\Dev\cs2-vr-tools\hlae-selfbuilt\x64\AfxHookSource2.dll
+Copy-Item D:\Dev\cs2-vr-tools\openxr\pkg\native\x64\release\bin\openxr_loader.dll `
+          D:\Dev\cs2-vr-tools\hlae-selfbuilt\x64\openxr_loader.dll
 ```
+
+The hook looks for the loader **next to itself**, and one directory above that. It used to
+be a literal `D:\Dev\...` compiled in, which worked on exactly one machine and is the first
+thing that has to go before anyone else can run this
+([the release plan](07-release-plan.md)). `AFXVR_OPENXR_LOADER` still overrides both.
 
 ### Two build failures that do not say what is wrong
 
@@ -103,13 +110,20 @@ as above.
 ## 3. Configs
 
 ```powershell
-Copy-Item D:\Dev\cs2-vr-spectator\scripts\cs2\vr.cfg, `
-          D:\Dev\cs2-vr-spectator\scripts\cs2\vr_keys.cfg, `
-          D:\Dev\cs2-vr-spectator\scripts\cs2\vr_diag.cfg `
-          'D:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\'
+D:\Dev\cs2-vr-spectator\scripts\deploy-cfg.ps1
 ```
 
-Three files, because a CS2 bind is last-one-wins and says nothing about it. `vr.cfg` holds
+They go to `game\csgo\cfg\cs2vr\`, in a directory of their own, and the script removes any
+loose copies it finds in `cfg\` from before that directory existed. Nothing of ours is left
+mixed in with Valve's own configs, so removing this project is deleting one folder — and a
+stale layout cannot be reached by typing `exec vr_keys` out of habit. Every `exec` inside
+these files says `cs2vr/` explicitly, because CS2 resolves `exec` against `cfg\` and not
+against the file doing the exec'ing; `check-cfg.ps1` fails if one does not.
+
+`start-vr.ps1` runs this every time, so the layout in the repository is the layout the
+headset gets.
+
+Several files, because a CS2 bind is last-one-wins and says nothing about it. `vr.cfg` holds
 settings and then execs `vr_keys.cfg`, the everyday layout. `vr_diag.cfg` is the stereo
 diagnostics as a separate layout you switch into with **PgDn** and out of with **PgUp**.
 They used to be one file, in which the diagnostics at the bottom quietly took eleven keys

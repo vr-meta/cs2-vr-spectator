@@ -2,7 +2,7 @@
 #
 #   .\start-vr.ps1
 #   .\start-vr.ps1 -Demo other.dem
-#   .\start-vr.ps1 -NoStart        # launch, but do not press F9 for you
+#   .\start-vr.ps1 -NoStart        # launch, but leave starting the session to F9
 #
 # Everything a worn session needs is decided here rather than remembered at the prompt,
 # because the day it was remembered wrong cost an hour: a desk measurement launched at
@@ -18,6 +18,10 @@
 #     the symptom is "QueuePresentAndWait looped for N iterations without a present event"
 #     and a game that stops responding.
 #   - The full per-eye size, stated every time, so nothing can be inherited.
+#   - The configs, copied out of the repository every time (deploy-cfg.ps1), into
+#     cfg\cs2vr\ where nothing of the game's own is mixed in with them.
+#   - AFXVR_AUTOSTART, so the session begins when the demo starts playing. Nothing is
+#     timed, nothing is synthesised, and the window does not need focus.
 #
 # Desk measurements are the other script, launch-cs2-experiment.ps1, with an exp*.cfg.
 # Do not use -ExecCfg vr for one: it binds F9, and F9 starts a headset session.
@@ -62,26 +66,30 @@ Write-Host "per eye  : ${Width}x${Height}" -ForegroundColor Cyan
 Write-Host "runtime  : Meta, for this launch only (XR_RUNTIME_JSON)" -ForegroundColor Cyan
 Write-Host "frame cap: $FpsMax" -ForegroundColor Cyan
 
+# Always, so a layout edited in the repository is the layout the headset gets. They used to
+# be copied by hand, which is how a config in the game and a config in git drift apart.
+& (Join-Path $here 'deploy-cfg.ps1')
+
 & (Join-Path $here 'launch-cs2-experiment.ps1') `
     -SelfBuilt -VrReady -MetaRuntime `
-    -ExecCfg vr -Width $Width -Height $Height -FpsMax $FpsMax -Demo $Demo
+    -ExecCfg vr -Width $Width -Height $Height -FpsMax $FpsMax -Demo $Demo `
+    -AutoStart:(-not $NoStart)
 
 if ($NoStart) {
     Write-Host 'Launched. Press F9 in the game when the demo is up.' -ForegroundColor Green
     exit 0
 }
 
-Write-Host 'Waiting for the demo...' -NoNewline
+# Nothing to press and nothing to time: the hook starts the session itself the moment the
+# demo tick moves. This only waits so the log below has something in it.
+Write-Host 'Waiting for the session...' -NoNewline
 for ($i = 0; $i -lt 120; $i++) {
-    if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'AFXVR: CS2 build' -Quiet)) { break }
+    if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'AFXVR: autostart' -Quiet)) { break }
     Start-Sleep -Seconds 2
     Write-Host '.' -NoNewline
 }
 Write-Host ''
-
-Start-Sleep -Seconds 20
-& (Join-Path $here 'send-key.ps1') -Key F9 -SettleMs 5000
-
+Start-Sleep -Seconds 3
 Write-Host ''
 Get-Content $log | Select-String -Pattern 'AFXVR' | Select-Object -Last 12 | ForEach-Object { $_.Line }
 Write-Host ''

@@ -9,6 +9,7 @@
 #include "../src/AfxHookSource2/MirvVrMath.h"
 
 #include <string.h>
+#include <wchar.h>
 
 using namespace AfxVrMath;
 
@@ -393,6 +394,45 @@ static void TestSteamInfPath() {
     CHECK(!SteamInfPathFromExe("C:/Games/cs2/game/bin/win64/cs2.exe", tiny, sizeof(tiny)));
 }
 
+static void TestPathRelativeToFile() {
+    check::Case("things next to the hook are found without knowing where the hook is");
+
+    char out[512];
+
+    // The shape the release has: openxr_loader.dll beside the hook DLL.
+    CHECK(PathRelativeToFile("C:/Program Files/cs2vr/hook/AfxHookSource2.dll", 0,
+        "\\openxr_loader.dll", out, sizeof(out)));
+    CHECK_STR(out, "C:/Program Files/cs2vr/hook\\openxr_loader.dll");
+
+    // The shape the development tree has: the hook one level down, in the x64 directory.
+    CHECK(PathRelativeToFile("D:\\Dev\\hlae\\x64\\AfxHookSource2.dll", 1,
+        "\\openxr_loader.dll", out, sizeof(out)));
+    CHECK_STR(out, "D:\\Dev\\hlae\\openxr_loader.dll");
+
+    // Wide, which is what LoadLibraryW needs and the only version that survives a folder
+    // name with a character outside ASCII in it.
+    wchar_t wide[512];
+    CHECK(PathRelativeToFile(L"C:\\Users\\Paul\\cs2vr\\hook\\AfxHookSource2.dll", 0,
+        L"\\openxr_loader.dll", wide, 512));
+    CHECK(0 == wcscmp(wide, L"C:\\Users\\Paul\\cs2vr\\hook\\openxr_loader.dll"));
+
+    // Not deep enough, or not a path at all: refuse rather than invent one. A relative
+    // "openxr_loader.dll" is what LoadLibrary would search the process directories for,
+    // and that is the fallback the caller adds deliberately - not something this should
+    // produce by accident.
+    CHECK(!PathRelativeToFile("AfxHookSource2.dll", 0, "\\x.dll", out, sizeof(out)));
+    CHECK(!PathRelativeToFile("C:\\a.dll", 1, "\\x.dll", out, sizeof(out)));
+    CHECK(!PathRelativeToFile("", 0, "\\x.dll", out, sizeof(out)));
+    CHECK(!PathRelativeToFile((const char *)0, 0, "\\x.dll", out, sizeof(out)));
+    CHECK(!PathRelativeToFile("C:\\a\\b.dll", 0, (const char *)0, out, sizeof(out)));
+    CHECK(!PathRelativeToFile("C:\\a\\b.dll", -1, "\\x.dll", out, sizeof(out)));
+
+    // Too small to hold the answer: say so, do not write half of it.
+    char tiny[8];
+    CHECK(!PathRelativeToFile("C:\\a\\b\\c.dll", 0, "\\openxr_loader.dll", tiny, sizeof(tiny)));
+    CHECK_STR(tiny, "");
+}
+
 // ---------------------------------------------------------------------------------
 
 static void TestQuatToSourceAngles(); // defined below, after the helpers it needs
@@ -412,6 +452,7 @@ static void RunTests() {
     TestCheckView();
     TestSteamInfValue();
     TestSteamInfPath();
+    TestPathRelativeToFile();
     TestQuatToSourceAngles();
     TestComposeSourceAngles();
     TestShouldRestoreBaseView();

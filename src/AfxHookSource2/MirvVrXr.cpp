@@ -726,16 +726,47 @@ AFXVR_XR_FUNCS(AFXVR_DECL)
 
 PFN_xrGetD3D11GraphicsRequirementsKHR xrGetD3D11GraphicsRequirementsKHR_ = nullptr;
 
-// Tried in order. AFXVR_OPENXR_LOADER comes first so an installation that is not this
-// machine's has somewhere to say so; the absolute path is this machine's and the bare name
-// is the last resort, which finds one only if it happens to sit next to the game.
+// Where the loader is looked for, in order, and all of it relative to something rather
+// than absolute.
+//
+// AFXVR_OPENXR_LOADER first, so an installation this code has never heard of has somewhere
+// to say so. Then next to THIS DLL: the hook and the loader ship in one directory and the
+// person who unpacked the zip chose where that is. Then the bare name, which lets
+// LoadLibrary search the process's own directories and finds one only if it happens to sit
+// next to the game.
+//
+// It used to be a literal "D:\Dev\cs2-vr-tools\openxr\...". That is one developer's disk,
+// and it is the first thing that has to go before a stranger can run this at all
+// (docs/07-release-plan.md, phase 0).
+//
+// Two entries and not one because the development tree keeps the hook in HLAE's x64
+// directory with the loader a level above, while a release puts both in one folder. One
+// table, not two code paths.
 //
 // Note this is the *loader*, not the runtime. Which runtime the loader then picks is the
 // registry's business, or XR_RUNTIME_JSON's -- see scripts/openxr-runtime.ps1.
-const wchar_t * const kLoaderPaths[] = {
-    L"D:\\Dev\\cs2-vr-tools\\openxr\\pkg\\native\\x64\\release\\bin\\openxr_loader.dll",
-    L"openxr_loader.dll",
+const wchar_t * const kLoaderBesideHook[] = {
+    L"\\openxr_loader.dll",
+    L"\\..\\openxr_loader.dll",
 };
+
+const wchar_t * const kLoaderByName = L"openxr_loader.dll";
+
+// This DLL's own full path.
+//
+// From the address of something inside it rather than a handle remembered in DllMain: this
+// translation unit has no DllMain, and asking for the module by name would find whichever
+// AfxHookSource2.dll the loader happened to have mapped first.
+bool HookModulePath(wchar_t * out, size_t outSize) {
+    HMODULE self = NULL;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)&kLoaderByName, &self)) {
+        return false;
+    }
+    DWORD written = GetModuleFileNameW(self, out, (DWORD)outSize);
+    return 0 != written && written < outSize;
+}
 
 const char * ResultName(XrResult r) {
     static char buf[XR_MAX_RESULT_STRING_SIZE];
@@ -766,13 +797,28 @@ bool LoadLoader() {
         }
     }
 
-    for (int i = 0; !g_hLoader && i < _countof(kLoaderPaths); i++) {
-        g_hLoader = LoadLibraryW(kLoaderPaths[i]);
+    // Next to this DLL, which is where a release puts it.
+    wchar_t self[MAX_PATH];
+    self[0] = 0;
+    if (!g_hLoader && HookModulePath(self, MAX_PATH)) {
+        for (int i = 0; !g_hLoader && i < _countof(kLoaderBesideHook); i++) {
+            wchar_t candidate[MAX_PATH];
+            if (!AfxVrMath::PathRelativeToFile(self, 0, kLoaderBesideHook[i], candidate, MAX_PATH)) {
+                continue;
+            }
+            g_hLoader = LoadLibraryW(candidate);
+            if (g_hLoader) advancedfx::Message("AFXVR: OpenXR loader: %ls\n", candidate);
+        }
     }
+
+    if (!g_hLoader) g_hLoader = LoadLibraryW(kLoaderByName);
+
     if (!g_hLoader) {
         advancedfx::Warning(
-            "AFXVR: could not load openxr_loader.dll. Set AFXVR_OPENXR_LOADER to its full\n"
-            "AFXVR: path before launching, or see docs/install.md.\n");
+            "AFXVR: could not load openxr_loader.dll.\n"
+            "AFXVR: Looked next to this DLL, which is \"%ls\".\n"
+            "AFXVR: Put it there, or set AFXVR_OPENXR_LOADER to its full path.\n",
+            self[0] ? self : L"(unknown - this module's own path could not be read)");
         return false;
     }
 
@@ -1765,6 +1811,57 @@ void PollEvents() {
     }
 }
 
+// Starting the session with nobody at the keyboard.
+//
+// AFXVR_AUTOSTART=1 in the environment arms it; mirv_vr_autostart 0|1 overrides that from a
+// config. It replaces the last third of start-vr.ps1: watch console.log for a line, sleep
+// twenty seconds, synthesise F9. The sleep is a guess about how long a demo takes to load
+// and the key needs the game window to have focus, which it does not while a headset is
+// being put on - both of those have cost a session already.
+//
+// The condition is not "the game is up", it is "a demo is playing": the view struct reads
+// like a camera, a demo tick is available, and that tick has MOVED since the last frame.
+// Started against the menu the viewer gets a menu; started against a demo that is loaded
+// but not yet running, the session begins before there is a camera worth wearing.
+int g_AutoStart = -1;          // -1 not read yet, 0 off, 1 armed
+bool g_AutoStartDone = false;
+int g_AutoStartLastTick = -1;
+
+void EngineThread_AutoStart() {
+    if (g_AutoStartDone) return;
+
+    if (-1 == g_AutoStart) {
+        char value[16] = "";
+        g_AutoStart = (0 < GetEnvironmentVariableA("AFXVR_AUTOSTART", value, sizeof(value))
+            && 0 != atoi(value)) ? 1 : 0;
+        if (1 == g_AutoStart) {
+            advancedfx::Message(
+                "AFXVR: AFXVR_AUTOSTART is set. The headset session will start by itself once a\n"
+                "AFXVR: demo is playing. mirv_vr_autostart 0 stops that.\n");
+        }
+    }
+    if (1 != g_AutoStart) return;
+
+    // Somebody got there first, by hand or by config. Nothing left to do.
+    if (XR_NULL_HANDLE != g_Session) { g_AutoStartDone = true; return; }
+
+    if (0 == AfxVr_PlausibleViewCount()) return;
+
+    int tick = 0;
+    if (!g_MirvTime.GetCurrentDemoTick(tick)) { g_AutoStartLastTick = -1; return; }
+    if (-1 == g_AutoStartLastTick || tick == g_AutoStartLastTick) {
+        g_AutoStartLastTick = tick;
+        return;
+    }
+
+    // Once, whatever happens next: a session that refuses to start will refuse again sixty
+    // times a second, and the person it is refusing for is wearing the headset.
+    g_AutoStartDone = true;
+    advancedfx::Message("AFXVR: autostart: the demo is running at tick %i; starting the session.\n", tick);
+    if (!MirvVrXr_SessionStart()) {
+        advancedfx::Warning("AFXVR: autostart: it would not start. F9 tries again.\n");
+    }
+}
 } // namespace
 
 bool MirvVrXr_IsRunning() {
@@ -1983,6 +2080,7 @@ void MirvVrXr_EngineThread_Frame() {
     SampleFrameTime();
 
     PollEvents();
+    EngineThread_AutoStart();
 
     // A console command has to be dispatched from the engine thread, so the controller
     // handler only raises a flag.
@@ -2904,7 +3002,32 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
 // "this feels wrong" and an answer, when the only instrument is a person wearing the
 // headset and the only way to test is to change it and look again.
 
+CON_COMMAND(mirv_vr_autostart, "cs2-vr-spectator: start the headset session by itself when a demo begins to play.")
+{
+    if (2 <= args->ArgC()) {
+        g_AutoStart = (0 != atoi(args->ArgV(1))) ? 1 : 0;
+        g_AutoStartDone = false;
+        g_AutoStartLastTick = -1;
+    }
+
+    advancedfx::Message(
+        "mirv_vr_autostart 0|1 - whether the session starts without F9 being pressed.\n"
+        "\n"
+        "Armed from the environment by AFXVR_AUTOSTART=1, which is how a launcher will do it;\n"
+        "this command overrides that from a config.\n"
+        "\n"
+        "It waits for a demo to be PLAYING, not merely for the game to be up: the view struct\n"
+        "has to read like a camera and the demo tick has to have moved. Started any earlier\n"
+        "the viewer gets the menu background, or a frozen first frame.\n"
+        "\n"
+        "It fires once. If the session will not start it says so and stops trying, because\n"
+        "the person it would be complaining to has a headset on.\n"
+        "Current value: %i\n",
+        g_AutoStart > 0 ? 1 : 0);
+}
+
 CON_COMMAND(mirv_vr_controls, "cs2-vr-spectator: print the controller mapping.")
+
 {
     PrintControls();
 }

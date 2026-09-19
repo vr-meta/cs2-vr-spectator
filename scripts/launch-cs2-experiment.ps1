@@ -22,7 +22,9 @@ param(
     [int]$Width  = 1280,
     [int]$Height = 720,
     [int]$FpsMax = 0,         # 0 leaves the game uncapped
-    [string]$ExecCfg          # a cfg to exec at startup, for key bindings
+    [string]$ExecCfg,         # a cfg to exec at startup, for key bindings
+    [switch]$AutoStart        # the hook starts the headset session itself, once a demo runs
+
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,7 +75,16 @@ if ($RuntimeJson) {
     Remove-Item Env:\XR_RUNTIME_JSON -ErrorAction SilentlyContinue
 }
 
+# Starting the session without anybody pressing a key.
+#
+# The hook watches for a demo to be actually playing and starts then. This replaces reading
+# console.log for a line, sleeping twenty seconds and synthesising F9: the sleep was a guess
+# about how long a demo takes to load, and the key needs the game window to have focus,
+# which it does not while a headset is being put on.
+if ($AutoStart) { $env:AFXVR_AUTOSTART = '1' } else { Remove-Item Env:\AFXVR_AUTOSTART -ErrorAction SilentlyContinue }
+
 # Game arguments, passed through HLAE via -cmdLine.
+
 $gameArgs = @(
     '-insecure'
     '-novid'
@@ -113,7 +124,13 @@ if (0 -lt $FpsMax)    { $gameArgs += @('+fps_max', "$FpsMax") }
 # With a VR runtime up the game window stops taking input reliably, and console text
 # cannot be synthesised - so the experiment's commands go on key binds loaded at startup
 # and are pressed from outside. See docs/workflow.md.
-if ($ExecCfg)         { $gameArgs += @('+exec', $ExecCfg) }
+# Our configs live in cfg\cs2vr\, not loose among the game's own (scripts/deploy-cfg.ps1).
+# The caller names the file; the directory is known in one place.
+if ($ExecCfg) {
+    $leaf = $ExecCfg -replace '^cs2vr/', ''
+    $gameArgs += @('+exec', "cs2vr/$leaf")
+}
+
 if ($Vulkan)          { $gameArgs += '-vulkan' }
 if ($Demo) {
     # A bare name is resolved by the engine relative to game/csgo, so only check

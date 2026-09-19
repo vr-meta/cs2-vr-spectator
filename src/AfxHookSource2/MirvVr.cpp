@@ -198,6 +198,8 @@ void RebuildViewMatrices() {
 // Latched so the log does not fill with the same sentence sixty times a second, and so
 // the first transition in either direction is reported exactly once.
 bool g_ViewPlausible = true;
+unsigned int g_PlausibleViews = 0;
+
 bool g_ReportedImplausible = false;
 bool g_ReportedRecovered = false;
 const char * g_LastImplausibleReason = nullptr;
@@ -372,6 +374,9 @@ void AfxVr_SetHead(bool enabled, float dPitch, float dYaw, float dRoll, float fo
 void AfxVr_SetRoomScale(bool enabled) { g_RoomScale = enabled; }
 bool AfxVr_GetRoomScale() { return g_RoomScale; }
 
+unsigned int AfxVr_PlausibleViewCount() { return g_PlausibleViews; }
+
+
 void AfxVr_SetRoomIpdScale(float scale) { g_IpdScaleForRoom = scale; }
 
 bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz,
@@ -384,6 +389,12 @@ bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz
     // Cheap, and the first frame is the right moment: the game is fully up by the time a
     // view is being set up, and the answer is wanted before anything is written.
     CheckGameBuildOnce();
+
+    // Counted here and not in ViewIsPlausible, which only runs once something is enabled.
+    // Whoever is deciding whether the game is far enough along to put a headset on needs
+    // the answer before that.
+    if (AfxVrMath::CheckView(g_BaseOrigin, g_BaseAngles, g_BaseFov).ok) g_PlausibleViews++;
+
 
     if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
         advancedfx::Message(

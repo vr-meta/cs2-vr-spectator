@@ -423,31 +423,53 @@ inline bool SteamInfValue(const char * text, const char * key, char * out, size_
     return false;
 }
 
-// cs2.exe lives at <install>/game/bin/win64/cs2.exe and steam.inf at
-// <install>/game/csgo/steam.inf, so the answer is three directories up and back down.
-// Accepts either separator and always writes backslashes.
-inline bool SteamInfPathFromExe(const char * exePath, char * out, size_t outSize) {
-    if (!exePath || !out || 0 == outSize) return false;
-    out[0] = '\0';
+// Where something is, relative to a file whose path is known: strips the file name, then
+// `extraLevels` more directories, then appends `suffix`. Accepts either separator and
+// leaves the part it keeps exactly as it was given.
+//
+// A DLL has no business knowing an absolute path on the machine it was built on. Until
+// this existed the OpenXR loader was looked for at a literal
+// "D:\Dev\cs2-vr-tools\openxr\..." - which is one developer's disk, and the first thing
+// that would have to be explained to anyone who unpacked a release. What the hook actually
+// wants to ask is "what is next to me", and the answer is here so it can be tested without
+// a game, a headset or that disk.
+//
+// A template because the caller for steam.inf reads a narrow path out of the engine and
+// the caller for the loader must pass a wide one to LoadLibraryW: a path with a non-ASCII
+// character in it - somebody's name in a folder name - is not hypothetical, and narrowing
+// it is how that turns into "could not load openxr_loader.dll" with no reason given.
+template <class C>
+inline bool PathRelativeToFile(const C * path, int extraLevels, const C * suffix,
+                               C * out, size_t outSize) {
+    if (!path || !suffix || !out || 0 == outSize) return false;
+    out[0] = (C)0;
+    if (extraLevels < 0) return false;
 
-    size_t length = strlen(exePath);
-    // Strip the file name and then two more directories: win64, bin.
-    int toStrip = 3;
+    size_t length = 0;
+    while (path[length]) length++;
+
+    int toStrip = extraLevels + 1;   // the file name first, then whole directories
     while (toStrip > 0 && length > 0) {
-        while (length > 0 && '\\' != exePath[length - 1] && '/' != exePath[length - 1]) length--;
+        while (length > 0 && (C)'\\' != path[length - 1] && (C)'/' != path[length - 1]) length--;
         if (0 == length) return false;
-        length--; // the separator itself
+        length--;   // the separator itself
         toStrip--;
     }
-    if (0 == length) return false;
+    if (toStrip > 0 || 0 == length) return false;
 
-    const char * suffix = "\\csgo\\steam.inf";
-    size_t suffixLength = strlen(suffix);
+    size_t suffixLength = 0;
+    while (suffix[suffixLength]) suffixLength++;
     if (length + suffixLength + 1 > outSize) return false;
 
-    memcpy(out, exePath, length);
-    memcpy(out + length, suffix, suffixLength + 1);
+    for (size_t i = 0; i < length; i++) out[i] = path[i];
+    for (size_t i = 0; i <= suffixLength; i++) out[length + i] = suffix[i];
     return true;
+}
+
+// cs2.exe lives at <install>/game/bin/win64/cs2.exe and steam.inf at
+// <install>/game/csgo/steam.inf, so the answer is three directories up and back down.
+inline bool SteamInfPathFromExe(const char * exePath, char * out, size_t outSize) {
+    return PathRelativeToFile(exePath, 2, "\\csgo\\steam.inf", out, outSize);
 }
 
 } // namespace AfxVrMath
