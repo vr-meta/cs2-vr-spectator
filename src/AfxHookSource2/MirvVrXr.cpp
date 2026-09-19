@@ -504,12 +504,39 @@ bool LoadInstanceFunctions() {
 // OpenXR is right handed, Y up, -Z forward, metres. CS2 is Z up, X forward, inches - and
 // MirvVr takes offsets in the camera's own frame, which is exactly what an eye pose is,
 // so only the axis names and the scale have to change.
+// Rotate a vector by the inverse of a unit quaternion: world space into the frame that
+// quaternion describes.
+void RotateIntoFrame(const XrQuaternionf & q, float x, float y, float z,
+                     float & ox, float & oy, float & oz) {
+    // The conjugate is the inverse for a unit quaternion.
+    float qx = -q.x, qy = -q.y, qz = -q.z, qw = q.w;
+    float tx = 2.0f * (qy * z - qz * y);
+    float ty = 2.0f * (qz * x - qx * z);
+    float tz = 2.0f * (qx * y - qy * x);
+    ox = x + qw * tx + (qy * tz - qz * ty);
+    oy = y + qw * ty + (qz * tx - qx * tz);
+    oz = z + qw * tz + (qx * ty - qy * tx);
+}
+
 void XrPoseToEye(const XrPosef & pose, const XrPosef & base,
                  float & right, float & forward, float & up,
                  float & dPitch, float & dYaw, float & dRoll) {
-    right   =  (pose.position.x - base.position.x) * kUnitsPerMetre;
-    up      =  (pose.position.y - base.position.y) * kUnitsPerMetre;
-    forward = -(pose.position.z - base.position.z) * kUnitsPerMetre;
+    // The offset has to be expressed in the HEAD's frame, because that is the frame the
+    // caller applies it in - it multiplies these by the game camera's own right, forward
+    // and up vectors. Handing over the raw world-space difference means the head rotation
+    // is applied a second time, and the eyes separate along a direction that swings as the
+    // viewer looks around: fusable straight ahead, worse the further the head turns or
+    // pitches. That is exactly how it presents, and it is what this rotation fixes.
+    float lx, ly, lz;
+    RotateIntoFrame(base.orientation,
+                    pose.position.x - base.position.x,
+                    pose.position.y - base.position.y,
+                    pose.position.z - base.position.z,
+                    lx, ly, lz);
+
+    right   =  lx * kUnitsPerMetre;
+    up      =  ly * kUnitsPerMetre;
+    forward = -lz * kUnitsPerMetre;
 
     // Quaternion to yaw/pitch/roll, in the OpenXR frame.
     const XrQuaternionf & q = pose.orientation;
@@ -535,6 +562,59 @@ float SymmetricFovDegrees(const XrFovf & fov) {
     float a = fabsf(fov.angleLeft), b = fabsf(fov.angleRight);
     float half = a > b ? a : b;
     return (float)(2.0 * half * 180.0 / M_PI);
+}
+
+// A headset's frustum is not centred on the eye's forward axis. The Quest 3 reports
+// [-54, +40] horizontally for the left eye and [-40, +54] for the right: the same 94
+// degrees, but with the centre 7 degrees outward on each side, because the lens sits
+// outboard of the pupil.
+//
+// CS2 can only render a frustum centred on its camera, so the centre has to be carried by
+// rotating the camera instead. Rendering symmetrically about the forward axis and leaving
+// the 7 degrees unaccounted leaves a constant angular offset between the eyes - 14 degrees
+// of it, opposite in sign - which is independent of distance. That is exactly how it
+// presents: a near wall fuses, because real parallax swamps it, and a far one does not,
+// because at distance there is nothing left but the error.
+struct FrustumCentre {
+    float yawDegrees;    // positive turns left, matching both OpenXR and Source
+    float pitchDegrees;  // Source sense: positive looks down
+    float halfHorizontal;
+    float halfVertical;
+};
+
+// On by default: rendering without it leaves 14 degrees of constant angular divergence,
+// which no eye-separation setting can compensate because the error does not vary with
+// distance. Off restores the old behaviour for comparison.
+bool g_CentreFrustum = true;
+
+XrQuaternionf QuatAxisAngle(float ax, float ay, float az, float radians) {
+    float s = sinf(0.5f * radians);
+    XrQuaternionf q;
+    q.x = ax * s; q.y = ay * s; q.z = az * s; q.w = cosf(0.5f * radians);
+    return q;
+}
+
+XrQuaternionf QuatMul(const XrQuaternionf & a, const XrQuaternionf & b) {
+    XrQuaternionf r;
+    r.w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z;
+    r.x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y;
+    r.y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x;
+    r.z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w;
+    return r;
+}
+
+FrustumCentre CentreOfFrustum(const XrFovf & fov) {
+    const double r2d = 180.0 / M_PI;
+    FrustumCentre c;
+
+    // Signed fov angles are measured from forward, positive to the right and up. A centre
+    // at a negative horizontal angle is to the left, which is a positive yaw.
+    c.yawDegrees   = (float)(-0.5 * (fov.angleRight + fov.angleLeft) * r2d);
+    c.pitchDegrees = (float)(-0.5 * (fov.angleUp + fov.angleDown) * r2d);
+
+    c.halfHorizontal = (float)(0.5 * (fov.angleRight - fov.angleLeft) * r2d);
+    c.halfVertical   = (float)(0.5 * (fov.angleUp - fov.angleDown) * r2d);
+    return c;
 }
 
 // Overrides for the frustum, because the automatic answer is only right if CS2 renders
@@ -1378,8 +1458,21 @@ void MirvVrXr_EngineThread_Frame() {
         } else {
             right *= g_IpdScale; forward *= g_IpdScale; up *= g_IpdScale;
         }
-        AfxVr_SetEye(pass + 1, true, right, forward, up, dPitch, dYaw, dRoll,
-            EffectiveFovDegrees(views[eye].fov));
+
+        float fovDegrees = EffectiveFovDegrees(views[eye].fov);
+
+        if (g_CentreFrustum) {
+            // Point the camera down the middle of the eye's real frustum, and render only
+            // as wide as that frustum actually is.
+            FrustumCentre c = CentreOfFrustum(views[eye].fov);
+            dYaw   += c.yawDegrees;
+            dPitch += c.pitchDegrees;
+            fovDegrees = 2.0f * c.halfHorizontal;
+            if (g_FovOverrideDegrees > 0.0f) fovDegrees = g_FovOverrideDegrees;
+            fovDegrees *= g_FovScale;
+        }
+
+        AfxVr_SetEye(pass + 1, true, right, forward, up, dPitch, dYaw, dRoll, fovDegrees);
     }
 }
 
@@ -1475,6 +1568,20 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             g_ProjViews[eye] = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
             g_ProjViews[eye].pose = rendered[eye].pose;
 
+            // The camera was turned onto the frustum's centre, so the pose reported for
+            // that image has to be turned the same way. Doing one without the other just
+            // moves the error from the image to the claim about it.
+            FrustumCentre centre = CentreOfFrustum(rendered[eye].fov);
+            if (g_CentreFrustum) {
+                const float d2r = (float)(M_PI / 180.0);
+                XrQuaternionf yaw   = QuatAxisAngle(0.0f, 1.0f, 0.0f, centre.yawDegrees * d2r);
+                // c.pitchDegrees is in Source's sense, positive looking down; OpenXR's
+                // pitch is positive looking up.
+                XrQuaternionf pitch = QuatAxisAngle(1.0f, 0.0f, 0.0f, -centre.pitchDegrees * d2r);
+                g_ProjViews[eye].pose.orientation =
+                    QuatMul(QuatMul(rendered[eye].pose.orientation, yaw), pitch);
+            }
+
             // Report the symmetric frustum actually rendered, not the runtime's
             // asymmetric recommendation. The vertical half-angle follows from the image
             // aspect - equal to the horizontal one only when the image is square, which
@@ -1483,9 +1590,13 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             // the frustum we WANTED, not the number we handed the engine to get it. With
             // the aspect fix off those are the same; with it on they differ by exactly the
             // engine's 4:3 convention, which is the point.
-            float claimed = (g_ReportedFovOverrideDegrees > 0.0f)
-                ? g_ReportedFovOverrideDegrees
-                : WantedFovDegrees(rendered[eye].fov);
+            float claimed = WantedFovDegrees(rendered[eye].fov);
+            if (g_CentreFrustum) {
+                claimed = 2.0f * centre.halfHorizontal;
+                if (g_FovOverrideDegrees > 0.0f) claimed = g_FovOverrideDegrees;
+                claimed *= g_FovScale;
+            }
+            if (g_ReportedFovOverrideDegrees > 0.0f) claimed = g_ReportedFovOverrideDegrees;
             float half = 0.5f * claimed * (float)(M_PI / 180.0);
             float vHalf = half;
             if (g_FovVerticalOverrideDegrees > 0.0f) {
@@ -2198,4 +2309,31 @@ CON_COMMAND(mirv_vr_calibrate, "cs2-vr-spectator: tune the stereo from the contr
         g_IpdScale,
         g_ReportedFovOverrideDegrees > 0.0f ? "field of view overridden" : "claiming what is rendered",
         g_Monoscopic ? "MONOSCOPIC" : "stereo");
+}
+
+CON_COMMAND(mirv_vr_centre, "cs2-vr-spectator: render each eye around the real centre of its frustum.")
+{
+    if (2 <= args->ArgC()) {
+        g_CentreFrustum = 0 != atoi(args->ArgV(1));
+        advancedfx::Message("mirv_vr_centre: %s\n", g_CentreFrustum ? "on" : "off");
+        return;
+    }
+
+    advancedfx::Message(
+        "mirv_vr_centre 0|1 - point each eye's camera down the middle of its own frustum.\n"
+        "\n"
+        "A headset's frustum is not centred on the eye's forward axis, because the lens sits\n"
+        "outboard of the pupil. A Quest 3 reports [-54, +40] horizontally for the left eye\n"
+        "and [-40, +54] for the right: the same 94 degrees, centred 7 degrees outward on\n"
+        "each side.\n"
+        "\n"
+        "CS2 can only render a frustum centred on its camera, so that offset has to be\n"
+        "carried by turning the camera. Without it there is a constant 14 degrees of angular\n"
+        "divergence between the eyes - and being angular, it does not shrink with distance.\n"
+        "A near wall still fuses because real parallax swamps it; a far one does not,\n"
+        "because at distance nothing else is left. Converging by eye at one distance then\n"
+        "walking away makes it worse, which is what gave it away.\n"
+        "\n"
+        "Off restores the old behaviour, for comparison. Current: %s.\n",
+        g_CentreFrustum ? "on" : "off");
 }
