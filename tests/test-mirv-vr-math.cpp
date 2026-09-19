@@ -443,6 +443,11 @@ static void TestRoomOffsetToWorld();
 static void TestRegionPlacementRoundTrip();
 static void TestRayQuadHit();
 static void TestDecideMode();
+static void TestBodyTurnStep();
+static void TestTakeWholeUnits();
+static void TestStickToGameFrame();
+static void TestCountGainEstimator();
+static void TestAimServo();
 
 static void RunTests() {
     TestAngleVectors();
@@ -464,6 +469,11 @@ static void RunTests() {
     TestRegionPlacementRoundTrip();
     TestRayQuadHit();
     TestDecideMode();
+    TestBodyTurnStep();
+    TestTakeWholeUnits();
+    TestStickToGameFrame();
+    TestCountGainEstimator();
+    TestAimServo();
 }
 
 CHECK_MAIN()
@@ -1203,6 +1213,166 @@ static void TestDecideMode() {
         CHECK(watch.mode != play.mode);
     }
 }
+
+// ---------------------------------------------------------------------------------
+
+static void TestBodyTurnStep() {
+    check::Case("the world holds still while the aim crosses a thirty degree cone");
+
+    const float cone = 30.0f, snap = 30.0f;
+
+    // Inside the cone nothing moves. This is the point of the whole thing: the crosshair
+    // walks across a still picture.
+    for (float rel = -29.9f; rel <= 29.9f; rel += 1.0f) {
+        CHECK_NEAR(BodyTurnStep(rel, cone, snap), 0.0f, 1e-4);
+    }
+    CHECK_NEAR(BodyTurnStep(0.0f, cone, snap), 0.0f, 1e-6);
+    CHECK_NEAR(BodyTurnStep(30.0f, cone, snap), 0.0f, 1e-4);
+    CHECK_NEAR(BodyTurnStep(-30.0f, cone, snap), 0.0f, 1e-4);
+
+    // Past it, one snap, in the direction the aim went.
+    CHECK_NEAR(BodyTurnStep(31.0f, cone, snap), 30.0f, 1e-4);
+    CHECK_NEAR(BodyTurnStep(-31.0f, cone, snap), -30.0f, 1e-4);
+
+    // And the aim ends up back inside the cone, which is the property that matters: one
+    // step must not leave it still outside, or the next frame steps again and the world
+    // spins.
+    for (float rel = 30.5f; rel < 179.0f; rel += 0.5f) {
+        float step = BodyTurnStep(rel, cone, snap);
+        CHECK(fabsf(NormalizeDegrees(rel - step)) <= cone + 1e-3f);
+        step = BodyTurnStep(-rel, cone, snap);
+        CHECK(fabsf(NormalizeDegrees(-rel - step)) <= cone + 1e-3f);
+    }
+
+    // Smooth following: exactly the overshoot, so the aim lands on the edge.
+    CHECK_NEAR(BodyTurnStep(45.0f, cone, 0.0f), 15.0f, 1e-4);
+    CHECK_NEAR(BodyTurnStep(-45.0f, cone, 0.0f), -15.0f, 1e-4);
+    CHECK_NEAR(NormalizeDegrees(45.0f - BodyTurnStep(45.0f, cone, 0.0f)), 30.0f, 1e-3);
+
+    // Wrapping: 190 degrees to the left is 170 to the right, and the body must turn the
+    // short way. Turning the long way round is a full spin for a small correction.
+    CHECK(BodyTurnStep(190.0f, cone, snap) < 0.0f);
+    CHECK(BodyTurnStep(-190.0f, cone, snap) > 0.0f);
+
+    // No cone at all is still legal: every movement turns the body.
+    CHECK_NEAR(BodyTurnStep(5.0f, 0.0f, 0.0f), 5.0f, 1e-4);
+    CHECK_NEAR(BodyTurnStep(-5.0f, 0.0f, 0.0f), -5.0f, 1e-4);
+    // And a negative cone is read as none rather than as an error.
+    CHECK_NEAR(BodyTurnStep(5.0f, -10.0f, 0.0f), 5.0f, 1e-4);
+}
+
+static void TestTakeWholeUnits() {
+    check::Case("a fraction of a mouse count is kept rather than thrown away");
+
+    // The bug this exists for: truncating every frame loses up to a whole count each
+    // time, which is a steady drift, and anything below one count produces nothing at all.
+    {
+        float carry = 0.0f;
+        int total = 0;
+        for (int i = 0; i < 100; i++) total += TakeWholeUnits(0.4f, carry);
+        CHECK(total >= 39 && total <= 40);   // 40 asked for; truncation would give 0
+    }
+
+    // Small amounts eventually move, rather than never moving.
+    {
+        float carry = 0.0f;
+        int moved = 0;
+        for (int i = 0; i < 20; i++) if (TakeWholeUnits(0.1f, carry)) moved++;
+        CHECK(moved >= 1);
+    }
+
+    // The carry never grows past one unit, in either direction.
+    {
+        float carry = 0.0f;
+        for (int i = 0; i < 500; i++) {
+            TakeWholeUnits((i % 7) * 0.3f - 0.9f, carry);
+            CHECK(fabsf(carry) < 1.0f);
+        }
+    }
+
+    // Symmetric: the same journey out and back nets to nothing, so holding a stick one way
+    // and then the other leaves the aim where it started.
+    {
+        float carry = 0.0f;
+        int total = 0;
+        for (int i = 0; i < 50; i++) total += TakeWholeUnits(0.37f, carry);
+        for (int i = 0; i < 50; i++) total += TakeWholeUnits(-0.37f, carry);
+        CHECK(total >= -1 && total <= 1);
+    }
+
+    // Whole numbers pass straight through with nothing left over.
+    {
+        float carry = 0.0f;
+        CHECK(3 == TakeWholeUnits(3.0f, carry));
+        CHECK_NEAR(carry, 0.0f, 1e-5);
+        CHECK(-4 == TakeWholeUnits(-4.0f, carry));
+        CHECK_NEAR(carry, 0.0f, 1e-5);
+    }
+}
+
+// ---------------------------------------------------------------------------------
+
+static void TestStickToGameFrame() {
+    check::Case("pushing the stick forward walks where you are looking, not where you aim");
+
+    float f = 0.0f, l = 0.0f;
+
+    // Head and aim agree: straight through.
+    StickToGameFrame(0.0f, 1.0f, 0.0f, f, l);
+    CHECK_NEAR(f, 1.0f, 1e-4);
+    CHECK_NEAR(l, 0.0f, 1e-4);
+
+    StickToGameFrame(1.0f, 0.0f, 0.0f, f, l);
+    CHECK_NEAR(f, 0.0f, 1e-4);
+    CHECK_NEAR(l, -1.0f, 1e-4);   // right on the stick is negative left
+
+    // The case that was broken: looking behind the body, forward on the stick has to walk
+    // where the eyes are, which in the game's frame is backwards.
+    StickToGameFrame(0.0f, 1.0f, 180.0f, f, l);
+    CHECK_NEAR(f, -1.0f, 1e-3);
+    CHECK_NEAR(l, 0.0f, 1e-3);
+
+    // Looking ninety degrees left: forward on the stick is the game's left.
+    StickToGameFrame(0.0f, 1.0f, 90.0f, f, l);
+    CHECK_NEAR(f, 0.0f, 1e-4);
+    CHECK_NEAR(l, 1.0f, 1e-4);
+
+    // Looking ninety degrees right: forward on the stick is the game's right.
+    StickToGameFrame(0.0f, 1.0f, -90.0f, f, l);
+    CHECK_NEAR(f, 0.0f, 1e-4);
+    CHECK_NEAR(l, -1.0f, 1e-4);
+
+    // Magnitude is preserved at every angle, so a half push stays a half push and the
+    // press thresholds keep meaning what they say.
+    for (int deg = -180; deg <= 180; deg += 15) {
+        for (int i = 0; i < 8; i++) {
+            float x = 0.3f * (float)((i % 3) - 1);
+            float y = 0.7f * (float)((i / 3) - 1);
+            StickToGameFrame(x, y, (float)deg, f, l);
+            double before = sqrt((double)x * x + (double)y * y);
+            double after = sqrt((double)f * f + (double)l * l);
+            CHECK_NEAR(after, before, 1e-4);
+        }
+    }
+
+    // Two rotations compose: turning the head by a then by b is turning it by a+b.
+    {
+        float f1, l1, f2, l2;
+        StickToGameFrame(0.4f, 0.9f, 25.0f, f1, l1);
+        // Feed the result back in as a stick reading, remembering right is -left.
+        StickToGameFrame(-l1, f1, 35.0f, f2, l2);
+        StickToGameFrame(0.4f, 0.9f, 60.0f, f, l);
+        CHECK_NEAR(f2, f, 1e-3);
+        CHECK_NEAR(l2, l, 1e-3);
+    }
+
+    // A centred stick stays centred whatever the head is doing - no drift into a wall.
+    for (int deg = -180; deg <= 180; deg += 30) {
+        StickToGameFrame(0.0f, 0.0f, (float)deg, f, l);
+        CHECK_NEAR(f, 0.0f, 1e-6);
+        CHECK_NEAR(l, 0.0f, 1e-6);
+    }
+}
 // ---------------------------------------------------------------------------------
 
 static void TestRoomOffsetToWorld() {
@@ -1271,5 +1441,487 @@ static void TestRoomOffsetToWorld() {
             float compensated = after[i] + (before[i] - after[i]);
             CHECK_NEAR(compensated, before[i], 1e-4);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------
+
+// A game, as far as a mouse is concerned: counts go in, and some frames later the angle
+// has turned by a gain the sender was never told. Read() is the angle at the top of a
+// frame; Send() is what the frame then sends. With lag 1 a send is visible at the next
+// Read, with lag 2 the one after.
+struct MousePlant {
+    float angle = 0.0f;
+    float gain = -0.0275f;      // m_yaw 0.022 x sensitivity 1.25, and mouse right turns yaw down
+    int lag = 2;
+    bool wraps = true;
+    int pipe[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+
+    float Read() const { return angle; }
+
+    void Send(int counts) {
+        for (int i = 7; i > 0; i--) pipe[i] = pipe[i - 1];
+        pipe[0] = counts;
+        // Everything at least (lag - 1) frames old lands now. "At least", so that a lag
+        // that changes from frame to frame neither loses a send nor applies one twice.
+        for (int i = lag - 1; i < 8; i++) {
+            if (i < 0) continue;
+            angle += gain * (float)pipe[i];
+            pipe[i] = 0;
+        }
+        if (wraps) angle = AfxVrMath::NormalizeDegrees(angle);
+    }
+
+    void Turn(float degrees) {   // somebody else's doing: a hand on the mouse, a respawn
+        angle += degrees;
+        if (wraps) angle = AfxVrMath::NormalizeDegrees(angle);
+    }
+};
+
+// Aim the way a thumb does: a burst one way, a rest, a burst the other way.
+static void AimInBursts(MousePlant & plant, AfxVrMath::CountGainEstimator & estimator,
+                        int bursts, int framesPerBurst, int countsPerFrame, int restFrames) {
+    for (int b = 0; b < bursts; b++) {
+        int direction = (b % 2) ? -1 : 1;
+        for (int f = 0; f < framesPerBurst; f++) {
+            float read = plant.Read();
+            int counts = direction * countsPerFrame;
+            estimator.Feed(counts, read);
+            plant.Send(counts);
+        }
+        for (int f = 0; f < restFrames; f++) {
+            estimator.Feed(0, plant.Read());
+            plant.Send(0);
+        }
+    }
+}
+
+static void TestCountGainEstimator() {
+    using namespace AfxVrMath;
+    check::Case("what a mouse count is worth is measured from ordinary aiming");
+
+    // Nothing measured, nothing claimed - except a seed, if one was given.
+    {
+        CountGainEstimator e;
+        CHECK(!e.Converged());
+        CHECK_NEAR(e.DegreesPerCount(), 0.0, 1e-9);
+        e.Seed(-0.03f);
+        CHECK(!e.Converged());
+        CHECK_NEAR(e.DegreesPerCount(), -0.03, 1e-6);
+    }
+
+    // The plain case, for each delay the game might have. The sign comes out too: mouse
+    // right turns a Source yaw down.
+    for (int lag = 1; lag <= 3; lag++) {
+        MousePlant plant; plant.lag = lag;
+        CountGainEstimator e;
+        AimInBursts(plant, e, 6, 15, 40, 6);
+        CHECK(e.Converged());
+        CHECK_NEAR(e.DegreesPerCount(), plant.gain, 0.02 * 0.0275);
+    }
+
+    // One short flick is not a measurement.
+    {
+        MousePlant plant;
+        CountGainEstimator e;
+        AimInBursts(plant, e, 1, 3, 5, 6);
+        CHECK(!e.Converged());
+    }
+
+    // The delay is not constant - the render thread is sometimes a frame behind and
+    // sometimes not. Frame-against-frame comparison falls apart here; blocks do not care.
+    {
+        MousePlant plant;
+        CountGainEstimator e;
+        for (int b = 0; b < 8; b++) {
+            int direction = (b % 2) ? -1 : 1;
+            for (int f = 0; f < 14; f++) {
+                plant.lag = 1 + ((f * 7 + b) % 2);
+                float read = plant.Read();
+                e.Feed(direction * 35, read);
+                plant.Send(direction * 35);
+            }
+            plant.lag = 2;
+            for (int f = 0; f < 6; f++) { e.Feed(0, plant.Read()); plant.Send(0); }
+        }
+        CHECK(e.Converged());
+        CHECK_NEAR(e.DegreesPerCount(), plant.gain, 0.03 * 0.0275);
+    }
+
+    // A long sweep with no rest in it, across the +-180 seam several times. Blocks are cut
+    // while the stick is still moving; what is in flight at each cut goes to the next one.
+    {
+        MousePlant plant; plant.angle = 170.0f;
+        CountGainEstimator e;
+        for (int f = 0; f < 400; f++) {
+            float read = plant.Read();
+            e.Feed(-60, read);        // mouse left: yaw climbs through +180 and wraps
+            plant.Send(-60);
+        }
+        CHECK(e.Converged());
+        CHECK_NEAR(e.DegreesPerCount(), plant.gain, 0.03 * 0.0275);
+    }
+
+    // Pitch: no wrapping, and the other sign - mouse down is pitch up in Source's numbers.
+    {
+        MousePlant plant; plant.wraps = false; plant.gain = 0.0275f;
+        CountGainEstimator e; e.wraps = false;
+        AimInBursts(plant, e, 6, 10, 20, 6);
+        CHECK(e.Converged());
+        CHECK_NEAR(e.DegreesPerCount(), 0.0275, 0.02 * 0.0275);
+    }
+
+    // A respawn in the middle of a burst turns the player a hundred degrees for reasons
+    // that have nothing to do with the mouse. That block is thrown away, not averaged in.
+    {
+        MousePlant plant;
+        CountGainEstimator e;
+        AimInBursts(plant, e, 6, 15, 40, 6);
+        float before = e.DegreesPerCount();
+
+        for (int f = 0; f < 15; f++) {
+            if (7 == f) plant.Turn(100.0f);
+            float read = plant.Read();
+            e.Feed(40, read);
+            plant.Send(40);
+        }
+        for (int f = 0; f < 6; f++) { e.Feed(0, plant.Read()); plant.Send(0); }
+
+        CHECK_NEAR(e.DegreesPerCount(), before, 0.02 * 0.0275);
+    }
+
+    // A hand on the real mouse during one burst: a few degrees nobody here sent. One
+    // disagreeing block is ignored.
+    {
+        MousePlant plant;
+        CountGainEstimator e;
+        AimInBursts(plant, e, 6, 15, 40, 6);
+        float before = e.DegreesPerCount();
+
+        for (int f = 0; f < 15; f++) {
+            plant.Turn(1.0f);         // fifteen degrees over the burst, against 16.5 of ours
+            float read = plant.Read();
+            e.Feed(40, read);
+            plant.Send(40);
+        }
+        for (int f = 0; f < 6; f++) { e.Feed(0, plant.Read()); plant.Send(0); }
+
+        CHECK_NEAR(e.DegreesPerCount(), before, 1e-7);
+    }
+
+    // The scope goes up and a count is suddenly worth under half what it was. Blocks keep
+    // disagreeing, so the old number is dropped and the new one learned.
+    {
+        MousePlant plant;
+        CountGainEstimator e;
+        AimInBursts(plant, e, 6, 15, 40, 6);
+        CHECK_NEAR(e.DegreesPerCount(), -0.0275, 0.02 * 0.0275);
+
+        plant.gain = -0.0275f * 0.4444f;
+        AimInBursts(plant, e, 10, 15, 40, 6);
+        CHECK(e.Converged());
+        CHECK_NEAR(e.DegreesPerCount(), plant.gain, 0.03 * 0.0275 * 0.4444);
+    }
+}
+
+// Run an AimServo against a plant until it stops. Reports the worst overshoot, as a
+// fraction of the error it started with, and how many counts it sent in all.
+struct ServoRun {
+    float finalError;
+    float worstOvershoot;
+    int frames;
+    long totalCounts;
+    AfxVrMath::AimServo::Outcome outcome;
+};
+
+static ServoRun RunServo(MousePlant & plant, float target, float believedGain,
+                         AfxVrMath::AimServo & servo) {
+    using namespace AfxVrMath;
+    ServoRun run = { 0.0f, 0.0f, 0, 0, AimServo::kIdle };
+
+    float startError = NormalizeDegrees(target - plant.Read());
+    float startSign = startError < 0.0f ? -1.0f : 1.0f;
+
+    servo.Start();
+    // Keep the frames going a little after it stops, so whatever was still on its way
+    // when it declared itself finished is counted against it.
+    int after = 0;
+    for (int f = 0; f < 60 && after < 6; f++) {
+        float error = NormalizeDegrees(target - plant.Read());
+        int counts = servo.Step(error, believedGain);
+        plant.Send(counts);
+        run.totalCounts += counts < 0 ? -counts : counts;
+        if (servo.Running()) run.frames++; else after++;
+
+        float past = -error * startSign;    // positive once it has gone beyond the target
+        float fraction = past / (startError * startSign + 1e-6f);
+        if (fraction > run.worstOvershoot) run.worstOvershoot = fraction;
+    }
+    run.finalError = NormalizeDegrees(target - plant.Read());
+    run.outcome = servo.outcome;
+    return run;
+}
+
+static void TestAimServo() {
+    using namespace AfxVrMath;
+    check::Case("the aim comes to where you are looking, and stops there");
+
+    // Never started: it sends nothing, whatever it is shown.
+    {
+        AimServo servo;
+        CHECK(0 == servo.Step(40.0f, -0.0275f));
+        CHECK(!servo.Running());
+    }
+
+    // No idea what a count is worth: refuse, rather than send a number made of nothing.
+    {
+        AimServo servo;
+        servo.Start();
+        CHECK(0 == servo.Step(40.0f, 0.0f));
+        CHECK(AimServo::kRefused == servo.outcome);
+    }
+
+    // Already there.
+    {
+        AimServo servo;
+        servo.Start();
+        CHECK(0 == servo.Step(0.1f, -0.0275f));
+        CHECK(AimServo::kReached == servo.outcome);
+    }
+
+    // The gain known exactly, for every delay, both directions, and across the seam.
+    for (int lag = 1; lag <= 3; lag++) {
+        const float starts[3]  = { 0.0f, 0.0f, 170.0f };
+        const float targets[3] = { 40.0f, -75.0f, -160.0f };
+        for (int i = 0; i < 3; i++) {
+            MousePlant plant; plant.lag = lag; plant.angle = starts[i];
+            AimServo servo;
+            ServoRun run = RunServo(plant, targets[i], plant.gain, servo);
+            CHECK(AimServo::kReached == run.outcome);
+            CHECK(fabs(run.finalError) <= 0.5);
+            CHECK(run.worstOvershoot <= 0.02f);
+            CHECK(run.frames <= 16);
+        }
+    }
+
+    // The gain believed a quarter too high and a quarter too low - which is about as wrong
+    // as a half-converged estimate gets. It must still arrive, and must not swing wildly.
+    for (int lag = 1; lag <= 3; lag++) {
+        const float wrong[2] = { 1.25f, 0.75f };
+        for (int i = 0; i < 2; i++) {
+            MousePlant plant; plant.lag = lag;
+            AimServo servo;
+            ServoRun run = RunServo(plant, 40.0f, plant.gain * wrong[i], servo);
+            CHECK(AimServo::kReached == run.outcome);
+            CHECK(fabs(run.finalError) <= 0.5);
+            CHECK(run.worstOvershoot <= 0.25f);
+        }
+    }
+
+    // The delay changes under it from frame to frame, as it does when the render thread
+    // is sometimes a frame behind. It measured one delay at the start and the game then
+    // uses another; it still has to arrive without swinging.
+    for (int phase = 0; phase < 2; phase++) {
+        MousePlant plant;
+        AimServo servo;
+        servo.Start();
+        float worstPast = 0.0f;
+        for (int f = 0; f < 40; f++) {
+            plant.lag = 1 + ((f + phase) % 2);
+            float error = NormalizeDegrees(40.0f - plant.Read());
+            plant.Send(servo.Step(error, plant.gain));
+            if (-error > worstPast) worstPast = -error;
+        }
+        CHECK(AimServo::kReached == servo.outcome);
+        CHECK(fabs(NormalizeDegrees(40.0f - plant.Read())) <= 0.5);
+        CHECK(worstPast <= 0.25f * 40.0f);
+    }
+
+    // Pitch, where a count is worth a positive number.
+    {
+        MousePlant plant; plant.wraps = false; plant.gain = 0.0275f;
+        AimServo servo;
+        ServoRun run = RunServo(plant, -30.0f, plant.gain, servo);
+        CHECK(AimServo::kReached == run.outcome);
+        CHECK(fabs(run.finalError) <= 0.5);
+    }
+
+    // A game that is not listening - paused, or the window lost the keyboard and mouse.
+    // It notices within a few frames, and it has sent ONE correction's worth of counts
+    // while finding out, not a fortune of them: whatever was sent lands all at once the
+    // moment the game wakes up.
+    {
+        MousePlant plant; plant.gain = 0.0f;
+        AimServo servo;
+        ServoRun run = RunServo(plant, 40.0f, -0.0275f, servo);
+        CHECK(AimServo::kGaveUp == run.outcome);
+        long needed = (long)(40.0f / 0.0275f);
+        CHECK(run.totalCounts <= needed);
+        CHECK(run.frames <= 8);
+    }
+
+    // A gain so coarse that one count is more than the tolerance: it settles for the
+    // nearest count rather than hunting for ever.
+    {
+        MousePlant plant; plant.gain = -0.5f;
+        AimServo servo;
+        ServoRun run = RunServo(plant, 10.2f, plant.gain, servo);
+        CHECK(AimServo::kReached == run.outcome);
+        CHECK(fabs(run.finalError) <= 0.5);
+    }
+
+    // Cancelled halfway: nothing more is sent.
+    {
+        MousePlant plant;
+        AimServo servo;
+        servo.Start();
+        plant.Send(servo.Step(40.0f, plant.gain));
+        servo.Cancel();
+        CHECK(!servo.Running());
+        CHECK(0 == servo.Step(30.0f, plant.gain));
+    }
+}
+
+// ---------------------------------------------------------------------------------
+
+// A tiny deterministic wobble, standing in for a hand that is never quite still.
+static float Tremor(int frame, float amplitude) {
+    static const float pattern[8] = { 0.9f, -0.4f, 0.2f, -1.0f, 0.6f, -0.1f, 0.8f, -0.7f };
+    return amplitude * pattern[frame & 7];
+}
+
+static void TestAimTracker() {
+    using namespace AfxVrMath;
+    check::Case("the aim follows the hand, trails it by a bounded amount, and does not ring");
+
+    // Nothing is known about what a count is worth: send nothing.
+    {
+        AimTracker t;
+        CHECK(0 == t.Step(30.0f, 0.0f, 0.0f));
+    }
+
+    // A steady sweep, then a dead stop - the two things a hand does. While sweeping the
+    // aim trails by no more than the delay accounts for; after the stop it arrives, and
+    // it never goes more than a little past where the hand stopped.
+    for (int lag = 1; lag <= 3; lag++) {
+        MousePlant plant; plant.lag = lag;
+        AimTracker t; t.lagFrames = lag;
+
+        const float perFrame = 1.5f;     // fifty-four degrees a second at 36 frames
+        float hand = 0.0f;
+        float worstTrail = 0.0f;
+        for (int f = 0; f < 60; f++) {
+            hand += perFrame;
+            plant.Send(t.Step(hand, plant.Read(), plant.gain));
+            if (f >= 20) {
+                float trail = NormalizeDegrees(hand - plant.Read());
+                if (trail > worstTrail) worstTrail = trail;
+                CHECK(trail > 0.0f);     // behind the hand, never ahead of a steady sweep
+            }
+        }
+        float bound = perFrame * ((float)(lag - 1) + 1.0f / t.kp + 1.0f) + 0.5f;
+        CHECK(worstTrail <= bound);
+
+        float worstPast = 0.0f;
+        for (int f = 0; f < 30; f++) {
+            plant.Send(t.Step(hand, plant.Read(), plant.gain));
+            float past = NormalizeDegrees(plant.Read() - hand);
+            if (past > worstPast) worstPast = past;
+        }
+        CHECK(fabs(NormalizeDegrees(hand - plant.Read())) <= 0.2);
+        CHECK(worstPast <= 0.3f);
+    }
+
+    // The delay believed one frame too short or too long, and the gain a quarter out
+    // either way. After the hand stops it must settle, not keep swinging.
+    {
+        const int trueLag[4]     = { 3, 2, 2, 1 };
+        const int believedLag[4] = { 2, 1, 3, 2 };
+        const float wrongGain[2] = { 1.25f, 0.75f };
+        for (int i = 0; i < 4; i++) for (int g = 0; g < 2; g++) {
+            MousePlant plant; plant.lag = trueLag[i];
+            AimTracker t; t.lagFrames = believedLag[i];
+            float believed = plant.gain * wrongGain[g];
+
+            float hand = 0.0f;
+            for (int f = 0; f < 40; f++) { hand += 1.5f; plant.Send(t.Step(hand, plant.Read(), believed)); }
+
+            float worstPast = 0.0f;
+            for (int f = 0; f < 40; f++) {
+                plant.Send(t.Step(hand, plant.Read(), believed));
+                float past = NormalizeDegrees(plant.Read() - hand);
+                if (past > worstPast) worstPast = past;
+            }
+            CHECK(fabs(NormalizeDegrees(hand - plant.Read())) <= 0.3);
+            CHECK(worstPast <= 2.0f);    // a swing past, but a small one that dies
+        }
+    }
+
+    // A snap turn: the target jumps thirty degrees in one frame. The smoothing must not
+    // slow that down, and the aim gets there in a handful of frames.
+    {
+        MousePlant plant;
+        AimTracker t;
+        for (int f = 0; f < 10; f++) plant.Send(t.Step(0.0f, plant.Read(), plant.gain));
+        int arrived = -1;
+        for (int f = 0; f < 30; f++) {
+            plant.Send(t.Step(30.0f, plant.Read(), plant.gain));
+            if (arrived < 0 && fabs(NormalizeDegrees(30.0f - plant.Read())) <= 0.5) arrived = f;
+        }
+        CHECK(arrived >= 0 && arrived <= 12);
+    }
+
+    // A hand held "still". The crosshair must move less than the hand shakes, and the
+    // mouse must not be sent a stream of corrections for nothing.
+    {
+        MousePlant plant;
+        AimTracker t;
+        const float amplitude = 0.25f;
+        for (int f = 0; f < 20; f++) plant.Send(t.Step(10.0f, plant.Read(), plant.gain));
+
+        float low = 1e9f, high = -1e9f;
+        for (int f = 0; f < 80; f++) {
+            float hand = 10.0f + Tremor(f, amplitude);
+            plant.Send(t.Step(hand, plant.Read(), plant.gain));
+            float a = plant.Read();
+            if (a < low) low = a;
+            if (a > high) high = a;
+        }
+        CHECK((high - low) <= amplitude);             // under half of the 2 x amplitude the hand swings through
+        CHECK(fabs(0.5f * (high + low) - 10.0f) <= 0.15); // and centred on where it is held
+    }
+
+    // Across the +-180 seam, both ways, without ever going the long way round.
+    {
+        MousePlant plant; plant.angle = 175.0f;
+        AimTracker t;
+        float hand = 175.0f;
+        float worst = 0.0f;
+        for (int f = 0; f < 40; f++) {
+            hand = NormalizeDegrees(hand + 1.0f);      // 175 -> -145, through the seam
+            plant.Send(t.Step(hand, plant.Read(), plant.gain));
+            float trail = (float)fabs(NormalizeDegrees(hand - plant.Read()));
+            if (trail > worst) worst = trail;
+        }
+        CHECK(worst <= 6.0f);
+    }
+
+    // Pitch: no wrap, positive gain.
+    {
+        MousePlant plant; plant.wraps = false; plant.gain = 0.0275f;
+        AimTracker t; t.wraps = false;
+        for (int f = 0; f < 40; f++) plant.Send(t.Step(-25.0f, plant.Read(), plant.gain));
+        CHECK(fabs(-25.0f - plant.Read()) <= 0.2);
+    }
+
+    // Reset forgets the old target, so re-entering the mode does not start by chasing
+    // where the hand was last time.
+    {
+        AimTracker t;
+        t.Step(50.0f, 0.0f, -0.0275f);
+        t.Reset();
+        CHECK(!t.haveTarget);
+        t.Step(-20.0f, -20.0f, -0.0275f);
+        CHECK_NEAR(t.SmoothedTarget(), -20.0, 1e-5);
     }
 }

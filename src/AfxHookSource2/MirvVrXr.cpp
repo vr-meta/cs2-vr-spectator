@@ -109,9 +109,24 @@ struct FrameRecord {
     XrTime displayTime = 0;
     XrBool32 shouldRender = XR_FALSE;
     bool timingValid = false;   // only the low-latency path fills the timing in
+
+    // Where the game was aiming when this frame was composed, and which way the viewer
+    // was facing. The crosshair is drawn from these and not from the globals: the render
+    // thread runs up to two thirds of a frame behind, so reading them at submit time can
+    // get the NEXT frame's aim - a one-frame flash of the crosshair thirty degrees away
+    // on every body snap, and a jitter against the picture while aiming. Experiment 17,
+    // with a different quad.
+    float aimYaw = 0.0f;
+    float aimPitch = 0.0f;
+    float bodyForwardWorld = 0.0f;
+    float roomForwardRadians = 0.0f;
 };
 const int kFrameRing = 8;
 FrameRecord g_FrameRing[kFrameRing];
+
+// The record the frame being submitted belongs to. Taken when the first eye arrives and
+// read when the layers are assembled with the second, because those are two calls.
+FrameRecord g_SubmittedFrame;
 unsigned long long g_FrameSerial = 0;
 
 // How far behind the render thread was, in frames, when it submitted. Reported with the
@@ -464,7 +479,8 @@ const int kTriggerRepeatFrames = 5;
 
 ULONGLONG g_RecenterPressedAt = 0;
 bool g_SlowMotion = false;
-ULONGLONG g_LastInputTick = 0;
+LARGE_INTEGER g_LastInputTicks = {};
+bool g_HaveLastInputTick = false;
 
 // Console commands raised by a controller button. They cannot be dispatched from the
 // render thread where the input is read, so the engine thread drains this.
@@ -651,8 +667,16 @@ const float kWalkPress = 0.5f;
 const float kWalkRelease = 0.3f;
 
 void WalkFromStick(float x, float y) {
+    // Into the frame the keys live in. The game walks along ITS yaw and the picture is
+    // that yaw plus the head, so without this a push forward walks along the aim rather
+    // than along the gaze - and with the head turned round, backwards.
+    float forward = y, left = -x;
+    AfxVrMath::StickToGameFrame(x, y,
+        AfxVrMath::NormalizeDegrees(AfxVr_ViewYawDegrees() - AfxVr_BaseYawDegrees()),
+        forward, left);
+
     // Forward, back, left, right as four one-sided amounts, so a diagonal presses two.
-    const float amount[4] = { y, -y, -x, x };
+    const float amount[4] = { forward, -forward, left, -left };
     for (int i = 0; i < 4; i++) {
         bool now = g_HeldKey[i] ? (amount[i] > kWalkRelease) : (amount[i] > kWalkPress);
         SetHeldKey(i, now);
@@ -1273,8 +1297,44 @@ float SourceFovForWanted(float wantedDegrees) {
 
 // What the frustum should be: the smallest symmetric one containing the runtime's
 // asymmetric recommendation, unless overridden.
+//
+// Horizontally that is just the wider of the two angles. Vertically there is no choice to
+// make: Source is handed ONE angle and renders it horizontally, and the vertical follows
+// from the shape of the image. So if the image is too wide, the vertical comes out short
+// and there is nothing drawn where the headset wants to look.
+//
+// Measured, on the day a window was changed from 2528x2780 to 2560x1600 to make CS2's menu
+// fit on the monitor. The Quest 3 wants 110 degrees vertically (up 44, down 55, so 55
+// either side of a symmetric frustum). At the tall window a 108 degree horizontal gave 113
+// vertical - enough, narrowly, which is why nobody had to think about it. At the wide one
+// it gives 81: twenty-nine degrees short, and the operator's words were "everything at the
+// edges is badly distorted".
+//
+// So ask for whichever horizontal angle satisfies BOTH, and let the crop throw away what
+// is not needed. The cost is pixels: at 1.6:1 about 40 per cent of each row is rendered
+// and discarded. The cure for that is a window whose shape matches the headset's frustum -
+// tan(54)/tan(55), about 0.96:1, which is what 2528x2780 nearly was - not a smaller field
+// of view.
 float WantedFovDegrees(const XrFovf & fov) {
-    float degrees = (g_FovOverrideDegrees > 0.0f) ? g_FovOverrideDegrees : SymmetricFovDegrees(fov);
+    if (g_FovOverrideDegrees > 0.0f) {
+        float forced = g_FovOverrideDegrees * g_FovScale;
+        if (forced < 10.0f) forced = 10.0f;
+        if (forced > 170.0f) forced = 170.0f;
+        return forced;
+    }
+
+    double halfH = 0.5 * SymmetricFovDegrees(fov) * (M_PI / 180.0);
+
+    float up = fabsf(fov.angleUp), down = fabsf(fov.angleDown);
+    double halfV = (up > down) ? up : down;
+
+    double aspect = AspectOfImage();
+    if (aspect > 0.0) {
+        double neededH = atan(tan(halfV) * aspect);
+        if (neededH > halfH) halfH = neededH;
+    }
+
+    float degrees = (float)(2.0 * halfH * 180.0 / M_PI);
     degrees *= g_FovScale;
     if (degrees < 10.0f) degrees = 10.0f;
     if (degrees > 170.0f) degrees = 170.0f;
@@ -1851,28 +1911,121 @@ void QueueMouseButton(bool right, bool down) {
     else       { if (down) g_PendingMouse.leftDown  = true; else g_PendingMouse.leftUp  = true; }
 }
 
-// How fast the right stick turns you, in mouse counts a second at full throw. A count is
-// not a degree - the game's own sensitivity decides that - so this is a number to be tuned
-// by the person holding the controller, not derived.
+// Where the viewer's own forward points, in the room.
+//
+// Not zero. g_Space is LOCAL space, and its forward is wherever the headset happened to be
+// pointing the last time the Oculus runtime recentred - which is not where the chair
+// faces. Taking it for the body's forward centres the aiming cone that many degrees off to
+// one side: the resting crosshair is not in front of the viewer, the thirty degrees of
+// free aim is lopsided, and past thirty the very first touch of the stick snaps the world.
+//
+// The right answer is already on screen. The HUD panel is placed in front of the viewer
+// when the session comes up, and its yaw IS "where I am facing". One reference for the
+// HUD, the cone and the crosshair, so they cannot disagree about which way forward is.
+float RoomForwardYawRadians() {
+    if (!g_PanelPlaced) return 0.0f;
+    return (float)(2.0 * atan2((double)g_PanelPose.orientation.y,
+                               (double)g_PanelPose.orientation.w));
+}
+
+// The same, in degrees, as a world yaw: the direction the body is taken to face.
+float BodyForwardWorldDegrees() {
+    return AfxVrMath::NormalizeDegrees(
+        AfxVr_YawOffsetDegrees() + (float)(RoomForwardYawRadians() * 180.0 / M_PI));
+}
+
+// What a mouse count is worth, learned from ordinary aiming, and the short closed loop
+// that uses it to bring the aim to where the viewer is looking.
+//
+// Both written as pure state machines with tests; everything here is the wiring. The
+// estimator exists because a count is not a degree - the conversion is the player's own
+// sensitivity, and it changes when a weapon is scoped - so no number typed into a config
+// can mean the same thing twice. The servo exists because stick aiming in a headset is
+// only bearable if you can look at something and have the aim come to it.
+AfxVrMath::CountGainEstimator g_GainYaw;
+AfxVrMath::CountGainEstimator g_GainPitch;
+AfxVrMath::AimServo g_ServoYaw;
+AfxVrMath::AimServo g_ServoPitch;
+bool g_GainInitialised = false;
+
+// Frozen at the click, not followed live: if the target chased the gaze, head movement
+// during the first frames would read as the first correction landing and the servo would
+// mis-measure its own delay.
+float g_GazeTargetYaw = 0.0f;
+float g_GazeTargetPitch = 0.0f;
+
+// Aim-to-gaze is on, but it refuses itself until the gain has been measured, which is a
+// second or so of ordinary aiming. A press before then does nothing rather than something
+// wrong.
+bool g_AimGaze = true;
+
+void ResetAimLearning() {
+    g_ServoYaw.Cancel();
+    g_ServoPitch.Cancel();
+    g_GainYaw = AfxVrMath::CountGainEstimator();
+    g_GainPitch = AfxVrMath::CountGainEstimator();
+    g_GainPitch.wraps = false;
+    g_GainInitialised = true;
+}
+
+// Aiming with the stick while the head keeps the picture.
+//
+// Decided by the person who wears it, against the alternative of making the head aim. The
+// scheme is the one Quakespasm-OpenVR ships and Cyberpunk's VR port calls decoupled
+// pitch, and the part that makes it bearable is the deadzone cone: inside thirty degrees
+// the aim moves and the world does NOT. The crosshair walks across a still picture. Only
+// at the edge of the cone does the body follow, and then in a snap, because a world
+// rotating smoothly under a head that is not turning is what makes people ill.
+float g_AimDeadzoneDegrees = 30.0f;
+float g_AimSnapDegrees = 30.0f;
+
+// Counts a second at full throw. A count is not a degree - the game's own sensitivity
+// decides that - so this is a number for the person holding the controller to turn, and
+// mirv_vr_aimspeed is how.
 float g_AimSpeed = 1400.0f;
+
+// And what it means once a count is worth a measured number of degrees, which is what
+// anybody actually wants to set: the same feel on any player's sensitivity.
+float g_AimDegreesPerSecond = 120.0f;
+
+// What is left over from last frame, kept rather than thrown away. Truncating a per-frame
+// amount loses up to a count every frame on every axis, which at this frame rate is a
+// steady drift; and anything under a count produces nothing at all, which puts a dead band
+// exactly where fine aiming happens.
+float g_AimCarryX = 0.0f;
+float g_AimCarryY = 0.0f;
 
 bool g_FireHeld = false;
 bool g_AltFireHeld = false;
 bool g_PrevWeaponNext = false;
 bool g_PrevWeaponPrev = false;
+bool g_PrevAimCentre = false;
+bool g_PrevTeamT = false;
+bool g_PrevTeamCt = false;
+
+// Free look is forced on while playing; this puts back whatever it was before.
+bool g_FreeLookWasOn = false;
+bool g_FreeLookBeforePlay = false;
 
 void ReleaseGameButtons() {
     if (g_FireHeld)    { g_FireHeld = false;    QueueMouseButton(false, false); }
     if (g_AltFireHeld) { g_AltFireHeld = false; QueueMouseButton(true, false); }
+    g_AimCarryX = g_AimCarryY = 0.0f;
+
+    // A servo left running across a mode change would keep sending counts at a target
+    // that no longer means anything.
+    g_ServoYaw.Cancel();
+    g_ServoPitch.Cancel();
 }
 
 // The whole playing layout, kept in one function so it can be read as a layout rather
 // than found scattered through the spectating one.
 //
-//   left stick    walk               right stick   turn and look
+//   left stick    walk               right stick   aim
 //   left grip     crouch             right grip    jump
 //   left trigger  secondary fire     right trigger fire
 //   B             previous weapon    A             next weapon
+//   menu short    the window         menu long     escape
 //
 // Held things are held: crouch and jump are keys down, fire is a button down, and every
 // one of them is released by ReleaseHeldKeys and ReleaseGameButtons on any way out of
@@ -1884,14 +2037,85 @@ void PlayingInput(float dt) {
     if (GetVec2(g_MoveAction, x, y)) WalkFromStick(x, y);
     else ReleaseHeldKeys();
 
-    // Turning is the mouse, because in a game the view IS the player's aim and the mouse
-    // is what the game lets move it. Until the aim servo lands this is the only way to
-    // turn, and the picture still follows the head on top of it.
+    // The aim, as a mouse. The picture does not move with it - in this mode the view is
+    // the head alone (free look), so the stick moves the crosshair across a still world.
+    //
+    // The angles are read BEFORE anything is sent this frame: that is what the gain
+    // estimator needs, and reading them after would attribute this frame's counts to a
+    // turn that has not happened yet.
+    float base[3];
+    AfxVr_GetBaseAngles(base);
+    if (!g_GainInitialised) ResetAimLearning();
+
+    int sentX = 0, sentY = 0;
+
+    // Look at something, click the right stick, and the aim comes to it. Refuses itself
+    // until a count is worth a known number of degrees, which is a second of ordinary
+    // aiming - a press before then does nothing rather than something wrong.
+    bool gaze = GetPressed(g_RecenterAction);
+    if (gaze && !g_PrevAimCentre && g_AimGaze) {
+        g_GazeTargetYaw = AfxVr_ViewYawDegrees();
+        g_GazeTargetPitch = AfxVr_ViewPitchDegrees();
+        if (g_GazeTargetPitch >  89.0f) g_GazeTargetPitch =  89.0f;
+        if (g_GazeTargetPitch < -89.0f) g_GazeTargetPitch = -89.0f;
+        g_ServoYaw.Start();
+        g_ServoPitch.Start();
+        advancedfx::Message("AFXVR: bringing the aim to %.1f / %.1f.\n",
+            g_GazeTargetYaw, g_GazeTargetPitch);
+    }
+    g_PrevAimCentre = gaze;
+
+    if (g_ServoYaw.Running()) {
+        sentX = g_ServoYaw.Step(AfxVrMath::NormalizeDegrees(g_GazeTargetYaw - base[1]),
+                                g_GainYaw.DegreesPerCount());
+    }
+    if (g_ServoPitch.Running()) {
+        sentY = g_ServoPitch.Step(g_GazeTargetPitch - base[0], g_GainPitch.DegreesPerCount());
+    }
+
+    // The stick, on whichever axis the servo is not driving. Both on one device would
+    // fight, and the servo would read the stick's counts as its own correction landing.
     if (GetVec2(g_TurnAction, x, y)) {
         float turn = ShapeStick(x);
         float pitch = ShapeStick(y);
-        if (turn != 0.0f || pitch != 0.0f) {
-            QueueMouseMove((int)(turn * g_AimSpeed * dt), (int)(-pitch * g_AimSpeed * dt));
+
+        // Degrees a second once a count is worth a known amount; counts a second until
+        // then, which is the old behaviour and depends on the player's sensitivity.
+        float gainYaw = g_GainYaw.DegreesPerCount();
+        float gainPitch = g_GainPitch.DegreesPerCount();
+
+        if (!g_ServoYaw.Running()) {
+            float wanted = (0.0f != gainYaw && g_GainYaw.Converged())
+                ? (turn * g_AimDegreesPerSecond * dt / gainYaw) * -1.0f
+                : turn * g_AimSpeed * dt;
+            sentX = AfxVrMath::TakeWholeUnits(wanted, g_AimCarryX);
+        }
+        if (!g_ServoPitch.Running()) {
+            float wanted = (0.0f != gainPitch && g_GainPitch.Converged())
+                ? (-pitch * g_AimDegreesPerSecond * dt / gainPitch)
+                : -pitch * g_AimSpeed * dt;
+            sentY = AfxVrMath::TakeWholeUnits(wanted, g_AimCarryY);
+        }
+    }
+
+    if (sentX || sentY) QueueMouseMove(sentX, sentY);
+
+    // Everything sent this frame, servo and stick together: the servo's bursts are the
+    // best training data there is.
+    g_GainYaw.Feed(sentX, base[1]);
+    g_GainPitch.Feed(sentY, base[0]);
+
+    // And the body follows only when the aim reaches the edge of the cone.
+    {
+        float base[3];
+        AfxVr_GetBaseAngles(base);
+        float relative = AfxVrMath::NormalizeDegrees(base[1] - BodyForwardWorldDegrees());
+        float step = AfxVrMath::BodyTurnStep(relative, g_AimDeadzoneDegrees, g_AimSnapDegrees);
+        if (0.0f != step) {
+            AfxVr_AddYaw(step);
+            if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
+                advancedfx::Message("AFXVR: aim %.1f deg off the body, turning %.1f\n", relative, step);
+            }
         }
     }
 
@@ -1911,6 +2135,7 @@ void PlayingInput(float dt) {
     bool prev = GetPressed(g_SlowMoAction);                  // B
     if (prev && !g_PrevWeaponPrev) QueueMouseWheel(-1);
     g_PrevWeaponPrev = prev;
+
 }
 
 void ProcessInput() {
@@ -1923,9 +2148,18 @@ void ProcessInput() {
     sync.activeActionSets = &active;
     if (XR_FAILED(xrSyncActions_(g_Session, &sync))) return;
 
-    ULONGLONG now = GetTickCount64();
-    float dt = g_LastInputTick ? (float)(now - g_LastInputTick) / 1000.0f : 0.0f;
-    g_LastInputTick = now;
+    // The performance counter, not GetTickCount64.
+    //
+    // GetTickCount64 advances in steps of about 15.6 ms. At roughly 28 ms a frame it
+    // therefore reads 16, 31, 31, 16, 47 - the total is right, every individual frame is
+    // not. Anything scaled by dt then moves unevenly at a constant stick deflection: the
+    // aim, and the free camera in a demo, which has been doing this all along.
+    LARGE_INTEGER nowTicks = StageStart();
+    float dt = 0.0f;
+    if (g_HaveLastInputTick) dt = (float)SecondsSince(g_LastInputTicks);
+    g_LastInputTicks = nowTicks;
+    g_HaveLastInputTick = true;
+
     if (dt > 0.1f) dt = 0.1f; // a hitch must not teleport the viewer
 
     // The menu button, in every mode: a short press puts the game's own window on a screen
@@ -1951,7 +2185,34 @@ void ProcessInput() {
         g_PrevMenuButton = b;
     }
 
+    // Picking a team, without needing the pointer to work.
+    //
+    // Reported from inside the headset: "the map loads, there is the T or CT choice, and
+    // there is nothing to choose with". The sheet and the ray are the real answer, but
+    // they are several things that all have to work at once, and a player staring at a
+    // team picker they cannot answer is stuck completely. jointeam is a plain console
+    // command, so X and Y answer it directly - and those two buttons have no other job
+    // while a modal is up, so this overloads nothing.
+    if (AfxVrMath::kVrModePlay == g_Mode.mode && g_Mode.pointer) {
+        bool t  = GetPressed(g_PrevAction);   // X
+        bool ct = GetPressed(g_NextAction);   // Y
+        if (t && !g_PrevTeamT) {
+            QueueCommand("jointeam 2");
+            advancedfx::Message("AFXVR: joining T.\n");
+        }
+        if (ct && !g_PrevTeamCt) {
+            QueueCommand("jointeam 3");
+            advancedfx::Message("AFXVR: joining CT.\n");
+        }
+        g_PrevTeamT = t;
+        g_PrevTeamCt = ct;
+    } else {
+        g_PrevTeamT = g_PrevTeamCt = false;
+    }
+
     // Playing a map is a different instrument from watching a recording, so it is a
+
+
     // different layout rather than the same one with exceptions in it. While a sheet is up
     // neither applies: the pointer owns the mouse, and an absolute pointer fighting a
     // relative aim on one device is a fight the aim wins.
@@ -3035,7 +3296,33 @@ void MirvVrXr_EngineThread_Frame() {
             ReleaseHeldKeys();
             ReleaseGameButtons();
 
+            // Playing, the picture is the head alone plus whatever the viewer has turned
+            // to - free look - and NOT the game's own yaw.
+            //
+            // Two reasons, and the second is the one that makes the aiming scheme work at
+            // all. First: with the game's yaw in the composition, every movement of the
+            // aim stick rotates the world smoothly under a head that is not turning, which
+            // is exactly what makes people ill. Second: the deadzone cone measures the aim
+            // against where the BODY faces, and with the game's yaw in both terms that
+            // subtraction cancels to nothing - the cone could never fire, so the stick
+            // could never turn the viewer, which is the thing a seated player cannot do
+            // with their neck.
+            //
+            // Watching a demo it goes back off: there the base camera IS the shot, and
+            // ignoring it would throw away the recording's own framing.
+            if (AfxVrMath::kVrModePlay == next.mode) {
+                if (!g_FreeLookWasOn) {
+                    g_FreeLookBeforePlay = AfxVr_GetFreeLook();
+                    g_FreeLookWasOn = true;
+                }
+                AfxVr_SetFreeLook(true);
+            } else if (g_FreeLookWasOn) {
+                g_FreeLookWasOn = false;
+                AfxVr_SetFreeLook(g_FreeLookBeforePlay);
+            }
+
             if (next.sheet && !g_Mode.sheet) {
+
                 // A synthetic cursor only reaches the game while it is the foreground
                 // window, and after a launch it usually is not: the window in front is
                 // whatever shell started it. Worn, that looked exactly like a broken
@@ -3209,6 +3496,16 @@ void MirvVrXr_EngineThread_Frame() {
         // this frame will be begun and ended against. In safe mode the render thread waits
         // for itself and g_FrameState here is a frame old.
         record.timingValid = g_LowLatency;
+
+        {
+            float base[3];
+            AfxVr_GetBaseAngles(base);
+            record.aimYaw = base[1];
+            record.aimPitch = base[0];
+            record.bodyForwardWorld = BodyForwardWorldDegrees();
+            record.roomForwardRadians = RoomForwardYawRadians();
+        }
+
         record.valid = true;
     }
 }
@@ -3432,6 +3729,86 @@ bool BuildCursorQuad(ID3D11DeviceContext * pContext, XrCompositionLayerQuad & qu
     quad.subImage.imageArrayIndex = 0;
     quad.size.width = g_CursorSizeMetres;
     quad.size.height = g_CursorSizeMetres;
+    return true;
+}
+
+// The crosshair, drawn by us at the aim the game is actually using.
+//
+// Necessary as soon as the stick aims and the head looks: Panorama's crosshair is at the
+// centre of the flat image, the eyes capture before the UI so it is not in them anyway,
+// and the centre of the image is where the HEAD is pointed. Where the bullet goes is the
+// game's own angles. Those two are the same thing only while the head is still.
+//
+// So: a small quad along the game's forward direction, expressed in the room. Head still,
+// it sits dead centre; turn the head and it walks off to the side and stays over the thing
+// that would be hit, which is the truth told honestly rather than a centred lie.
+//
+// Both eyes at ten metres: the disparity error against a target at any real distance is
+// under half a degree, which is invisible, and one eye only is a trick that costs more
+// than it saves here.
+bool g_CrosshairEnabled = true;
+float g_CrosshairDistanceMetres = 10.0f;
+float g_CrosshairSizeDegrees = 0.8f;
+
+bool BuildCrosshairQuad(ID3D11DeviceContext * pContext, XrCompositionLayerQuad & quad,
+                        const FrameRecord & frame) {
+    if (!g_CrosshairEnabled) return false;
+    if (AfxVrMath::kVrModePlay != g_Mode.mode || g_Mode.pointer) return false;
+    if (XR_NULL_HANDLE == g_Swapchain[kCursorSwapchain]) return false;
+    if (!g_PanelFollowValid) return false;
+    if (!EnsureCursorTexture(g_pDevice, g_SwapchainFormat)) return false;
+
+    // Where the game was aiming when THIS frame was composed, from the ticket rather than
+    // from the globals - the render thread is behind by a varying fraction of a frame.
+    //
+    // Measured in the room from where the viewer faces, which is the panel anchor and not
+    // the runtime's own forward. See RoomForwardYawRadians. Source counts pitch positive
+    // downwards and OpenXR positive up, hence the negation.
+    double yaw = frame.roomForwardRadians
+        + AfxVrMath::NormalizeDegrees(frame.aimYaw - frame.bodyForwardWorld) * (M_PI / 180.0);
+    double pitch = -frame.aimPitch * (M_PI / 180.0);
+
+    double cosPitch = cos(pitch);
+    XrVector3f direction;
+    direction.x = (float)(-sin(yaw) * cosPitch);
+    direction.y = (float)( sin(pitch));
+    direction.z = (float)(-cos(yaw) * cosPitch);
+
+    uint32_t imageIndex = 0;
+    XrSwapchainImageAcquireInfo acquire = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    if (!Check(xrAcquireSwapchainImage_(g_Swapchain[kCursorSwapchain], &acquire, &imageIndex),
+               "xrAcquireSwapchainImage (crosshair)")) return false;
+
+    bool ok = false;
+    XrSwapchainImageWaitInfo wait = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wait.timeout = XR_INFINITE_DURATION;
+    if (Check(xrWaitSwapchainImage_(g_Swapchain[kCursorSwapchain], &wait), "xrWaitSwapchainImage (crosshair)")) {
+        pContext->CopyResource(g_SwapchainImages[kCursorSwapchain][imageIndex], g_CursorWhite);
+        ok = true;
+    }
+    XrSwapchainImageReleaseInfo release = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    xrReleaseSwapchainImage_(g_Swapchain[kCursorSwapchain], &release);
+    if (!ok) return false;
+
+    quad = XrCompositionLayerQuad{ XR_TYPE_COMPOSITION_LAYER_QUAD };
+    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.space = g_Space;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.pose.position.x = g_PanelFollowPos.x + direction.x * g_CrosshairDistanceMetres;
+    quad.pose.position.y = g_PanelFollowPos.y + direction.y * g_CrosshairDistanceMetres;
+    quad.pose.position.z = g_PanelFollowPos.z + direction.z * g_CrosshairDistanceMetres;
+    AfxVrMath::YawThenPitchQuat((float)yaw, (float)pitch,
+                                quad.pose.orientation.x, quad.pose.orientation.y,
+                                quad.pose.orientation.z, quad.pose.orientation.w);
+    quad.subImage.swapchain = g_Swapchain[kCursorSwapchain];
+    quad.subImage.imageRect.offset = { 0, 0 };
+    quad.subImage.imageRect.extent = { (int32_t)kCursorTexels, (int32_t)kCursorTexels };
+    quad.subImage.imageArrayIndex = 0;
+
+    // An angular size, so it looks the same whatever distance it is put at.
+    float half = tanf(0.5f * g_CrosshairSizeDegrees * (float)(M_PI / 180.0));
+    quad.size.width = 2.0f * g_CrosshairDistanceMetres * half;
+    quad.size.height = quad.size.width;
     return true;
 }
 
@@ -3709,6 +4086,10 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
 
             const FrameRecord & record = g_FrameRing[ticket % kFrameRing];
             if (0 != ticket && record.valid && record.serial == ticket) {
+                // A copy, so everything the crosshair needs comes from one instant and
+                // not from whatever the engine thread has moved on to. It outlives this
+                // block because the layers are assembled when the SECOND eye arrives.
+                g_SubmittedFrame = record;
                 rendered[0] = record.rendered[0];
                 rendered[1] = record.rendered[1];
                 g_ProjViewsValid = true;
@@ -4001,7 +4382,8 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             quad.size.height = g_PanelWidthMetres * (float)g_SwapchainHeight / (float)g_SwapchainWidth;
         }
 
-        const XrCompositionLayerBaseHeader * layers[1 + kMaxPanelQuads];
+        // The world, the HUD groups, and the crosshair.
+        const XrCompositionLayerBaseHeader * layers[2 + kMaxPanelQuads];
         int layerCount = 0;
 
         XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
@@ -4010,11 +4392,17 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
 
         bool haveWorld = (2 == g_EyesCopied) && g_ProjViewsValid;
 
+        // Where the bullet would go, which is not the centre of the picture as soon as the
+        // stick aims and the head looks.
+        XrCompositionLayerQuad crosshair = {};
+        bool haveCrosshair = haveWorld && BuildCrosshairQuad(pContext, crosshair, g_SubmittedFrame);
+
         if (haveWorld) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&layer;
         // Only with a world layer under them: a frame of nothing but HUD quads is a frame
         // with no world in it, which is worse than a frame with no HUD.
         if (haveWorld) {
             for (int i = 0; i < quadCount; i++) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&quads[i];
+            if (haveCrosshair) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&crosshair;
         }
 
         endInfo.layerCount = (uint32_t)layerCount;

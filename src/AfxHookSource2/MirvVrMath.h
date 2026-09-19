@@ -677,5 +677,480 @@ inline bool ModeTakesGameInput(const ModeResult & mode) {
     return (kVrModePlay == mode.mode) && !mode.pointer;
 }
 
-} // namespace AfxVrMath
 
+// ---------------------------------------------------------------------------------
+// Aiming with a stick while the head owns the picture
+// ---------------------------------------------------------------------------------
+
+// How far to turn the body, given how far the aim has wandered from where the body faces.
+//
+// This is the whole of what stops a stick-aimed headset making people ill, and it is not
+// an idea this project invented: it is what Quakespasm-OpenVR calls decoupled aiming, and
+// what Cyberpunk's VR port calls decoupled pitch. Inside a cone - thirty degrees by
+// default - the aim moves and the world does NOT. The crosshair walks across a still
+// picture, which costs nothing to watch. Only when the aim reaches the edge of the cone
+// does the body follow, and then it follows in a snap by default, because a world that
+// rotates smoothly under a head that is not turning is exactly the motion nobody's
+// stomach forgives.
+//
+// `relativeDegrees` is the aim's yaw measured from where the BODY faces - not from where
+// the head is looking. Measured from the gaze, glancing over your shoulder would push the
+// aim out of the cone and spin the world for no reason at all.
+//
+// Returns the degrees to add to the body's yaw: zero inside the cone, and outside it
+// either one snap step or exactly enough to bring the aim back to the edge.
+inline float BodyTurnStep(float relativeDegrees, float deadzoneDegrees,
+                          float snapDegrees) {
+    float rel = NormalizeDegrees(relativeDegrees);
+    if (deadzoneDegrees < 0.0f) deadzoneDegrees = 0.0f;
+
+    float over = (rel > 0.0f) ? (rel - deadzoneDegrees) : (rel + deadzoneDegrees);
+    if ((rel > 0.0f && over <= 0.0f) || (rel < 0.0f && over >= 0.0f) || 0.0f == rel) {
+        return 0.0f;
+    }
+
+    if (snapDegrees <= 0.0f) return over;   // smooth: follow by exactly the overshoot
+
+    // A snap, in whole steps, so the aim ends up back inside the cone however far it has
+    // been pushed. One press of the stick against the edge is one step; holding it there
+    // steps again when it reaches the edge again.
+    float sign = (over > 0.0f) ? 1.0f : -1.0f;
+    float magnitude = (over > 0.0f) ? over : -over;
+    int steps = 1 + (int)(magnitude / snapDegrees);
+    return sign * snapDegrees * (float)steps;
+}
+
+// Turn a wanted amount into whole units, keeping what is left over for next time.
+//
+// A mouse takes integers. Truncating a per-frame amount throws away up to one count every
+// frame on every axis, which at this frame rate is a steady drift in one direction, and it
+// means small stick deflections produce exactly nothing - a dead band on top of the
+// stick's own, in the range where aiming actually happens.
+inline int TakeWholeUnits(float wanted, float & carry) {
+    float total = wanted + carry;
+    // Toward zero, so the carry never changes sign and the remainder stays below one unit.
+    int whole = (int)total;
+    carry = total - (float)whole;
+    return whole;
+}
+
+
+// Where a push on the stick should take you, expressed the way the game understands it.
+//
+// The game walks relative to ITS own yaw - the direction the player is aiming - while the
+// picture is the game's yaw plus wherever the head is turned. So pressing forward walks
+// along the aim, not along the gaze, and with the head turned round the player walks
+// backwards. Reported from inside the headset in exactly those words: "I look forward and
+// the legs go back, the controls are broken".
+//
+// So rotate the stick out of the frame the eyes are in and into the frame the keys are in.
+// `deltaDegrees` is how far the view is turned from the game's own yaw, positive to the
+// left, which is Source's sense for yaw.
+//
+// Outputs are along the game's forward and the game's left, which is what W/S and A/D
+// press. Magnitude is preserved, so a half-pushed stick stays a half-pushed stick and the
+// press thresholds keep meaning what they say.
+inline void StickToGameFrame(float stickRight, float stickForward, float deltaDegrees,
+                             float & outForward, float & outLeft) {
+    const double d2r = 3.14159265358979323846 / 180.0;
+
+    // The stick in (forward, left). Right on the stick is negative left.
+    double forward = stickForward;
+    double left = -stickRight;
+
+    double d = deltaDegrees * d2r;
+    double c = cos(d), s = sin(d);
+
+    // Rotate by delta about the up axis: the same world direction, named in the game's
+    // frame instead of the view's.
+    outForward = (float)(forward * c - left * s);
+    outLeft    = (float)(forward * s + left * c);
+}
+
+// ---------------------------------------------------------------------------------
+// What a mouse count is worth, and spending that knowledge
+// ---------------------------------------------------------------------------------
+
+// Learns how many degrees the game turns per mouse count, by watching.
+//
+// The aim is moved with synthetic mouse counts, and a count is not a degree: it is
+// m_yaw x sensitivity, scaled again while a scope is up. Both can be read or guessed, and
+// both are somebody else's setting that changes without telling us. But every frame we
+// know how many counts we sent and we can read the angle the game ended up with, so the
+// number can simply be measured, continuously, from ordinary aiming.
+//
+// Two things make the obvious version - this frame's turn over this frame's counts -
+// wrong. The counts sent in one frame show up in the angle a frame or two later, and not
+// always the same number of frames later. So nothing here is compared frame against
+// frame. Counts and degrees are summed over a BLOCK of aiming that ends only once the
+// stick has been still long enough for everything sent to have arrived; within a block it
+// does not matter when each count landed. A block that has to be cut short while the
+// stick is still moving leaves its last few frames of counts for the next block, which is
+// where their degrees will be.
+//
+// Blocks are pooled as a regression through the origin, recent ones weighted more. A block
+// that disagrees badly with the estimate is thrown away - a hand on the real mouse, a
+// respawn - unless several in a row disagree, which is what a scope going up looks like,
+// and then the estimate starts again from them.
+//
+// One of these per axis. The result is signed: in Source, mouse right turns the yaw DOWN,
+// so the yaw's degrees per count is negative. Callers divide by it and never care.
+//
+// Feed() wants, every frame, the counts sent THIS frame and the angle as read this frame
+// BEFORE those counts were sent.
+struct CountGainEstimator {
+    // How it behaves. Defaults are for ~36 frames a second.
+    int   idleFramesToClose = 4;      // stick still this long: everything has landed
+    int   maxBlockFrames = 24;        // cut a long sweep into pieces of this many frames
+    int   assumedLagFrames = 2;       // how many trailing frames a cut block leaves behind
+    float minBlockCounts = 40.0f;     // less than this is noise, not a measurement
+    float jumpDegrees = 45.0f;        // a turn this big in one frame is a teleport
+    float forget = 0.85f;             // weight of everything older, per accepted block
+    bool  wraps = true;               // yaw wraps at +-180, pitch does not
+
+    // What it knows.
+    double sumCountsDegrees = 0.0;
+    double sumCountsSquared = 0.0;
+    int accepted = 0;
+    int rejectedInARow = 0;
+    float seed = 0.0f;                // used until something has been measured
+
+    // The block being gathered.
+    bool blockOpen = false;
+    double blockCounts = 0.0;
+    double blockDegrees = 0.0;
+    int blockFrames = 0;
+    int idleFrames = 0;
+    int recent[4] = { 0, 0, 0, 0 };   // counts sent in the last four frames, newest first
+
+    float previous = 0.0f;
+    bool havePrevious = false;
+
+    void Seed(float degreesPerCount) { seed = degreesPerCount; }
+
+    // Signed degrees per count. The seed until a measurement exists, zero if neither does.
+    float DegreesPerCount() const {
+        if (accepted > 0 && sumCountsSquared > 0.0) return (float)(sumCountsDegrees / sumCountsSquared);
+        return seed;
+    }
+
+    // Enough agreeing blocks that acting on the number is reasonable.
+    bool Converged() const { return accepted >= 3 && sumCountsSquared > 0.0; }
+
+    void Forget() {
+        sumCountsDegrees = sumCountsSquared = 0.0;
+        accepted = 0;
+        rejectedInARow = 0;
+    }
+
+    void DropBlock() {
+        blockOpen = false;
+        blockCounts = blockDegrees = 0.0;
+        blockFrames = idleFrames = 0;
+    }
+
+    void CloseBlock(double counts, double degrees) {
+        double magnitude = counts < 0.0 ? -counts : counts;
+        if (magnitude < (double)minBlockCounts) return;
+
+        if (accepted >= 2) {
+            double predicted = (sumCountsDegrees / sumCountsSquared) * counts;
+            double miss = degrees - predicted;
+            if (miss < 0.0) miss = -miss;
+            double allowed = (predicted < 0.0 ? -predicted : predicted) * 0.30;
+            if (allowed < 1.0) allowed = 1.0;
+            if (miss > allowed) {
+                // Once is somebody's hand on the real mouse. Three times running is the
+                // number itself having changed, and the old one is then worth nothing.
+                if (++rejectedInARow >= 3) {
+                    Forget();
+                } else {
+                    return;
+                }
+            }
+        }
+
+        sumCountsDegrees = (double)forget * sumCountsDegrees + counts * degrees;
+        sumCountsSquared = (double)forget * sumCountsSquared + counts * counts;
+        accepted++;
+        rejectedInARow = 0;
+    }
+
+    void Feed(int countsSentThisFrame, float angleReadThisFrame) {
+        float delta = 0.0f;
+        if (havePrevious) {
+            delta = angleReadThisFrame - previous;
+            if (wraps) delta = NormalizeDegrees(delta);
+        }
+        previous = angleReadThisFrame;
+        havePrevious = true;
+
+        float size = delta < 0.0f ? -delta : delta;
+        if (size > jumpDegrees) {
+            // A respawn, a round restart, a teleport. Whatever was being measured is
+            // spoiled, and so is anything still on its way.
+            DropBlock();
+            recent[0] = recent[1] = recent[2] = recent[3] = 0;
+            // Fall through: counts sent this frame still start a fresh block below.
+            delta = 0.0f;
+        }
+
+        if (0 != countsSentThisFrame) {
+            if (!blockOpen) { DropBlock(); blockOpen = true; }
+            idleFrames = 0;
+        } else if (blockOpen) {
+            idleFrames++;
+        }
+
+        recent[3] = recent[2]; recent[2] = recent[1]; recent[1] = recent[0];
+        recent[0] = countsSentThisFrame;
+
+        if (!blockOpen) return;
+
+        blockCounts += countsSentThisFrame;
+        blockDegrees += delta;
+        blockFrames++;
+
+        if (idleFrames >= idleFramesToClose) {
+            // Still for long enough: all of it has arrived.
+            CloseBlock(blockCounts, blockDegrees);
+            DropBlock();
+        } else if (blockFrames >= maxBlockFrames) {
+            // Still moving. The last few frames of counts have not shown up yet, so they
+            // are not this block's; they open the next one, where their degrees will be.
+            int lag = assumedLagFrames;
+            if (lag < 0) lag = 0;
+            if (lag > 4) lag = 4;
+            double pending = 0.0;
+            for (int i = 0; i < lag; i++) pending += recent[i];
+
+            CloseBlock(blockCounts - pending, blockDegrees);
+            DropBlock();
+            blockOpen = true;
+            blockCounts = pending;
+        }
+    }
+};
+
+
+// Brings the aim onto a direction, in a few frames, with mouse counts.
+//
+// "Shoot at what I am looking at" for someone aiming with a stick: look, click, and the
+// crosshair comes to the gaze. One of these per axis, run together.
+//
+// It is a closed loop over a delay. A count sent now changes the angle a frame or two
+// from now, so a loop that sends "the error, in counts" every frame sends it two or three
+// times over and swings past. What has been sent and not yet seen has to be subtracted,
+// and for that the delay has to be known - so the first thing this does is MEASURE it:
+// send one correction, then send nothing and count frames until the angle moves. Until it
+// has moved, everything sent is still on its way, which needs no arithmetic at all. From
+// then on, what is on its way is whatever was sent in the last (delay - 1) frames.
+//
+// Measuring per run rather than being told has two other effects worth having. A game
+// that is not listening - paused, or the window has lost the mouse - is recognised after
+// a handful of frames and one correction's worth of counts, not after a fortune of them
+// has been queued to land all at once when it wakes. And a wrong gain only changes how
+// fast the error shrinks; it cannot make the loop count a send twice.
+//
+// An earlier version inferred what was in flight from "degrees sent, less degrees of
+// progress seen". Exact when the gain is exact. With the gain a quarter low it concluded
+// nothing was in flight while plenty was, and swung eight degrees either side of the
+// target for as long as it was allowed to. The test for that is still here.
+//
+// Start() once, then Step() every frame with the CURRENT error until Running() is false.
+// Hold the target still while it runs - the direction the gaze had at the click, not the
+// gaze as it wanders - or the head's motion is mistaken for the mouse's.
+struct AimServo {
+    enum Outcome { kIdle = 0, kRunning, kReached, kGaveUp, kRefused };
+
+    float kp = 0.6f;                  // of what remains, per frame
+    float toleranceDegrees = 0.3f;
+    int   maxCalls = 16;              // under half a second at 36 frames a second
+    int   maxWaitFrames = 5;          // no answer to the first correction in this long: deaf
+    int   maxCountsPerFrame = 3000;   // a bound, so a bad gain cannot fling the view
+
+    Outcome outcome = kIdle;
+    int calls = 0;
+    int lagFrames = 0;                // 0 until measured
+    int firstSendCall = -1;
+    float firstError = 0.0f;
+    double firstWorth = 0.0;          // degrees the first correction should have been worth
+    double recentDegrees[3] = { 0.0, 0.0, 0.0 }; // what the last three frames sent, newest first
+    float carry = 0.0f;
+
+    void Start() {
+        outcome = kRunning;
+        calls = 0;
+        lagFrames = 0;
+        firstSendCall = -1;
+        firstError = 0.0f;
+        firstWorth = 0.0;
+        recentDegrees[0] = recentDegrees[1] = recentDegrees[2] = 0.0;
+        carry = 0.0f;
+    }
+
+    void Cancel() { if (kRunning == outcome) outcome = kIdle; }
+
+    bool Running() const { return kRunning == outcome; }
+
+    // `errorDegrees` is target minus current, already wrapped by the caller if it is a yaw.
+    // `degreesPerCount` is signed, as CountGainEstimator reports it. Returns the counts to
+    // send this frame.
+    int Step(float errorDegrees, float degreesPerCount) {
+        if (kRunning != outcome) return 0;
+
+        float gainSize = degreesPerCount < 0.0f ? -degreesPerCount : degreesPerCount;
+        if (gainSize < 1e-6f) { outcome = kRefused; return 0; }
+
+        // One count is the smallest step there is; asking for closer than that never ends.
+        float tolerance = toleranceDegrees;
+        if (tolerance < 0.75f * gainSize) tolerance = 0.75f * gainSize;
+
+        if (0 == calls) firstError = errorDegrees;
+
+        // Has the first correction arrived yet?
+        if (0 == lagFrames && firstSendCall >= 0) {
+            double progress = (double)firstError - (double)errorDegrees;
+            double needed = 0.25 * (firstWorth < 0.0 ? -firstWorth : firstWorth);
+            if (needed < 0.15) needed = 0.15;
+            bool sameWay = (progress > 0.0) == (firstWorth > 0.0);
+            double size = progress < 0.0 ? -progress : progress;
+            if (sameWay && size >= needed) {
+                lagFrames = calls - firstSendCall;
+                if (lagFrames < 1) lagFrames = 1;
+                if (lagFrames > 4) lagFrames = 4;
+            }
+        }
+
+        // Sent and not yet seen.
+        bool waiting = (0 == lagFrames && firstSendCall >= 0);
+        double inFlight = 0.0;
+        if (!waiting) {
+            for (int i = 0; i < lagFrames - 1 && i < 3; i++) inFlight += recentDegrees[i];
+        }
+
+        float errorSize = errorDegrees < 0.0f ? -errorDegrees : errorDegrees;
+        double flightSize = inFlight < 0.0 ? -inFlight : inFlight;
+        if (!waiting && errorSize <= tolerance && flightSize <= (double)tolerance) {
+            outcome = kReached;
+            return 0;
+        }
+        if (calls >= maxCalls) { outcome = kGaveUp; return 0; }
+        if (waiting && calls - firstSendCall >= maxWaitFrames) { outcome = kGaveUp; return 0; }
+
+        int counts = 0;
+        if (!waiting) {
+            double remaining = (double)errorDegrees - inFlight;
+            float wanted = (float)((double)kp * remaining / (double)degreesPerCount);
+            if (wanted >  (float)maxCountsPerFrame) wanted =  (float)maxCountsPerFrame;
+            if (wanted < -(float)maxCountsPerFrame) wanted = -(float)maxCountsPerFrame;
+            counts = TakeWholeUnits(wanted, carry);
+        }
+
+        double worth = (double)counts * (double)degreesPerCount;
+        if (firstSendCall < 0 && 0 != counts) { firstSendCall = calls; firstWorth = worth; }
+
+        recentDegrees[2] = recentDegrees[1];
+        recentDegrees[1] = recentDegrees[0];
+        recentDegrees[0] = worth;
+        calls++;
+        return counts;
+    }
+};
+
+// Keeps the aim on a direction that moves: the hand holding the gun.
+//
+// AimServo brings the aim to one fixed direction and stops. Pointing a controller is the
+// same problem without the stopping - the target moves every frame, for ever, and what
+// has to be bounded is not how long it takes but how far behind the aim trails and
+// whether it rings when the hand stops.
+//
+// Same loop, same subtraction of what has been sent and not yet seen. The delay is not
+// measured here: run an AimServo first to bring the aim onto the hand - it measures the
+// delay as a by-product - and copy its lagFrames across. A delay believed one frame too
+// SHORT is the dangerous direction (sends get counted as landed while still in flight),
+// which is why kp is lower here than in the servo: at 0.5 that mistake rings and dies in
+// a few frames, where at 0.8 it would ring for a second.
+//
+// A hand is never still. Tremor of a few tenths of a degree, passed straight through,
+// becomes a crosshair that shivers and a stream of one-count corrections. So the target
+// is smoothed before it is chased, by an amount that shrinks as the hand moves faster:
+// heavy when it is nearly still, none at all in a sweep, so deliberate motion is not
+// delayed by the cure for the accidental kind.
+//
+// With the hand sweeping steadily at v degrees a frame the aim trails it by about
+// v x (lag - 1 + 1/kp): at 36 frames a second, lag 2 and sixty degrees a second, five
+// degrees. It closes as soon as the hand slows, which is when anyone fires.
+struct AimTracker {
+    float kp = 0.5f;
+    int   lagFrames = 2;              // from AimServo::lagFrames, once one has run
+    float deadbandDegrees = 0.04f;    // do not chase less than this
+    float stillSmoothing = 0.35f;     // how much of a new target is believed when still
+    float smoothingPerDegree = 0.5f;  // and how much more per degree a frame of motion
+    int   maxCountsPerFrame = 1500;
+    bool  wraps = true;
+
+    bool haveTarget = false;
+    float smoothed = 0.0f;
+    double recentDegrees[3] = { 0.0, 0.0, 0.0 };
+    float carry = 0.0f;
+
+    void Reset() {
+        haveTarget = false;
+        smoothed = 0.0f;
+        recentDegrees[0] = recentDegrees[1] = recentDegrees[2] = 0.0;
+        carry = 0.0f;
+    }
+
+    // The target after smoothing - where the aim is being asked to go. For drawing.
+    float SmoothedTarget() const { return smoothed; }
+
+    // `targetDegrees` is where the hand points, `currentDegrees` where the game aims, both
+    // as read at the top of this frame. Returns the counts to send this frame.
+    int Step(float targetDegrees, float currentDegrees, float degreesPerCount) {
+        float gainSize = degreesPerCount < 0.0f ? -degreesPerCount : degreesPerCount;
+        if (gainSize < 1e-6f) return 0;
+
+        if (!haveTarget) {
+            haveTarget = true;
+            smoothed = targetDegrees;
+        } else {
+            float step = targetDegrees - smoothed;
+            if (wraps) step = NormalizeDegrees(step);
+            float size = step < 0.0f ? -step : step;
+            float believe = stillSmoothing + smoothingPerDegree * size;
+            if (believe > 1.0f) believe = 1.0f;
+            smoothed += believe * step;
+            if (wraps) smoothed = NormalizeDegrees(smoothed);
+        }
+
+        float error = smoothed - currentDegrees;
+        if (wraps) error = NormalizeDegrees(error);
+
+        int lag = lagFrames;
+        if (lag < 1) lag = 1;
+        if (lag > 4) lag = 4;
+        double inFlight = 0.0;
+        for (int i = 0; i < lag - 1; i++) inFlight += recentDegrees[i];
+
+        double remaining = (double)error - inFlight;
+        double remainingSize = remaining < 0.0 ? -remaining : remaining;
+
+        int counts = 0;
+        if (remainingSize > (double)deadbandDegrees) {
+            float wanted = (float)((double)kp * remaining / (double)degreesPerCount);
+            if (wanted >  (float)maxCountsPerFrame) wanted =  (float)maxCountsPerFrame;
+            if (wanted < -(float)maxCountsPerFrame) wanted = -(float)maxCountsPerFrame;
+            counts = TakeWholeUnits(wanted, carry);
+        } else {
+            carry = 0.0f;
+        }
+
+        recentDegrees[2] = recentDegrees[1];
+        recentDegrees[1] = recentDegrees[0];
+        recentDegrees[0] = (double)counts * (double)degreesPerCount;
+        return counts;
+    }
+};
+
+} // namespace AfxVrMath

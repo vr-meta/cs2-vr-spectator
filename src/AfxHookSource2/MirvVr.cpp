@@ -25,6 +25,11 @@
 // that loud instead of silent - the build number is compared against the one they were
 // measured on, and every write is gated on the values reading back like a camera.
 #define AFXVR_OFS_FOV     0x498
+// The float immediately after the view fov is the weapon model's own. The gun is drawn
+// with its own frustum, so leaving this at the game's ~68 while the view renders at 108
+// projects the weapon about twice oversized, at the wrong stereo depth, and it swims
+// against the world whenever the head turns.
+#define AFXVR_OFS_WEAPONFOV 0x49c
 #define AFXVR_OFS_ORIGIN  0x4a0
 #define AFXVR_OFS_ANGLES  0x4b8
 
@@ -167,6 +172,7 @@ float g_MoveOffset[3] = { 0.0f, 0.0f, 0.0f };
 // The yaw the last frame was actually composed with, so a stick move goes where the
 // viewer is looking rather than where the map's X axis points.
 float g_LastViewYaw = 0.0f;
+float g_LastViewPitch = 0.0f;
 
 bool AnyEyeEnabled() {
     for (int i = 1; i < 4; i++) if (g_Eyes[i].enabled) return true;
@@ -177,6 +183,20 @@ bool AnyEyeEnabled() {
 // builder wants CViewRender itself.
 AfxVr_MakeMatrix_t g_MakeMatrix = nullptr;
 bool g_HudFix = false;
+
+// Project the weapon model with the same frustum as the world.
+//
+// OFF, and off because it was tried. "The float after the view fov is the weapon fov" is
+// read from HLAE's own dead override code and was never measured by this project; I turned
+// it on by default anyway. The first game with it on went black at seven frames a second
+// the moment a team was picked. Whatever +0x49c is, writing 108 into it every pass is not
+// what it wants.
+//
+// Kept as a switch rather than deleted, because the problem it was meant to solve is real:
+// the gun IS drawn with its own frustum, and at the world's fov it will be the wrong size.
+// The next step is measuring what that float does - one pass, one value, look - not
+// guessing again.
+bool g_WeaponFov = false;
 bool g_WarnedNoMakeMatrix = false;
 
 void RebuildViewMatrices() {
@@ -436,6 +456,7 @@ bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz
     g_Dirty = true;
     g_LastHeadYaw = g_Head.dYaw;
     g_LastViewYaw = angles[1];
+    g_LastViewPitch = angles[0];
 
     // The trampoline writes these back into the struct on our behalf, so they are what
     // will be in there - record them as ours.
@@ -514,6 +535,7 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     g_LastHeadYaw = eye.dYaw;
 
     g_LastViewYaw = angles[1];
+    g_LastViewPitch = angles[0];
 
     float forward[3], right[3], up[3];
     AfxVrMath::AngleVectors(angles, forward, right, up);
@@ -537,6 +559,17 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     // "No fov of its own" means the engine's, as the engine left it for this pass.
     *pFov = (0.0f < eye.fov) ? eye.fov
                              : (g_HavePassEntryFov ? g_PassEntryFov : g_BaseFov);
+
+    // The weapon model is drawn with its own frustum, from the float right after this one.
+    // Left alone it keeps the game's ~68 degrees while the world renders at 108, so the
+    // gun is projected about twice oversized, sits at the wrong stereo depth, and swims
+    // against the world every time the head turns. Same value, same convention - which is
+    // an assumption, and the reason this is a switch rather than unconditional.
+    if (g_WeaponFov) {
+        float * pWeaponFov = (float*)((unsigned char*)g_ViewStruct + AFXVR_OFS_WEAPONFOV);
+        *pWeaponFov = *pFov;
+    }
+
 
     g_Dirty = true;
 
@@ -574,6 +607,39 @@ void AfxVr_SetEye(int passIndex, bool enabled,
 }
 
 void AfxVr_SetFreeLook(bool enabled) { g_FreeLook = enabled; }
+
+void AfxVr_SetWeaponFov(bool enabled) { g_WeaponFov = enabled; }
+bool AfxVr_GetWeaponFov() { return g_WeaponFov; }
+
+// What the engine last put in the view struct, before anything of ours went into it.
+//
+// In a demo this is the camera the recording chose. In a game being played it is the
+// player's own aim - the thing the mouse moves - and that is what the crosshair and the
+// deadzone cone are measured against. Nothing else in this project needed to read it back
+// out, which is why it was not exposed until aiming existed.
+void AfxVr_GetBaseAngles(float out[3]) {
+    out[0] = g_BaseAngles[0];
+    out[1] = g_BaseAngles[1];
+    out[2] = g_BaseAngles[2];
+}
+
+// The world yaw the viewer's own forward points along: the demo's or the player's yaw,
+// plus every turn they have made. The deadzone cone is measured from this and not from
+// the gaze - measured from the gaze, glancing over your shoulder would drag the world.
+float AfxVr_BodyYawDegrees() {
+    return AfxVrMath::NormalizeDegrees((g_FreeLook ? 0.0f : g_BaseAngles[1]) + g_YawOffset);
+}
+
+float AfxVr_YawOffsetDegrees() { return g_YawOffset; }
+
+// The yaw the last frame was actually composed with - where the eyes are pointed. Walking
+// is measured against this: the game walks along ITS yaw, and the difference between the
+// two is exactly how far a push on the stick would take you the wrong way.
+float AfxVr_ViewYawDegrees() { return g_LastViewYaw; }
+float AfxVr_ViewPitchDegrees() { return g_LastViewPitch; }
+
+float AfxVr_BaseYawDegrees() { return g_BaseAngles[1]; }
+
 bool AfxVr_GetFreeLook() { return g_FreeLook; }
 
 void AfxVr_Recenter() {
@@ -677,6 +743,27 @@ CON_COMMAND(mirv_vr_roomscale, "cs2-vr-spectator: does a step in the room move y
         "Measured from wherever you were when you last recentred.\n"
         "Current value: %s\n",
         AfxVr_GetRoomScale() ? "1" : "0");
+}
+
+CON_COMMAND(mirv_vr_weaponfov, "cs2-vr-spectator: project the weapon model with the world's frustum.")
+{
+    if (2 <= args->ArgC()) AfxVr_SetWeaponFov(0 != atoi(args->ArgV(1)));
+
+    advancedfx::Message(
+        "mirv_vr_weaponfov 0|1 - write the eye's field of view into the weapon model's too.\n"
+        "\n"
+        "OFF, and off because it was tried. The gun is drawn with its own frustum, from the\n"
+        "float immediately after the view's - so at the game's ~68 degrees against a world\n"
+        "rendered at 108 it is about twice oversized, at the wrong stereo depth, and it\n"
+        "swims against the world when the head turns. That much is real.\n"
+        "\n"
+        "But that the float at +0x49c IS the weapon's fov comes from HLAE's own dead\n"
+        "override code and has never been measured here. Turned on, the first game went\n"
+        "black at seven frames a second the moment a team was picked.\n"
+        "\n"
+        "So: a switch, for measuring with, not a setting. One pass, one value, look.\n"
+        "Current value: %i\n",
+        AfxVr_GetWeaponFov() ? 1 : 0);
 }
 
 CON_COMMAND(mirv_vr_horizon, "cs2-vr-spectator: how much of the demo camera's own tilt the headset inherits.")

@@ -121,6 +121,26 @@ void AfxVr_SetEye(int passIndex, bool enabled,
 // With free look off, the headset's rotation is added to the demo camera's, which is the
 // right behaviour for a fixed observation point.
 void AfxVr_SetFreeLook(bool enabled);
+
+// What the engine last put in the view struct, before anything of ours. In a game being
+// played that is the player's own aim - what the mouse moves - which is what a crosshair
+// and a deadzone cone have to be measured against.
+void AfxVr_GetBaseAngles(float out[3]);
+
+// The world yaw the viewer's forward points along, turns included.
+float AfxVr_BodyYawDegrees();
+float AfxVr_YawOffsetDegrees();
+
+// The yaw the last frame was composed with: where the eyes are actually pointed.
+float AfxVr_ViewYawDegrees();
+float AfxVr_ViewPitchDegrees();
+
+// The yaw the game itself is using: the player's aim, or the demo camera's.
+float AfxVr_BaseYawDegrees();
+
+// Whether the weapon model is projected with the same frustum as the world.
+void AfxVr_SetWeaponFov(bool enabled);
+bool AfxVr_GetWeaponFov();
 bool AfxVr_GetFreeLook();
 
 // Align the free-look forward direction with where the demo camera is currently facing,
