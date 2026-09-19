@@ -106,7 +106,29 @@ int g_RawFovProbe = 0;
 // aspect ratio - on this portrait buffer, visibly.
 //
 // So the field's own value is kept and handed back, which needs no convention at all.
+// What to do with the main pass, when its world is going to be thrown away anyway.
+//
+// Three scene traversals cost about 11 ms of a 29 ms frame, and with the HUD panel on, the
+// world the MAIN pass renders is wiped to transparent black before the UI is composited -
+// so a third of the traversal budget is spent producing an image that is erased a moment
+// later. Pass 0 cannot be skipped; the engine needs it. But it can be made to see almost
+// nothing, and frustum culling then throws the map away for that pass.
+//
+//   off   what the engine intended.
+//   tiny  a two-degree frustum, still pointing where the head points. The safer of the
+//         two: anything the engine fits to pass 0's view - shadow cascades, probe choice,
+//         streaming priorities - stays pointed the right way, just narrow.
+//   up    the engine's frustum, aimed at the sky. Culls about as well and leaves the
+//         frustum shape alone, at the cost of pointing it somewhere the head is not.
+//
+// Off until measured. The thing to watch is whether the EYE images change at all between
+// the three: if they do, something per-pass leaks from the main pass into them, and the
+// saving is not free.
+enum Pass0Mode { kPass0Normal = 0, kPass0Tiny = 1, kPass0Up = 2 };
+int g_Pass0Mode = kPass0Normal;
+
 float g_PassEntryFov = 0.0f;
+
 bool g_HavePassEntryFov = false;
 
 
@@ -422,7 +444,14 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
         // The field's own value, not the trampoline's: the two are in different
         // conventions. See g_PassEntryFov.
         *pFov = g_HavePassEntryFov ? g_PassEntryFov : g_BaseFov;
-        RememberWritten(g_BaseOrigin, g_BaseAngles, *pFov);
+
+        // The main pass, when its output is about to be erased anyway.
+        if (0 == passIndex && kPass0Normal != g_Pass0Mode) {
+            if (kPass0Tiny == g_Pass0Mode) *pFov = 2.0f;
+            else pAngles[0] = -89.0f;   // straight up
+        }
+
+        RememberWritten(pOrigin, pAngles, *pFov);
         return;
     }
 
@@ -528,6 +557,36 @@ CON_COMMAND(mirv_vr_freelook, "cs2-vr-spectator: follow a player's position but 
         "  player does not drag the viewer's head around with their aim.\n"
         "Current value: %s\n",
         AfxVr_GetFreeLook() ? "1" : "0");
+}
+
+CON_COMMAND(mirv_vr_pass0, "cs2-vr-spectator: render almost nothing in the main pass, whose image is thrown away.")
+{
+    if (2 <= args->ArgC()) {
+        if (!_stricmp(args->ArgV(1), "off")) g_Pass0Mode = kPass0Normal;
+        else if (!_stricmp(args->ArgV(1), "tiny")) g_Pass0Mode = kPass0Tiny;
+        else if (!_stricmp(args->ArgV(1), "up")) g_Pass0Mode = kPass0Up;
+        else {
+            advancedfx::Warning("mirv_vr_pass0 off|tiny|up\n");
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "mirv_vr_pass0 off|tiny|up - what the main pass renders.\n"
+        "\n"
+        "With the HUD panel on, the main pass's world is wiped to transparent black before\n"
+        "the UI is composited, so a whole scene traversal - roughly a third of the frame's\n"
+        "rendering - produces an image that is erased. The pass cannot be skipped, but it\n"
+        "can be given a frustum that contains almost nothing.\n"
+        "\n"
+        "  tiny  two degrees, still pointing where the head points.\n"
+        "  up    the normal frustum, aimed at the sky.\n"
+        "\n"
+        "ONLY meaningful while the panel is wiping that world. With the panel off or opaque\n"
+        "this is simply a broken monitor image and a broken panel.\n"
+        "\n"
+        "Current: %s\n",
+        (kPass0Normal == g_Pass0Mode) ? "off" : (kPass0Tiny == g_Pass0Mode) ? "tiny" : "up");
 }
 
 CON_COMMAND(mirv_vr_fovraw, "cs2-vr-spectator: what is in the fov field when a pass begins, before we write to it.")
