@@ -511,13 +511,24 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     if (0 < g_RawFovProbe && 0 == passIndex) {
         g_RawFovProbe--;
         float raw = *(float*)((unsigned char*)g_ViewStruct + AFXVR_OFS_FOV);
+        // And the float straight after it, which HLAE's own dead override code treats as
+        // the weapon model's field of view. Read, never assumed: writing 108 into it on a
+        // guess turned the picture black at seven frames a second, and this project's rule
+        // is that a memory write is measured first. A plausible weapon fov is somewhere
+        // near 54 to 70; anything else means the name is wrong.
+        float weapon = *(float*)((unsigned char*)g_ViewStruct + AFXVR_OFS_WEAPONFOV);
         advancedfx::Message(
             "AFXVR: pass 0 entry fov field = %.4f, the trampoline was handed %.4f.\n"
             "  Equal means the field is still in Source's 4:3 convention at pass time and\n"
             "  the per-pass write is right. Different means the engine rescaled it in place\n"
-            "  for the window's aspect, and the passes must write the scaled number.\n",
-            raw, g_BaseFov);
+            "  for the window's aspect, and the passes must write the scaled number.\n"
+            "AFXVR: the float at +0x49c reads %.4f (raw bits %08X).\n"
+            "  If that is a believable weapon field of view it is worth trying; if it is a\n"
+            "  near plane, a scale or a nonsense number, it is not the weapon's fov and the\n"
+            "  gun has to be turned off instead.\n",
+            raw, g_BaseFov, weapon, *(unsigned int*)&weapon);
     }
+
 
     if (!AnyEyeEnabled()) return;
 

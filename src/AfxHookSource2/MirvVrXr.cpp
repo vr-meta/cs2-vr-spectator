@@ -552,9 +552,13 @@ std::vector<PendingKey> g_PendingKeys;
 void SendGameKey(unsigned short vk, bool down) {
     // SendInput goes to whatever has focus. With a headset on, a window that has quietly
     // lost focus is invisible - and the key would land in another application.
+    //
+    // A RELEASE goes out anyway. The press already reached the game and the latch here is
+    // already clear, so dropping the release leaves the key physically down with nothing
+    // left that knows to lift it. An up with no matching down is a no-op everywhere else.
     DWORD pid = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-    if (pid != GetCurrentProcessId()) {
+    if (down && pid != GetCurrentProcessId()) {
         static ULONGLONG lastWarned = 0;
         ULONGLONG now = GetTickCount64();
         if (now - lastWarned > 3000) {
@@ -1965,6 +1969,21 @@ void ResetAimLearning() {
     g_GainYaw = AfxVrMath::CountGainEstimator();
     g_GainPitch = AfxVrMath::CountGainEstimator();
     g_GainPitch.wraps = false;
+
+    // Seeded, or nothing ever moves.
+    //
+    // Without a seed the servo refuses a zero gain and sends no counts; with no counts
+    // the estimator has nothing to learn from; so the gain stays zero and hand aiming is
+    // dead on arrival. A deadlock I built and did not notice, because the headset was
+    // charging and the review found it instead.
+    //
+    // 0.0275 degrees per count is m_yaw 0.022 at sensitivity 1.25, which is an ordinary
+    // setting. Being wrong by a factor of two only changes how fast the first correction
+    // converges; the estimator measures the truth within a second of movement and
+    // replaces it. Yaw is negative because a mouse moved right lowers a Source yaw.
+    g_GainYaw.Seed(-0.0275f);
+    g_GainPitch.Seed(0.0275f);
+
     g_GainInitialised = true;
 }
 
@@ -2081,6 +2100,10 @@ bool g_FreeLookBeforePlay = false;
 void ReleaseGameButtons() {
     if (g_FireHeld)    { g_FireHeld = false;    QueueMouseButton(false, false); }
     if (g_AltFireHeld) { g_AltFireHeld = false; QueueMouseButton(true, false); }
+    // The pointer's own button is a separate latch, and loading a map with the trigger
+    // held would otherwise leave the real mouse button down with nothing left to release
+    // it - the pointer path returns early once there is a map.
+    if (g_CursorPressed) { g_CursorPressed = false; QueueMouseButton(false, false); }
     g_AimCarryX = g_AimCarryY = 0.0f;
 
     // A servo left running across a mode change would keep sending counts at a target
@@ -2253,7 +2276,16 @@ void PlayingInput(float dt) {
 
 void ProcessInput() {
 
-    if (!g_ActionsAttached || XR_SESSION_STATE_FOCUSED != g_State) return;
+    // Not focused any more - the runtime dashboard is up, or the headset came off - so
+    // the controllers are not ours. Everything being held has to come up FIRST: the mode
+    // has not changed, so the transition cleanup will not run, and a player left walking
+    // into a wall with the dashboard open cannot reach a keyboard to stop it.
+    if (!g_ActionsAttached || XR_SESSION_STATE_FOCUSED != g_State) {
+        ReleaseHeldKeys();
+        ReleaseGameButtons();
+        StopHandAim();
+        return;
+    }
 
     XrActiveActionSet active = { g_ActionSet, XR_NULL_PATH };
     XrActionsSyncInfo sync = { XR_TYPE_ACTIONS_SYNC_INFO };
@@ -3307,23 +3339,30 @@ void MirvVrXr_EngineThread_Frame() {
             || dueMouse.leftDown || dueMouse.leftUp || dueMouse.rightDown || dueMouse.rightUp) {
             DWORD pid = 0;
             GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-            if (pid == GetCurrentProcessId()) {
-                INPUT inputs[4] = {};
+            // Releases go out whatever has focus, for the same reason the keys do: the press
+            // has already landed and the latch is already clear, so dropping the release
+            // strands a real mouse button down.
+            bool foreground = (pid == GetCurrentProcessId());
+            if (foreground || dueMouse.leftUp || dueMouse.rightUp) {
+                // Five, not four: a move plus a down AND an up for both buttons, which a mode
+                // change releasing what the render thread has just pressed can produce in one
+                // drain. Four overflowed the array and handed SendInput the larger count.
+                INPUT inputs[5] = {};
                 int count = 0;
-                if (dueMouse.dx || dueMouse.dy) {
+                if (foreground && (dueMouse.dx || dueMouse.dy)) {
                     inputs[count].type = INPUT_MOUSE;
                     inputs[count].mi.dwFlags = MOUSEEVENTF_MOVE;
                     inputs[count].mi.dx = dueMouse.dx;
                     inputs[count].mi.dy = dueMouse.dy;
                     count++;
                 }
-                if (dueMouse.leftDown)  { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;  count++; }
+                if (foreground && dueMouse.leftDown)  { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;  count++; }
                 if (dueMouse.leftUp)    { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_LEFTUP;    count++; }
-                if (dueMouse.rightDown) { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN; count++; }
+                if (foreground && dueMouse.rightDown) { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN; count++; }
                 if (dueMouse.rightUp)   { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_RIGHTUP;   count++; }
                 if (count) SendInput(count, inputs, sizeof(INPUT));
 
-                if (dueMouse.wheel) {
+                if (foreground && dueMouse.wheel) {
                     INPUT wheel = {};
                     wheel.type = INPUT_MOUSE;
                     wheel.mi.dwFlags = MOUSEEVENTF_WHEEL;
