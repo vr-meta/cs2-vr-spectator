@@ -383,6 +383,17 @@ float ShapeStick(float v) {
 }
 XrCompositionLayerProjectionView g_ProjViews[2] = {};
 
+// The sub-rectangle of each eye's image that the runtime's own frustum covers. See the
+// long note where it is computed.
+bool g_CropToRuntimeFov = true;
+XrRect2Di g_CropRect[2] = {};
+bool g_CropValid[2] = { false, false };
+
+// Whether this runtime reads the fov we submit. Measured once, at startup: Oculus says no,
+// SteamVR says yes, and nothing in this project checked it until the stereo would not fuse.
+bool g_FovMutable = false;
+bool g_FovMutableKnown = false;
+
 // --- the panel ------------------------------------------------------------------------
 //
 // The demo's timeline, scoreboard and speed controls are a flat Panorama overlay drawn at
@@ -409,6 +420,7 @@ PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
 #define AFXVR_XR_FUNCS(X) \
     X(xrCreateInstance) X(xrDestroyInstance) X(xrGetInstanceProperties) \
     X(xrGetSystem) X(xrGetSystemProperties) X(xrEnumerateViewConfigurationViews) \
+    X(xrGetViewConfigurationProperties) \
     X(xrResultToString) X(xrPollEvent) \
     X(xrCreateSession) X(xrDestroySession) X(xrBeginSession) X(xrEndSession) \
     X(xrCreateReferenceSpace) X(xrDestroySpace) \
@@ -690,7 +702,13 @@ float g_ReportedFovOverrideDegrees = 0.0f;
 // almost right; Meta's runtime reports the true 61 mm and the two eyes stop fusing.
 //
 // So: given the frustum we actually want, work out what to ask Source for.
-bool g_SourceAspectFix = false;
+// ON. Confirmed against the engine's own projection matrix rather than assumed: at fov 90
+// on a 16:9 window the hook's probe reads proj[0][0] = 0.75 and proj[1][1] = 1.3333, which
+// is tan(halfX) = 1.3333 and tan(halfY) = 0.75 - exactly what "fov is horizontal at 4:3,
+// vertical derived, horizontal recomputed for the real aspect" predicts. On the 2528x2780
+// portrait buffer that turns a request for 108 degrees into about 86 rendered, which is
+// not even wide enough to cover the headset's 94.
+bool g_SourceAspectFix = true;
 
 float AspectOfImage() {
     if (g_SwapchainWidth && g_SwapchainHeight) {
@@ -1348,6 +1366,22 @@ bool MirvVrXr_Start() {
         }
     }
 
+    // Does this runtime read the field of view we submit, or composite with its own?
+    // Nothing in this project asked until the stereo would not fuse, and the answer turned
+    // out to be the whole problem.
+    if (xrGetViewConfigurationProperties_) {
+        XrViewConfigurationProperties props = { XR_TYPE_VIEW_CONFIGURATION_PROPERTIES };
+        if (XR_SUCCEEDED(xrGetViewConfigurationProperties_(g_Instance, g_SystemId,
+                XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, &props))) {
+            g_FovMutable = (XR_TRUE == props.fovMutable);
+            g_FovMutableKnown = true;
+            advancedfx::Message(
+                "AFXVR: fovMutable %s - a submitted field of view is %s.\n",
+                g_FovMutable ? "TRUE" : "FALSE",
+                g_FovMutable ? "honoured" : "IGNORED; the runtime uses its own frustum");
+        }
+    }
+
     advancedfx::Message("AFXVR: instance up. Game D3D11 device: %p\n", g_pDevice);
     return true;
 }
@@ -1678,6 +1712,65 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             g_ProjViews[eye].fov.angleRight = half;
             g_ProjViews[eye].fov.angleUp = vHalf;
             g_ProjViews[eye].fov.angleDown = -vHalf;
+
+            // Claiming a frustum only works on a runtime that reads the claim.
+            //
+            // XrViewConfigurationProperties::fovMutable says whether it does, and it was
+            // never checked. Measured: the Oculus PC runtime reports FALSE and composites
+            // with its OWN asymmetric frustum whatever the layer says; SteamVR reports
+            // TRUE and honours it. Which is why the same build fused better on SteamVR.
+            //
+            // On a runtime that ignores the claim, our symmetric image is stretched onto
+            // [-54, +40] for the left eye and its mirror for the right. The stretch is
+            // linear in tangent space, so the centre ray lands at
+            // atan((tan(40) - tan(54)) / 2) = -15 degrees, mirrored - about thirty degrees
+            // of divergence that does not shrink with distance. Only something a few
+            // centimetres away can be fused through that, which is exactly what was
+            // reported: a weapon in front of the face fused, nothing beyond it did.
+            //
+            // The fix is Meta's own documented "symmetric projection": keep rendering
+            // symmetric, hand back the runtime's frustum unchanged, and point it at the
+            // sub-rectangle of our image that that frustum actually covers. A runtime that
+            // honours fov and one that ignores it then produce the same picture, so this
+            // is not a workaround for one runtime - it is simply correct.
+            if (g_CropToRuntimeFov && g_SwapchainWidth && g_SwapchainHeight) {
+                float t = tanf(half);
+                float v = tanf(vHalf);
+                if (t > 1e-6f && v > 1e-6f) {
+                    const XrFovf & want = rendered[eye].fov;
+
+                    // Tangent space, not angle space: perspective interpolates tangents.
+                    float x0 = g_SwapchainWidth  * (t + tanf(want.angleLeft))  / (2.0f * t);
+                    float x1 = g_SwapchainWidth  * (t + tanf(want.angleRight)) / (2.0f * t);
+                    float y0 = g_SwapchainHeight * (v - tanf(want.angleUp))    / (2.0f * v);
+                    float y1 = g_SwapchainHeight * (v - tanf(want.angleDown))  / (2.0f * v);
+
+                    int ix0 = (int)floorf(x0), iy0 = (int)floorf(y0);
+                    int ix1 = (int)ceilf(x1),  iy1 = (int)ceilf(y1);
+
+                    if (ix0 < 0) ix0 = 0;
+                    if (iy0 < 0) iy0 = 0;
+                    if (ix1 > (int)g_SwapchainWidth)  ix1 = (int)g_SwapchainWidth;
+                    if (iy1 > (int)g_SwapchainHeight) iy1 = (int)g_SwapchainHeight;
+
+                    if (ix1 - ix0 >= 16 && iy1 - iy0 >= 16) {
+                        // Re-derive the frustum from the rectangle after snapping to whole
+                        // pixels, so the claim still matches the image to the pixel. On a
+                        // runtime that ignores the claim this costs nothing; on one that
+                        // reads it, it is the difference between right and nearly right.
+                        g_ProjViews[eye].fov.angleLeft  = atanf(t * (2.0f * ix0 / (float)g_SwapchainWidth  - 1.0f));
+                        g_ProjViews[eye].fov.angleRight = atanf(t * (2.0f * ix1 / (float)g_SwapchainWidth  - 1.0f));
+                        g_ProjViews[eye].fov.angleUp    = atanf(v * (1.0f - 2.0f * iy0 / (float)g_SwapchainHeight));
+                        g_ProjViews[eye].fov.angleDown  = atanf(v * (1.0f - 2.0f * iy1 / (float)g_SwapchainHeight));
+
+                        g_CropRect[eye].offset = { ix0, iy0 };
+                        g_CropRect[eye].extent = { ix1 - ix0, iy1 - iy0 };
+                        g_CropValid[eye] = true;
+                        continue;
+                    }
+                }
+            }
+            g_CropValid[eye] = false;
         }
     }
 
@@ -1713,8 +1806,12 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             // right. The swapchain it points at is the one the pass that rendered that
             // view wrote into, which is not the same index once the eyes are swapped.
             g_ProjViews[eye].subImage.swapchain = g_Swapchain[g_SwapEyes ? (1 - eye) : eye];
-            g_ProjViews[eye].subImage.imageRect.offset = { 0, 0 };
-            g_ProjViews[eye].subImage.imageRect.extent = { (int32_t)g_SwapchainWidth, (int32_t)g_SwapchainHeight };
+            if (g_CropValid[eye]) {
+                g_ProjViews[eye].subImage.imageRect = g_CropRect[eye];
+            } else {
+                g_ProjViews[eye].subImage.imageRect.offset = { 0, 0 };
+                g_ProjViews[eye].subImage.imageRect.extent = { (int32_t)g_SwapchainWidth, (int32_t)g_SwapchainHeight };
+            }
             g_ProjViews[eye].subImage.imageArrayIndex = 0;
         }
 
@@ -2440,17 +2537,54 @@ CON_COMMAND(mirv_vr_reset, "cs2-vr-spectator: put every stereo setting back to i
     g_IpdScale = 1.0f;
     g_Monoscopic = false;
     g_SwapEyes = false;
-    g_CentreFrustum = 1;
+    g_CentreFrustum = 0;      // off: see the note where it is declared
     g_RollMode = 1;
     g_FovOverrideDegrees = 0.0f;
     g_FovScale = 1.0f;
     g_FovVerticalOverrideDegrees = 0.0f;
     g_ReportedFovOverrideDegrees = 0.0f;
-    g_SourceAspectFix = false;
+    g_SourceAspectFix = true; // on: the engine does not render the angle it is handed
     g_Calibrating = false;
 
     advancedfx::Message(
         "mirv_vr_reset: separation x1, stereo, eyes in runtime order, frustum centring on,\n"
         "  roll as reported, no field-of-view overrides, calibration off.\n"
         "  Everything is now at its default, which is the only state worth comparing from.\n");
+}
+
+CON_COMMAND(mirv_vr_crop, "cs2-vr-spectator: submit the runtime's own frustum with a cropped image rectangle.")
+{
+    if (2 <= args->ArgC()) {
+        g_CropToRuntimeFov = 0 != atoi(args->ArgV(1));
+        advancedfx::Message("mirv_vr_crop: %s\n", g_CropToRuntimeFov ? "on" : "off");
+        return;
+    }
+
+    advancedfx::Message(
+        "mirv_vr_crop 0|1 - hand the runtime its own frustum and point it at the part of\n"
+        "our symmetric image that frustum covers.\n"
+        "\n"
+        "Claiming a field of view only works on a runtime that reads the claim.\n"
+        "XrViewConfigurationProperties::fovMutable says whether it does. Measured here:\n"
+        "  Oculus PC   FALSE - composites with its own frustum, ignores ours\n"
+        "  SteamVR     TRUE  - honours ours\n"
+        "This runtime: %s.\n"
+        "\n"
+        "When it is ignored, a symmetric image gets stretched onto an asymmetric frustum.\n"
+        "The stretch is linear in tangent space, so for a Quest 3 the centre ray lands\n"
+        "about 15 degrees out, mirrored between the eyes - thirty degrees of divergence\n"
+        "that does not shrink with distance. Only something a few centimetres from your\n"
+        "face can be fused through it.\n"
+        "\n"
+        "With this on, the two cases become identical: render symmetric as before, submit\n"
+        "the runtime's frustum unchanged, and crop the image rectangle to match. Meta\n"
+        "documents exactly this and calls it symmetric projection.\n"
+        "\n"
+        "Current: %s. Last rectangles: eye 0 %dx%d at (%d,%d), eye 1 %dx%d at (%d,%d).\n",
+        g_FovMutableKnown ? (g_FovMutable ? "fovMutable TRUE" : "fovMutable FALSE") : "not queried yet",
+        g_CropToRuntimeFov ? "on" : "off",
+        g_CropValid[0] ? g_CropRect[0].extent.width : 0, g_CropValid[0] ? g_CropRect[0].extent.height : 0,
+        g_CropValid[0] ? g_CropRect[0].offset.x : 0, g_CropValid[0] ? g_CropRect[0].offset.y : 0,
+        g_CropValid[1] ? g_CropRect[1].extent.width : 0, g_CropValid[1] ? g_CropRect[1].extent.height : 0,
+        g_CropValid[1] ? g_CropRect[1].offset.x : 0, g_CropValid[1] ? g_CropRect[1].offset.y : 0);
 }

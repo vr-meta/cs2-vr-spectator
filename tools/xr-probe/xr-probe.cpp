@@ -102,6 +102,28 @@ int main(int argc, char ** argv) {
     XrResult sr = getSystem ? getSystem(instance, &systemInfo, &systemId) : XR_ERROR_FUNCTION_UNSUPPORTED;
 
     if (XR_SUCCEEDED(sr)) {
+        // The question this probe was extended for: may an application submit a field of
+        // view different from the one xrLocateViews reported? The specification allows it
+        // only when fovMutable is true. A runtime that says false composites with its own
+        // frustum whatever the layer claims - so an application that can only render a
+        // symmetric frustum has its image stretched onto an asymmetric one, and the two
+        // eyes are pushed apart by an angle that does not shrink with distance.
+        PFN_xrGetViewConfigurationProperties getViewConfigProperties = nullptr;
+        getProc(instance, "xrGetViewConfigurationProperties", (PFN_xrVoidFunction*)&getViewConfigProperties);
+
+        if (getViewConfigProperties) {
+            XrViewConfigurationProperties props = { XR_TYPE_VIEW_CONFIGURATION_PROPERTIES };
+            XrResult vr = getViewConfigProperties(instance, systemId,
+                XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, &props);
+            if (XR_SUCCEEDED(vr)) {
+                printf("fovMutable      : %s\n",
+                    props.fovMutable ? "TRUE - a submitted fov is honoured"
+                                     : "FALSE - a submitted fov is IGNORED, the runtime uses its own");
+            } else {
+                printf("fovMutable      : xrGetViewConfigurationProperties returned %d\n", (int)vr);
+            }
+        }
+
         PFN_xrGetSystemProperties getSystemProperties = nullptr;
         getProc(instance, "xrGetSystemProperties", (PFN_xrVoidFunction*)&getSystemProperties);
         XrSystemProperties systemProperties = { XR_TYPE_SYSTEM_PROPERTIES };
