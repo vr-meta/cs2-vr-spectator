@@ -16,7 +16,11 @@
 # Pass -Tail to print what the log gained afterwards.
 
 param(
-    [Parameter(ValueFromRemainingArguments = $true, ValueFromPipeline = $true)]
+    # ValueFromRemainingArguments alone. With ValueFromPipeline as well, PowerShell binds
+    # the first argument positionally and then the remaining-arguments binding replaces the
+    # whole array with the rest - so of `send-command.ps1 "a" "b"` only "b" was ever sent,
+    # silently, with the transcript showing one line where two were typed.
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$Command,
 
     [switch]$Tail,
