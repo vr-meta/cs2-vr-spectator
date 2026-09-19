@@ -38,8 +38,9 @@ reimplementation of one.
 
 ## Data, read off the source
 
-`AfxHook.dat` is Source 1 and GoldSrc; nothing in `AfxHookSource2/` mentions it. What the
-hook does open, all under `resources\`:
+`AfxHook.dat` is not opened by the hook; nothing in `AfxHookSource2/` mentions it. (**The
+reason given here first — "it is Source 1 and GoldSrc" — was wrong. See the correction at
+the end.**) What the hook does open, all under `resources\`:
 
 | Path | When |
 | --- | --- |
@@ -136,3 +137,39 @@ HLAE installs it replaces.
 startup whether or not it exists, and `snippets\` under it serves `mirv_script_load`, which
 nothing here calls — and which is not in the advancedfx source tree at all, only in HLAE's
 release package.
+
+## Correction: what `AfxHook.dat` actually is
+
+This note originally excluded `AfxHook.dat` from the zip on the grounds that it is Source
+1's and GoldSrc's. The exclusion is right and the reason is wrong, which is worse than
+being wrong outright: a right answer with a wrong reason survives the next question.
+
+It is **the injector's shellcode**. `deps/release/injector/AfxHook/recompile_x64.bat`:
+
+```
+nasm.exe -f bin -o AfxHook.dat AfxHook_x64.asm
+```
+
+678 bytes of position-independent x64, and `injector.exe` reads it from its own directory
+at `Program.cs:319`, patches four pointers into it at offset 32 — `GetModuleHandleW`,
+`GetProcAddress`, the DLL directory and the DLL path, matching `labelArgs` under the
+`align 32` in the assembly — writes it into the target and runs it with
+`CreateRemoteThread`.
+
+So it is excluded for a different reason: **this project does not ship `injector.exe`.**
+The launcher injects by itself, so neither file is needed.
+
+The distinction matters in exactly one scenario, and it is a scenario that has been
+planned for. If plain `CreateRemoteThread(LoadLibraryW)` turns out not to work on some
+machine, the fallback is to ship and drive HLAE's injector the way `hlae/Loader.cs` does —
+and somebody reading only the table above would ship `injector.exe` without `AfxHook.dat`
+and get a silent failure with no image to run. Both files, or neither.
+
+Why HLAE needs the shellcode at all is worth carrying with it: the comment at the head of
+`AfxHook_x64.asm` says `SetDllDirectoryW` "won't work well with UCRT DLL function
+forwarders", so it changes the target's current directory instead and calls
+**`LoadLibraryExW` with `LOAD_WITH_ALTERED_SEARCH_PATH`**. That takes three arguments and a
+thread start routine gets one, which is the whole reason a hand-written stub exists rather
+than a pointer to a kernel32 export. Our launcher avoids the problem from the other end -
+it puts `hook\x64` on the child's `PATH`, and ships no private UCRT, so the forwarders come
+from System32 - and `cs2vr selftest` checks that on the machine it runs on.
