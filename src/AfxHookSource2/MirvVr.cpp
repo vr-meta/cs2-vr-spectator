@@ -58,7 +58,33 @@ float g_BaseAngles[3] = { 0.0f, 0.0f, 0.0f };
 float g_BaseFov = 90.0f;
 bool g_Dirty = false;
 
+// The head: one orientation, no eye offset, delivered once a frame. See AfxVr_SetHead.
+struct Head {
+    bool enabled = false;
+    float dPitch = 0.0f, dYaw = 0.0f, dRoll = 0.0f;
+    float fov = 0.0f;
+};
+Head g_Head;
+
 bool g_FreeLook = false;
+
+// How much of the demo camera's own orientation the headset sits on top of, when free
+// look is off.
+//
+// "Level" takes the yaw only. Composing a pure yaw with the head is the one case where
+// the horizon cannot move: the result is the head's own pitch and roll with a constant
+// added to its yaw, so what is rendered is exactly what the pose handed to the compositor
+// says was rendered, and reprojection during a turn is exact.
+//
+// "Full" takes the demo camera's pitch and roll as well, composed properly. It is
+// geometrically correct and physically unpleasant - spectating a player who looks down
+// pitches the viewer's world - so it is not the default. It exists because the question
+// "what does the demo camera actually see" has to stay answerable.
+//
+// What is gone is the third option, which was never a choice: adding the two sets of
+// Euler angles together. See ComposeSourceAngles in MirvVrMath.h.
+bool g_HorizonLevel = true;
+
 float g_YawOffset = 0.0f;   // added to the head's yaw so the room lines up with the map
 float g_LastHeadYaw = 0.0f; // whatever the headset last reported, for Recenter
 
@@ -184,6 +210,32 @@ bool ViewIsPlausible() {
     return true;
 }
 
+// The one place the viewer's orientation is built, so the head written once a frame and
+// the eyes written once a pass cannot drift apart.
+//
+// Composition, not addition. Adding two sets of Euler angles is the same rotation only
+// while the base camera is level; see ComposeSourceAngles in MirvVrMath.h for what it
+// looks like when it is not.
+void ComposeViewAngles(float dPitch, float dYaw, float dRoll, float out[3]) {
+    if (g_FreeLook) {
+        // Position from the demo, orientation from the headset alone.
+        out[0] = dPitch;
+        out[1] = dYaw + g_YawOffset;
+        out[2] = dRoll;
+        return;
+    }
+
+    // The yaw offset applies here too, or turning with the stick would silently do
+    // nothing whenever the demo camera owns the orientation.
+    const float base[3] = {
+        g_HorizonLevel ? 0.0f : g_BaseAngles[0],
+        g_BaseAngles[1],
+        g_HorizonLevel ? 0.0f : g_BaseAngles[2],
+    };
+    const float head[3] = { dPitch, dYaw + g_YawOffset, dRoll };
+    AfxVrMath::ComposeSourceAngles(base, head, out);
+}
+
 } // namespace
 
 void AfxVr_BeforeViewSetupRead(void * pViewStruct) {
@@ -200,8 +252,16 @@ void AfxVr_BeforeViewSetupRead(void * pViewStruct) {
     g_Dirty = false;
 }
 
-void AfxVr_AfterViewSetup(void * pViewStruct, float tx, float ty, float tz,
-                          float rx, float ry, float rz, float fov) {
+void AfxVr_SetHead(bool enabled, float dPitch, float dYaw, float dRoll, float fov) {
+    g_Head.enabled = enabled;
+    g_Head.dPitch = dPitch;
+    g_Head.dYaw = dYaw;
+    g_Head.dRoll = dRoll;
+    g_Head.fov = fov;
+}
+
+bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz,
+                          float & rx, float & ry, float & rz, float & fov) {
     g_ViewStruct = pViewStruct;
     g_BaseOrigin[0] = tx; g_BaseOrigin[1] = ty; g_BaseOrigin[2] = tz;
     g_BaseAngles[0] = rx; g_BaseAngles[1] = ry; g_BaseAngles[2] = rz;
@@ -216,6 +276,33 @@ void AfxVr_AfterViewSetup(void * pViewStruct, float tx, float ty, float tz,
             "AFXVR: frame=%i pass=%i SetupView this=%p org=(%f,%f,%f) ang=(%f,%f,%f) fov=%f\n",
             g_AfxVrFrameIndex, g_AfxVrPassIndex, pViewStruct, tx, ty, tz, rx, ry, rz, fov);
     }
+
+    // The head, once a frame, for everything that is not the image.
+    if (!g_Head.enabled || !AnyEyeEnabled()) return false;
+    if (!ViewIsPlausible()) return false;
+
+    float angles[3];
+    ComposeViewAngles(g_Head.dPitch, g_Head.dYaw, g_Head.dRoll, angles);
+
+    // The stick offset is already in world space; the head adds no offset of its own,
+    // which is the difference between this and an eye.
+    tx = g_BaseOrigin[0] + g_MoveOffset[0];
+    ty = g_BaseOrigin[1] + g_MoveOffset[1];
+    tz = g_BaseOrigin[2] + g_MoveOffset[2];
+
+    rx = angles[0];
+    ry = angles[1];
+    rz = angles[2];
+
+    if (0.0f < g_Head.fov) fov = g_Head.fov;
+
+    // The same flag the passes set, and for the same reason: the next frame's
+    // AfxVr_BeforeViewSetupRead has to put the base camera back before the engine reads
+    // the struct, or the head is added to itself forever.
+    g_Dirty = true;
+    g_LastHeadYaw = g_Head.dYaw;
+    g_LastViewYaw = angles[1];
+    return true;
 }
 
 void AfxVr_OnBeginRenderPass(int passIndex) {
@@ -246,20 +333,8 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     // The frame the eye offset is measured in has to be the same frame the final angles
     // describe, or the eyes end up separated along the wrong axis.
     float angles[3];
-    if (g_FreeLook) {
-        // Position from the demo, orientation from the headset alone.
-        angles[0] = eye.dPitch;
-        angles[1] = eye.dYaw + g_YawOffset;
-        angles[2] = eye.dRoll;
-        g_LastHeadYaw = eye.dYaw;
-    } else {
-        // The yaw offset applies here too, or turning with the stick would silently do
-        // nothing whenever the demo camera owns the orientation.
-        angles[0] = g_BaseAngles[0] + eye.dPitch;
-        angles[1] = g_BaseAngles[1] + eye.dYaw + g_YawOffset;
-        angles[2] = g_BaseAngles[2] + eye.dRoll;
-        g_LastHeadYaw = eye.dYaw;
-    }
+    ComposeViewAngles(eye.dPitch, eye.dYaw, eye.dRoll, angles);
+    g_LastHeadYaw = eye.dYaw;
 
     g_LastViewYaw = angles[1];
 
@@ -354,6 +429,36 @@ CON_COMMAND(mirv_vr_freelook, "cs2-vr-spectator: follow a player's position but 
         "  player does not drag the viewer's head around with their aim.\n"
         "Current value: %s\n",
         AfxVr_GetFreeLook() ? "1" : "0");
+}
+
+CON_COMMAND(mirv_vr_horizon, "cs2-vr-spectator: how much of the demo camera's own tilt the headset inherits.")
+{
+    if (2 <= args->ArgC()) {
+        if (!_stricmp(args->ArgV(1), "level")) {
+            g_HorizonLevel = true;
+            advancedfx::Message("mirv_vr_horizon: level - only the demo camera's yaw.\n");
+            return;
+        }
+        if (!_stricmp(args->ArgV(1), "full")) {
+            g_HorizonLevel = false;
+            advancedfx::Message("mirv_vr_horizon: full - the demo camera's pitch and roll too.\n");
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "mirv_vr_horizon level|full - with free look OFF, how much of the demo camera's\n"
+        "  orientation the headset's rotation sits on top of.\n"
+        "\n"
+        "level: the yaw only. The horizon stays where the room's floor is, and nobody\n"
+        "  else's aim can pitch your world. It is also the only arrangement in which what\n"
+        "  is rendered matches the pose the compositor is told about exactly, so a turn\n"
+        "  reprojects without shearing.\n"
+        "full: pitch and roll as well, composed as rotations rather than added as angles.\n"
+        "  Correct, and unpleasant to wear.\n"
+        "\n"
+        "Current value: %s\n",
+        g_HorizonLevel ? "level" : "full");
 }
 
 CON_COMMAND(mirv_vr_recenter, "cs2-vr-spectator: point free look where the demo camera is facing.")

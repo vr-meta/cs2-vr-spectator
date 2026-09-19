@@ -112,6 +112,75 @@ inline void XrDirectionToSource(float x, float y, float z,
     sz =  y;
 }
 
+// A rotation as the basis it takes the world to, written column by column: forward, left,
+// up. Source's AngleVectors hands back `right`, which is -Y at zero yaw, so the matrix
+// built straight out of it has determinant -1 and is a reflection rather than a rotation.
+// Flipping that one column is the whole difference, and getting it wrong composes two
+// rotations into a mirror image that still looks almost plausible.
+//
+// Stored row-major: m[row * 3 + col].
+inline void SourceAnglesToRotation(const float angles[3], float m[9]) {
+    float f[3], r[3], u[3];
+    AngleVectors(angles, f, r, u);
+    for (int i = 0; i < 3; i++) {
+        m[i * 3 + 0] =  f[i];
+        m[i * 3 + 1] = -r[i];
+        m[i * 3 + 2] =  u[i];
+    }
+}
+
+// The inverse. Straight out of the same definitions: forward is (cp cy, cp sy, -sp), and
+// left and up differ in their third component only by sin and cos of the roll.
+inline void RotationToSourceAngles(const float m[9], float angles[3]) {
+    const double r2d = 180.0 / 3.14159265358979323846;
+
+    double fx = m[0], fy = m[3], fz = m[6];   // column 0: forward
+    double lz = m[7];                          // column 1, row 2: left
+    double uz = m[8];                          // column 2, row 2: up
+
+    double sp = -fz;
+    if (sp >  1.0) sp =  1.0;
+    if (sp < -1.0) sp = -1.0;
+    angles[0] = (float)(asin(sp) * r2d);
+
+    double cp = sqrt(fx * fx + fy * fy);
+    if (cp > 1e-6) {
+        angles[1] = (float)(atan2(fy, fx) * r2d);
+        angles[2] = (float)(atan2(lz, uz) * r2d);
+    } else {
+        // Straight up or straight down: yaw and roll turn about the same axis and only
+        // their difference is defined. Give the whole of it to yaw, which is the one the
+        // rest of this module reads back.
+        angles[1] = (float)(atan2(-(double)m[1], (double)m[4]) * r2d);
+        angles[2] = 0.0f;
+    }
+}
+
+// Two rotations, applied in order: first `base`, then `head` in the frame base leaves
+// behind. The result is the angles that describe the combination.
+//
+// This exists because adding Euler angles is not composition, and the difference is
+// invisible until it is not. `base + head` equals `base then head` only while the base
+// camera's pitch and roll are zero. Spectating a player who is looking 20 degrees down,
+// a head yaw of theta is then rendered as a rotation about the WORLD's up axis with the
+// view pitched - horizontal flow of theta*cos(20) plus a twist of theta*sin(20) - while
+// the pose handed to the compositor says it was a clean yaw about the head's own up. The
+// runtime reprojects by the motion it was told about, and the picture shears against the
+// head for the whole length of the turn.
+inline void ComposeSourceAngles(const float base[3], const float head[3], float out[3]) {
+    float b[9], h[9], m[9];
+    SourceAnglesToRotation(base, b);
+    SourceAnglesToRotation(head, h);
+    for (int row = 0; row < 3; row++) {
+        for (int col = 0; col < 3; col++) {
+            m[row * 3 + col] = b[row * 3 + 0] * h[0 * 3 + col]
+                             + b[row * 3 + 1] * h[1 * 3 + col]
+                             + b[row * 3 + 2] * h[2 * 3 + col];
+        }
+    }
+    RotationToSourceAngles(m, out);
+}
+
 // Fold an angle into (-180, 180].
 inline float NormalizeDegrees(float degrees) {
     while (degrees > 180.0f) degrees -= 360.0f;

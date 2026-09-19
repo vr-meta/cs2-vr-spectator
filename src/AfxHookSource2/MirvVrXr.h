@@ -49,8 +49,26 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
 void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture);
 
 // True while the panel wants the main pass handed over. Asked by the pass loop so the
-// callback is not queued for nothing.
+// callback is not queued for nothing. Not gated on a session: what it queues gates itself,
+// and the alpha probe has to be runnable from a desk.
 bool MirvVrXr_WantsPanel();
+
+// Render thread, from the MAIN pass's BeforeUi command - after the world, before the UI.
+// Wipes the finished world out of the back buffer so the only thing left for the panel to
+// carry is the HUD itself, on transparent black.
+//
+// Without this the quad is the whole main pass: world and HUD together, opaque, and 1.6 m
+// wide at 1.8 m is about 48 degrees of the view blocked by a second copy of a world the
+// eyes are already showing. With it, the panel is a HUD and nothing else.
+//
+// The cost is that the monitor shows the HUD on black while the panel is on. The monitor
+// is not the deliverable.
+void MirvVrXr_RenderThread_ClearForPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture);
+
+// True while that clear is wanted. Separate from MirvVrXr_WantsPanel because it needs no
+// session: the whole point is to be able to look at what the panel would carry from a
+// desk, with mirv_vr_xr passes.
+bool MirvVrXr_WantsPanelClear();
 
 // Which of the two capture points the eyes are taken from.
 //

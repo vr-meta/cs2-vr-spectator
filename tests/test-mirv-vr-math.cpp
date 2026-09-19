@@ -396,6 +396,7 @@ static void TestSteamInfPath() {
 // ---------------------------------------------------------------------------------
 
 static void TestQuatToSourceAngles(); // defined below, after the helpers it needs
+static void TestComposeSourceAngles();
 
 static void RunTests() {
     TestAngleVectors();
@@ -409,6 +410,7 @@ static void RunTests() {
     TestSteamInfValue();
     TestSteamInfPath();
     TestQuatToSourceAngles();
+    TestComposeSourceAngles();
 }
 
 CHECK_MAIN()
@@ -521,5 +523,163 @@ static void TestQuatToSourceAngles() {
         // answer is a relative roll between the eyes, and a relative roll is precisely
         // what cannot be fused.
         CHECK_NEAR(rollLeft, -rollRight, 1e-3);
+    }
+}
+
+// ---------------------------------------------------------------------------------
+
+static void Dot3(const float a[3], const float b[3], float & out) {
+    out = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static void TestComposeSourceAngles() {
+    check::Case("two rotations compose rigidly, which adding Euler angles does not");
+
+    // 1. The matrix built from a set of angles is a rotation, not a reflection.
+    //
+    //    AngleVectors hands back `right`, and Source's right is -Y at zero yaw, so the
+    //    basis (forward, right, up) has determinant -1. Composing two of those produces a
+    //    mirror image that is orthonormal, plausible-looking, and wrong. The column flip
+    //    inside SourceAnglesToRotation is the whole of the fix, so it is worth an
+    //    assertion rather than a comment.
+    {
+        const float angles[][3] = {
+            { 0, 0, 0 }, { 20, 50, 0 }, { -35, 170, 12 }, { 5, -95, -40 }, { 60, 33, 88 },
+        };
+        for (int i = 0; i < 5; i++) {
+            float m[9];
+            SourceAnglesToRotation(angles[i], m);
+
+            // Orthonormal columns.
+            for (int c = 0; c < 3; c++) {
+                float len = m[0 * 3 + c] * m[0 * 3 + c]
+                          + m[1 * 3 + c] * m[1 * 3 + c]
+                          + m[2 * 3 + c] * m[2 * 3 + c];
+                CHECK_NEAR(len, 1.0, 1e-5);
+            }
+            // Determinant +1: a rotation, with no flip left in it.
+            float det =
+                  m[0] * (m[4] * m[8] - m[5] * m[7])
+                - m[1] * (m[3] * m[8] - m[5] * m[6])
+                + m[2] * (m[3] * m[7] - m[4] * m[6]);
+            CHECK_NEAR(det, 1.0, 1e-5);
+        }
+    }
+
+    // 2. Angles -> matrix -> angles is the identity away from the poles.
+    {
+        for (int p = -80; p <= 80; p += 40) {
+            for (int y = -170; y <= 170; y += 85) {
+                for (int r = -60; r <= 60; r += 60) {
+                    float in[3] = { (float)p, (float)y, (float)r };
+                    float m[9], out[3];
+                    SourceAnglesToRotation(in, m);
+                    RotationToSourceAngles(m, out);
+                    CHECK_NEAR(NormalizeDegrees(out[0] - in[0]), 0.0, 2e-3);
+                    CHECK_NEAR(NormalizeDegrees(out[1] - in[1]), 0.0, 2e-3);
+                    CHECK_NEAR(NormalizeDegrees(out[2] - in[2]), 0.0, 2e-3);
+                }
+            }
+        }
+    }
+
+    // 3. Either side alone changes nothing.
+    {
+        const float base[3] = { 17.0f, -122.0f, 8.0f };
+        const float zero[3] = { 0.0f, 0.0f, 0.0f };
+        float out[3];
+
+        ComposeSourceAngles(base, zero, out);
+        CHECK_NEAR(NormalizeDegrees(out[0] - base[0]), 0.0, 2e-3);
+        CHECK_NEAR(NormalizeDegrees(out[1] - base[1]), 0.0, 2e-3);
+        CHECK_NEAR(NormalizeDegrees(out[2] - base[2]), 0.0, 2e-3);
+
+        ComposeSourceAngles(zero, base, out);
+        CHECK_NEAR(NormalizeDegrees(out[0] - base[0]), 0.0, 2e-3);
+        CHECK_NEAR(NormalizeDegrees(out[1] - base[1]), 0.0, 2e-3);
+        CHECK_NEAR(NormalizeDegrees(out[2] - base[2]), 0.0, 2e-3);
+    }
+
+    // 4. The property that matters in the headset. Turn the head by theta about its own
+    //    up axis, on top of a base camera that is pitched and rolled: the result must be
+    //    the base's own basis turned by exactly theta about the base's up. The head's up
+    //    must come out unchanged - that is what "the horizon does not move when you turn"
+    //    means, and it is what the compositor is told happened.
+    {
+        const float base[3] = { 20.0f, 50.0f, -11.0f };
+        const float theta = 30.0f;
+        const float head[3] = { 0.0f, theta, 0.0f };
+
+        float fB[3], rB[3], uB[3];
+        AngleVectors(base, fB, rB, uB);
+
+        float out[3], fO[3], rO[3], uO[3];
+        ComposeSourceAngles(base, head, out);
+        AngleVectors(out, fO, rO, uO);
+
+        const double d = 3.14159265358979323846 / 180.0;
+        float c = (float)cos(theta * d), s = (float)sin(theta * d);
+
+        for (int i = 0; i < 3; i++) {
+            // Source yaw turns left, and left is -right.
+            CHECK_NEAR(fO[i], c * fB[i] - s * rB[i], 2e-4);
+            CHECK_NEAR(rO[i], c * rB[i] + s * fB[i], 2e-4);
+            CHECK_NEAR(uO[i], uB[i], 2e-4);
+        }
+
+        // 5. The bug this replaces, stated as a number. Adding the Euler angles gives a
+        //    different rotation: the view is turned about the WORLD's up axis instead of
+        //    the head's, so the horizon tilts and the picture shears against a head that
+        //    the runtime was told made a clean yaw.
+        float sum[3] = { base[0] + head[0], base[1] + head[1], base[2] + head[2] };
+        float fS[3], rS[3], uS[3];
+        AngleVectors(sum, fS, rS, uS);
+
+        float agreement;
+        Dot3(uS, uB, agreement);
+        CHECK(agreement < 0.999f);   // the up axis moved, and it should not have
+
+        Dot3(fS, fO, agreement);
+        CHECK(agreement < 0.9999f);  // and so did where the eyes are pointed
+
+        // ... and with a level base camera the two agree exactly, which is why this went
+        // unnoticed for as long as it did: on a flat demo camera addition is composition.
+        const float level[3] = { 0.0f, 50.0f, 0.0f };
+        float composed[3];
+        ComposeSourceAngles(level, head, composed);
+        CHECK_NEAR(NormalizeDegrees(composed[0] - 0.0f), 0.0, 2e-3);
+        CHECK_NEAR(NormalizeDegrees(composed[1] - (level[1] + theta)), 0.0, 2e-3);
+        CHECK_NEAR(NormalizeDegrees(composed[2] - 0.0f), 0.0, 2e-3);
+    }
+
+    // 6. A base of pure yaw is the mode this project ships: whatever the head does, the
+    //    answer is the head's own angles with the base yaw added. Worth pinning, because
+    //    it is the claim that makes the cheap path and the general path interchangeable.
+    {
+        const float heads[][3] = {
+            { 25, 10, 0 }, { -40, -150, 7 }, { 0, 0, 33 }, { 70, 95, -20 },
+        };
+        for (int i = 0; i < 4; i++) {
+            const float base[3] = { 0.0f, 123.0f, 0.0f };
+            float out[3];
+            ComposeSourceAngles(base, heads[i], out);
+            CHECK_NEAR(NormalizeDegrees(out[0] - heads[i][0]), 0.0, 2e-3);
+            CHECK_NEAR(NormalizeDegrees(out[1] - (heads[i][1] + base[1])), 0.0, 2e-3);
+            CHECK_NEAR(NormalizeDegrees(out[2] - heads[i][2]), 0.0, 2e-3);
+        }
+    }
+
+    // 7. Straight up and straight down do not produce NaN, and the matrix they build is
+    //    still the right one even though the angles that describe it are not unique.
+    {
+        const float poles[][3] = { { 90, 40, 0 }, { -90, -75, 25 } };
+        for (int i = 0; i < 2; i++) {
+            float m[9], out[3], m2[9];
+            SourceAnglesToRotation(poles[i], m);
+            RotationToSourceAngles(m, out);
+            CHECK(out[0] == out[0] && out[1] == out[1] && out[2] == out[2]);
+            SourceAnglesToRotation(out, m2);
+            for (int k = 0; k < 9; k++) CHECK_NEAR(m2[k], m[k], 2e-4);
+        }
     }
 }

@@ -70,7 +70,7 @@ index cea3626..ad2a751 100644
          }
      }
 diff --git a/AfxHookSource2/RenderSystemDX11Hooks.cpp b/AfxHookSource2/RenderSystemDX11Hooks.cpp
-index 73b7c00..eec70b0 100644
+index 73b7c00..4bbaffa 100644
 --- a/AfxHookSource2/RenderSystemDX11Hooks.cpp
 +++ b/AfxHookSource2/RenderSystemDX11Hooks.cpp
 @@ -8,6 +8,8 @@
@@ -193,7 +193,7 @@ index 73b7c00..eec70b0 100644
          auto it = m_RecordingExtraPassesIterator;
          while(it != m_RecordingExtraPasses.end()) {
              it->EngineThread_BeginFrame();
-@@ -3041,6 +3114,24 @@ public:
+@@ -3041,6 +3114,36 @@ public:
      }    
  
      void EngineThread_BeginMainRenderPass() {
@@ -209,6 +209,18 @@ index 73b7c00..eec70b0 100644
 +        // layer carries, so hand it over at BeforePresent - after the UI, deliberately.
 +        if (MirvVrXr_WantsPanel()) {
 +            auto & pMainPassCommands = g_RenderCommands.EngineThread_GetCommands();
++
++            // cs2-vr-spectator: between the world and the UI. Wiping the finished world
++            // out of the back buffer here leaves the HUD drawing onto transparent black,
++            // so the quad carries a HUD and not a second copy of the world hung in front
++            // of the world. The monitor shows that same HUD-on-black while it is on.
++            if (MirvVrXr_WantsPanelClear()) {
++                pMainPassCommands.BeforeUi.Push(
++                    [](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
++                        MirvVrXr_RenderThread_ClearForPanel(pDeviceContext, pTexture);
++                    });
++            }
++
 +            pMainPassCommands.BeforePresent.Push(
 +                [](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
 +                    MirvVrXr_RenderThread_SubmitPanel(pDeviceContext, pTexture);
@@ -218,7 +230,7 @@ index 73b7c00..eec70b0 100644
          for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
              it->EngineThread_BeginFrame();
          }
-@@ -3563,6 +3654,10 @@ private:
+@@ -3563,6 +3666,10 @@ private:
      std::multiset<CStream,RenderPassCompare> m_RecordingExtraPasses;
      std::multiset<CStream,RenderPassCompare>::iterator m_RecordingExtraPassesIterator;
  
@@ -230,7 +242,7 @@ index 73b7c00..eec70b0 100644
  
      bool m_Shutdown = false;
 diff --git a/AfxHookSource2/main.cpp b/AfxHookSource2/main.cpp
-index efbea01..9b229ae 100644
+index efbea01..9e6e7cb 100644
 --- a/AfxHookSource2/main.cpp
 +++ b/AfxHookSource2/main.cpp
 @@ -21,6 +21,7 @@
@@ -253,19 +265,24 @@ index efbea01..9b229ae 100644
  	int width = *pWidth;
  	int height = *pHeight;
  	float Tx = pViewOrigin[0];
-@@ -745,6 +751,11 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
+@@ -745,6 +751,16 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
  		}		
  	}
  
 +	// cs2-vr-spectator: this is the base pose the eyes are offsets from. The eyes
 +	// themselves are applied by the pass loop, not here - this function runs once per
 +	// frame and cannot distinguish the passes.
-+	AfxVr_AfterViewSetup(ThisCViewSetup, Tx, Ty, Tz, Rx, Ry, Rz, Fov);
++	if (AfxVr_AfterViewSetup(ThisCViewSetup, Tx, Ty, Tz, Rx, Ry, Rz, Fov)) {
++		// It wrote the head back through those. Everything that reads the camera once
++		// a frame - the audio listener, the world-to-screen matrix, culling - reads it
++		// from here, and saw only the demo camera while the head lived between passes.
++		originOrAnglesOverriden = true;
++	}
 +
  	if (g_S2CamIO.GetCamExport())
  	{
  		CamIO::CamData camData;
-@@ -978,6 +989,28 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
+@@ -978,6 +994,28 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
  	g_WorldToScreenMatrix.m[3][2] = proj[4*3+2];
  	g_WorldToScreenMatrix.m[3][3] = proj[4*3+3];
  

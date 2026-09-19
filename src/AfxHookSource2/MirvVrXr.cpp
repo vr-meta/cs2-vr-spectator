@@ -421,12 +421,36 @@ bool g_FovMutableKnown = false;
 // follows the eyes cannot be looked away from, and looking away from the menu is most of
 // what a viewer does. It is placed in front of wherever the viewer was when it was turned
 // on, and stays there until it is placed again.
+//
+// And it carries the HUD alone, not the main pass entire. The main pass has the finished
+// world in it as well, so an opaque quad of it hangs a second copy of the world in front
+// of the world - 48 degrees of it at the default size and distance. So the back buffer is
+// wiped to transparent black between the world and the UI, the HUD draws onto nothing, and
+// the quad is composited with source alpha.
 bool g_PanelEnabled = false;
+bool g_PanelTransparent = true;
 bool g_PanelCopied = false;
 bool g_PanelPlaced = false;
 XrPosef g_PanelPose = {};
 float g_PanelWidthMetres = 1.6f;
 float g_PanelDistanceMetres = 1.8f;
+
+// The render target view used for that wipe. The game's back buffer is TYPELESS, so a
+// view has to name a concrete format; it is cached because a view per frame would be a
+// device object allocated and destroyed forty times a second. Keyed on the texture, which
+// is how a resize or a session restart invalidates it without anyone having to remember.
+ID3D11Texture2D * g_PanelClearFor = nullptr;
+ID3D11RenderTargetView * g_PanelClearRtv = nullptr;
+
+// Frames of alpha reporting still owed, from mirv_vr_panel alpha.
+//
+// Whether any of this works comes down to one thing nobody knows: what Panorama writes to
+// the alpha channel. Blending source-over onto a zeroed target gives premultiplied colour
+// either way, but the alpha it leaves behind is the blend state's business. If alpha is
+// write-masked it stays at zero, the runtime multiplies the panel by nothing, and the
+// panel is invisible - which looks exactly like "the feature does not work". So it is
+// measured rather than hoped for, and measured at a desk with no headset.
+int g_PanelAlphaProbe = 0;
 
 PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
 
@@ -1296,7 +1320,10 @@ bool MirvVrXr_CaptureBeforeUi() {
 }
 
 bool MirvVrXr_WantsPanel() {
-    return g_PanelEnabled && g_SessionRunning;
+    // Deliberately not gated on a session. The callbacks it queues each gate themselves,
+    // and the alpha probe - the one thing that answers whether a transparent panel can
+    // work at all - has to run at a desk with no headset in the building.
+    return g_PanelEnabled;
 }
 
 bool MirvVrXr_WantsPasses() {
@@ -1612,6 +1639,21 @@ void MirvVrXr_EngineThread_Frame() {
         AfxVr_SetEye(pass + 1, true, right, forward, up, dPitch, dYaw, dRoll, fovDegrees);
     }
 
+    // And the head itself, once, for everything that reads the camera once a frame
+    // rather than once a pass: the audio listener, the client's world-to-screen matrix,
+    // culling. Those never saw the viewer at all while the head lived only between
+    // passes, which is why the sound stayed where the demo camera was.
+    //
+    // `base` carries views[0]'s orientation and the midpoint of the two positions. Both
+    // eyes share an orientation while frustum centring is off, and centring is off.
+    {
+        float hPitch, hYaw, hRoll;
+        XrQuatToSourceAngles(base.orientation, hPitch, hYaw, hRoll);
+        if (0 == g_RollMode) hRoll = 0.0f;
+        else if (g_RollMode < 0) hRoll = -hRoll;
+        AfxVr_SetHead(true, hPitch, hYaw, hRoll, EffectiveFovDegrees(views[0].fov));
+    }
+
     // What the projection layer reports has to be what was rendered, so publish the
     // orientations actually used rather than the raw ones.
     {
@@ -1621,8 +1663,147 @@ void MirvVrXr_EngineThread_Frame() {
     }
 }
 
+// A concrete format to view a back buffer through. The game's is R8G8B8A8_TYPELESS, which
+// no view can name.
+static DXGI_FORMAT TypedFormatFor(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    default: return format;
+    }
+}
+
+void MirvVrXr_ReleasePanelClearView() {
+    if (g_PanelClearRtv) { g_PanelClearRtv->Release(); g_PanelClearRtv = nullptr; }
+    g_PanelClearFor = nullptr;
+}
+
+bool MirvVrXr_WantsPanelClear() {
+    return g_PanelEnabled && g_PanelTransparent;
+}
+
+void MirvVrXr_RenderThread_ClearForPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
+    if (!MirvVrXr_WantsPanelClear() || !pContext || !pTexture) return;
+
+    if (pTexture != g_PanelClearFor) {
+        MirvVrXr_ReleasePanelClearView();
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        pTexture->GetDesc(&desc);
+        if (0 == (desc.BindFlags & D3D11_BIND_RENDER_TARGET)) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                advancedfx::Warning("AFXVR: the back buffer is not bindable as a render target; "
+                    "the panel cannot be made transparent. Use mirv_vr_panel opaque.\n");
+            }
+            return;
+        }
+
+        ID3D11Device * pDevice = nullptr;
+        pTexture->GetDevice(&pDevice);
+        if (!pDevice) return;
+
+        D3D11_RENDER_TARGET_VIEW_DESC rtv = {};
+        rtv.Format = TypedFormatFor(desc.Format);
+        rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        rtv.Texture2D.MipSlice = 0;
+
+        HRESULT hr = pDevice->CreateRenderTargetView(pTexture, &rtv, &g_PanelClearRtv);
+        pDevice->Release();
+
+        if (FAILED(hr) || !g_PanelClearRtv) {
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                advancedfx::Warning("AFXVR: CreateRenderTargetView for the panel failed (0x%08x).\n",
+                    (unsigned)hr);
+            }
+            g_PanelClearRtv = nullptr;
+            return;
+        }
+        g_PanelClearFor = pTexture;
+    }
+
+    if (!g_PanelClearRtv) return;
+
+    // Transparent black. Every pixel the HUD does not touch stays exactly this, which is
+    // what the runtime needs in order to composite the panel away to nothing.
+    const float nothing[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    pContext->ClearRenderTargetView(g_PanelClearRtv, nothing);
+}
+
+// What did Panorama actually leave in the alpha channel? Copies the finished main pass
+// into a staging texture and counts. Needs neither a headset nor a session - run it with
+// mirv_vr_xr passes 2 and mirv_vr_panel on from a desk.
+static void ProbePanelAlpha(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
+    D3D11_TEXTURE2D_DESC desc = {};
+    pTexture->GetDesc(&desc);
+
+    ID3D11Device * pDevice = nullptr;
+    pTexture->GetDevice(&pDevice);
+    if (!pDevice) return;
+
+    D3D11_TEXTURE2D_DESC staging = desc;
+    staging.Usage = D3D11_USAGE_STAGING;
+    staging.BindFlags = 0;
+    staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    staging.MiscFlags = 0;
+
+    ID3D11Texture2D * pStaging = nullptr;
+    HRESULT hr = pDevice->CreateTexture2D(&staging, nullptr, &pStaging);
+    pDevice->Release();
+    if (FAILED(hr) || !pStaging) {
+        advancedfx::Warning("mirv_vr_panel alpha: CreateTexture2D failed (0x%08x).\n", (unsigned)hr);
+        return;
+    }
+
+    pContext->CopyResource(pStaging, pTexture);
+
+    D3D11_MAPPED_SUBRESOURCE map = {};
+    if (SUCCEEDED(pContext->Map(pStaging, 0, D3D11_MAP_READ, 0, &map))) {
+        // Alpha is the fourth byte in both RGBA and BGRA, which is the only thing about
+        // the layout this needs to be right about.
+        size_t opaque = 0, clear = 0, partial = 0, colourNoAlpha = 0, total = 0;
+        for (UINT y = 0; y < desc.Height; y++) {
+            const unsigned char * row = (const unsigned char*)map.pData + (size_t)y * map.RowPitch;
+            for (UINT x = 0; x < desc.Width; x++) {
+                const unsigned char * px = row + (size_t)x * 4;
+                unsigned char a = px[3];
+                bool lit = (px[0] | px[1] | px[2]) != 0;
+                if (0 == a) { clear++; if (lit) colourNoAlpha++; }
+                else if (255 == a) opaque++;
+                else partial++;
+                total++;
+            }
+        }
+        pContext->Unmap(pStaging, 0);
+
+        double n = total ? (double)total : 1.0;
+        advancedfx::Message(
+            "mirv_vr_panel alpha: %ux%u, alpha 0 %.2f%%, alpha 255 %.2f%%, in between %.2f%%\n"
+            "  pixels with colour but no alpha: %.3f%%  <- if this is large the alpha channel is\n"
+            "  write-masked and the panel will be invisible; if it is about zero the panel works.\n",
+            desc.Width, desc.Height,
+            100.0 * clear / n, 100.0 * opaque / n, 100.0 * partial / n,
+            100.0 * colourNoAlpha / n);
+    } else {
+        advancedfx::Warning("mirv_vr_panel alpha: Map failed.\n");
+    }
+
+    pStaging->Release();
+}
+
 void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
     if (!g_PanelEnabled || !pContext || !pTexture) return;
+
+    // Before the session gate: the whole value of the probe is that it answers the
+    // question without a headset.
+    if (g_PanelAlphaProbe > 0) {
+        g_PanelAlphaProbe--;
+        ProbePanelAlpha(pContext, pTexture);
+    }
+
     if (!g_SessionRunning) return;
     if (XR_NULL_HANDLE == g_Swapchain[kPanelSwapchain]) return; // first frame, not made yet
 
@@ -1876,6 +2057,13 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         // The panel goes on top of the world, so it comes second: the runtime composites
         // layers in the order given.
         XrCompositionLayerQuad panel = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        // The HUD was drawn source-over onto a zeroed target, so its colour is already
+        // premultiplied by its alpha. Which is why UNPREMULTIPLIED is deliberately not set:
+        // that would ask the runtime to divide the colour by the alpha a second time and
+        // the edge of every glyph would bloom.
+        panel.layerFlags = g_PanelTransparent
+            ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT
+            : 0;
         panel.space = g_Space;
         panel.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
         panel.pose = g_PanelPose;
@@ -1952,7 +2140,7 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         const char * arg1 = args->ArgV(1);
         if (!_stricmp(arg1, "info"))    { MirvVrXr_Start(); return; }
         if (!_stricmp(arg1, "start"))   { MirvVrXr_SessionStart(); return; }
-        if (!_stricmp(arg1, "stop"))    { MirvVrXr_SessionStop(); AfxVr_SetEye(1,false,0,0,0,0,0,0,0); AfxVr_SetEye(2,false,0,0,0,0,0,0,0); advancedfx::Message("AFXVR: session stopped.\n"); return; }
+        if (!_stricmp(arg1, "stop"))    { MirvVrXr_SessionStop(); AfxVr_SetEye(1,false,0,0,0,0,0,0,0); AfxVr_SetEye(2,false,0,0,0,0,0,0,0); AfxVr_SetHead(false,0,0,0,0); advancedfx::Message("AFXVR: session stopped.\n"); return; }
         if (!_stricmp(arg1, "quit"))    { MirvVrXr_Stop(); advancedfx::Message("AFXVR: disconnected.\n"); return; }
         if (!_stricmp(arg1, "mono")) {
             g_Monoscopic = (3 <= args->ArgC()) ? (0 != atoi(args->ArgV(2))) : !g_Monoscopic;
@@ -2253,6 +2441,10 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
         }
         if (!_stricmp(arg1, "off") || !_stricmp(arg1, "0")) {
             g_PanelEnabled = false;
+            // Let go of the back buffer. Keeping a view on it across a resize would stop
+            // the swap chain resizing at all, and "off" is the moment there is no reason
+            // to hold it.
+            MirvVrXr_ReleasePanelClearView();
             advancedfx::Message("mirv_vr_panel: off.\n");
             return;
         }
@@ -2266,6 +2458,29 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
             }
             return;
         }
+        if (!_stricmp(arg1, "transparent") || !_stricmp(arg1, "opaque")) {
+            g_PanelTransparent = (0 == _stricmp(arg1, "transparent"));
+            if (!g_PanelTransparent) MirvVrXr_ReleasePanelClearView();
+            advancedfx::Message(
+                "mirv_vr_panel: %s.\n",
+                g_PanelTransparent
+                    ? "transparent - the HUD alone, on nothing"
+                    : "opaque - the whole main pass, world included");
+            return;
+        }
+
+        if (!_stricmp(arg1, "alpha")) {
+            int frames = (3 <= argc) ? atoi(args->ArgV(2)) : 1;
+            if (frames < 1) frames = 1;
+            if (frames > 30) frames = 30;
+            g_PanelAlphaProbe = frames;
+            advancedfx::Message(
+                "mirv_vr_panel: reading the alpha channel of the next %i main pass(es).\n"
+                "  Needs the panel on; needs no session and no headset.\n",
+                frames);
+            return;
+        }
+
         if (!_stricmp(arg1, "size") && 3 <= argc) {
             g_PanelWidthMetres = (float)atof(args->ArgV(2));
             if (g_PanelWidthMetres < 0.1f) g_PanelWidthMetres = 0.1f;
@@ -2288,6 +2503,9 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
         "mirv_vr_panel place       - put it in front of where you are looking now.\n"
         "mirv_vr_panel size <m>    - how wide, in metres.\n"
         "mirv_vr_panel distance <m>- how far away the next 'place' puts it.\n"
+        "mirv_vr_panel transparent - carry the HUD alone, on nothing. The default.\n"
+        "mirv_vr_panel opaque      - carry the whole main pass, world and all.\n"
+        "mirv_vr_panel alpha [n]   - read back what the HUD left in the alpha channel.\n"
         "\n"
         "The timeline, the scoreboard and the speed controls are a flat overlay the game\n"
         "draws at screen depth. Copied into each eye, that is doubled, at the wrong\n"
@@ -2301,7 +2519,7 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
         "away from, and looking away from the menu is most of what a viewer does.\n"
         "\n"
         "Current: %s, %.2f m wide, placed %s. Session %s.\n",
-        g_PanelEnabled ? "on" : "off",
+        g_PanelEnabled ? (g_PanelTransparent ? "on, transparent" : "on, opaque") : "off",
         g_PanelWidthMetres,
         g_PanelPlaced ? "yes" : "not yet",
         g_SessionRunning ? "running" : "not running");

@@ -24,9 +24,29 @@ extern int g_AfxVrLogUntilFrame;
 void AfxVr_BeforeViewSetupRead(void * pViewStruct);
 
 // Called from the view setup trampoline once the camera for the frame has settled. This
-// is the base pose the eyes are offsets from.
-void AfxVr_AfterViewSetup(void * pViewStruct, float tx, float ty, float tz,
-                          float rx, float ry, float rz, float fov);
+// is the base pose the eyes are offsets from - recorded before anything is added to it,
+// so nothing accumulates frame over frame.
+//
+// It also writes the HEAD back through its arguments, and returns true when it did, so
+// the trampoline's own write-back carries it into the view struct.
+//
+// That second job is not decoration. Everything the viewer adds - head orientation, the
+// yaw offset, the stick's movement - used to be applied only between passes, and
+// AfxVr_BeforeViewSetupRead puts the base camera back before the engine's next read. So
+// every consumer that derives from the camera once per FRAME rather than once per pass
+// still saw the demo camera and not the viewer: the audio listener above all, which is
+// why sound did not turn with the head or move with the stick, and also the client's
+// world-to-screen matrix, and whatever culling does. The image was the only thing that
+// ever saw the head.
+//
+// The eyes stay per-pass. Only the head - the midpoint, with no interpupillary offset -
+// belongs here.
+bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz,
+                          float & rx, float & ry, float & rz, float & fov);
+
+// The head pose, as opposed to either eye: the same orientation both eyes render with,
+// and no interpupillary offset. Driven from xrLocateViews alongside AfxVr_SetEye.
+void AfxVr_SetHead(bool enabled, float dPitch, float dYaw, float dRoll, float fov);
 
 // Called from the render pass loop, before the given pass renders.
 void AfxVr_OnBeginRenderPass(int passIndex);
