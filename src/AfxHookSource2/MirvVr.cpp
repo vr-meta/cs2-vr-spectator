@@ -96,6 +96,20 @@ Head g_Head;
 // One printed float settles it. 90 means the field is untouched since the trampoline.
 int g_RawFovProbe = 0;
 
+// What was in the fov field when this frame's passes began, before anything of ours was
+// written over it.
+//
+// A pass with no eye assigned has to put back what the engine intended, and g_BaseFov is
+// not that: it is the number the trampoline read, in Source's 4:3 convention, and by pass
+// time the engine has rescaled the field in place for the window's aspect (experiment 18).
+// Writing the trampoline's number into the pass's field narrows the main pass by the
+// aspect ratio - on this portrait buffer, visibly.
+//
+// So the field's own value is kept and handed back, which needs no convention at all.
+float g_PassEntryFov = 0.0f;
+bool g_HavePassEntryFov = false;
+
+
 bool g_FreeLook = false;
 
 // How much of the demo camera's own orientation the headset sits on top of, when free
@@ -363,6 +377,16 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     if (nullptr == g_ViewStruct) return;
     if (passIndex < 0 || passIndex > 3) return;
 
+    // What the engine left in the fov field for this frame's passes. Captured before
+    // anything of ours is written over it, and handed back to any pass that has no eye.
+    if (0 == passIndex) {
+        float raw = *(float*)((unsigned char*)g_ViewStruct + AFXVR_OFS_FOV);
+        if (raw > 1.0f && raw < 179.0f) {
+            g_PassEntryFov = raw;
+            g_HavePassEntryFov = true;
+        }
+    }
+
     // Before anything is written, and before the early returns, because the whole point is
     // to see what the engine left there.
     if (0 < g_RawFovProbe && 0 == passIndex) {
@@ -395,8 +419,10 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
         // rendering with the previous frame's last eye offset.
         pOrigin[0] = g_BaseOrigin[0]; pOrigin[1] = g_BaseOrigin[1]; pOrigin[2] = g_BaseOrigin[2];
         pAngles[0] = g_BaseAngles[0]; pAngles[1] = g_BaseAngles[1]; pAngles[2] = g_BaseAngles[2];
-        *pFov = g_BaseFov;
-        RememberWritten(g_BaseOrigin, g_BaseAngles, g_BaseFov);
+        // The field's own value, not the trampoline's: the two are in different
+        // conventions. See g_PassEntryFov.
+        *pFov = g_HavePassEntryFov ? g_PassEntryFov : g_BaseFov;
+        RememberWritten(g_BaseOrigin, g_BaseAngles, *pFov);
         return;
     }
 
@@ -423,7 +449,9 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     pAngles[1] = angles[1];
     pAngles[2] = angles[2];
 
-    *pFov = (0.0f < eye.fov) ? eye.fov : g_BaseFov;
+    // "No fov of its own" means the engine's, as the engine left it for this pass.
+    *pFov = (0.0f < eye.fov) ? eye.fov
+                             : (g_HavePassEntryFov ? g_PassEntryFov : g_BaseFov);
 
     g_Dirty = true;
 

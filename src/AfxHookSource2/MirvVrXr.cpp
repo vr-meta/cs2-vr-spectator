@@ -340,11 +340,17 @@ bool g_PrevRecenter = false, g_PrevFreeLook = false, g_PrevReset = false, g_Prev
 bool g_PrevNext = false, g_PrevPrev = false, g_PrevMode = false;
 bool g_PrevSlowMo = false, g_PrevSeekForward = false, g_PrevSeekBack = false;
 
-// What the triggers are for. Seeking was the original answer - it is what a spectator
-// reaches for - but the field of view has to be found by someone wearing the headset, and
-// a dial you have to take the headset off to turn is not a dial. Seeking is on the
-// keyboard meanwhile; mirv_vr_triggers puts it back.
-bool g_TriggersTuneFov = true;
+// What the triggers are for.
+//
+// Switching who you are watching is the most frequent thing a spectator does, and it
+// belongs under the index fingers; seeking is rare and tolerates face buttons. That is the
+// operator's own conclusion after a session with it the other way round.
+//
+// "fov" is the third mode, and a measuring instrument rather than a control: it was how
+// the field-of-view convention got settled (experiment 18). Kept because the same dial is
+// the right way to re-check it after any change to the crop or the window shape.
+enum TriggerMode { kTriggersPlayers = 0, kTriggersSeek = 1, kTriggersFov = 2 };
+int g_TriggerMode = kTriggersPlayers;
 
 // Frames until the held trigger steps again. One press is one per cent, which is too fine
 // to travel fifteen on, so holding repeats - slowly enough to stop where you meant to.
@@ -535,7 +541,14 @@ PanelRegion g_PanelRegions[] = {
     { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   30.0f, -18.0f, 26.0f, 1.6f, true  },
     // Low and central, like a dashboard. It is also what a controller ray will click one
     // day, so close and below the line of sight is right.
-    { "bar",     0.00f, 0.93f, 1.00f, 1.00f,    0.0f, -32.0f, 54.0f, 1.4f, true  },
+    //
+    // It starts at 0.82 rather than at the timeline's own 0.93 because the bar naming the
+    // player being watched - their name, health, money and weapon - sits just above it,
+    // and it was missing from the capture the rects were measured on: that frame was a
+    // freeze with no spectated target, so the strip did not exist to be measured. Without
+    // it the viewer cannot see who they are watching, which is exactly what was needed to
+    // tell whether the switch-player button had done anything.
+    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -32.0f, 54.0f, 1.4f, true  },
     // Off, and NOT measured: there were no kills on screen when the sheet was captured, so
     // this rect is a guess at where the feed appears. Turn it on with mirv_vr_panel region
     // killfeed on and correct it with mirv_vr_panel rect.
@@ -860,13 +873,22 @@ float g_ReportedFovOverrideDegrees = 0.0f;
 // almost right; Meta's runtime reports the true 61 mm and the two eyes stop fusing.
 //
 // So: given the frustum we actually want, work out what to ask Source for.
-// ON. Confirmed against the engine's own projection matrix rather than assumed: at fov 90
-// on a 16:9 window the hook's probe reads proj[0][0] = 0.75 and proj[1][1] = 1.3333, which
-// is tan(halfX) = 1.3333 and tan(halfY) = 0.75 - exactly what "fov is horizontal at 4:3,
-// vertical derived, horizontal recomputed for the real aspect" predicts. On the 2528x2780
-// portrait buffer that turns a request for 108 degrees into about 86 rendered, which is
-// not even wide enough to cover the headset's 94.
-bool g_SourceAspectFix = true;
+//
+// OFF, and that is a measurement, not a preference. The 4:3 model above is correct for the
+// number the view-setup TRAMPOLINE reads and for the matrix the engine builds once a
+// frame - experiment 06 checked it against the engine's own projection matrix. It is
+// wrong for the field the per-pass write goes into, because by the time a pass runs the
+// engine has already rescaled that field in place for the window's aspect. Writing the
+// 4:3 number there scales it a second time.
+//
+// Found by putting the dial on the triggers and handing it to someone wearing the headset
+// (experiment 18). They converged on asking for 0.853 of what the aspect fix wanted;
+// 108/127.3 = 0.848, which is inside one step of the dial. Three rounds of reading
+// disassembly had not settled it.
+//
+// The function stays, because it is still the right arithmetic for anything written at the
+// trampoline, should that ever be wanted again.
+bool g_SourceAspectFix = false;
 
 // A multiplier on the angle handed to the ENGINE, and on nothing else.
 //
@@ -1127,24 +1149,31 @@ void PrintControls() {
         "Controllers\n"
         "  left hand -- who you are watching, and where you are standing\n"
         "    stick            walk, in the direction you are looking\n"
-        "    stick click      back onto the player\n"
-        "    trigger          seek back %.0f s\n"
+        "    stick click      next camera mode: first person, chase, free\n"
+        "    trigger          %s\n"
         "    grip             free look on / off  (currently %s)\n"
-        "    X                previous player\n"
-        "    Y                next player\n"
+        "    X                back %.0f s\n"
+        "    Y                forward %.0f s\n"
         "  right hand -- how time runs, and where the camera points\n"
         "    stick            turn%s, and rise or descend\n"
         "    stick click      recentre\n"
-        "    trigger          seek forward %.0f s\n"
-        "    grip             next camera mode\n"
+        "    trigger          %s\n"
+        "    grip             back onto the player\n"
         "    A                pause / resume\n"
         "    B                slow motion / normal speed  (currently %s)\n"
         "\n"
+        "What the triggers do is mirv_vr_triggers: players, seek or fov.\n"
         "Speeds and feel: mirv_vr_speed, mirv_vr_turn, mirv_vr_stick, mirv_vr_seek.\n",
-        g_SeekSeconds,
+        (kTriggersPlayers == g_TriggerMode) ? "previous player"
+      : (kTriggersSeek    == g_TriggerMode) ? "seek back"
+                                            : "narrow the view",
         AfxVr_GetFreeLook() ? "on" : "off",
-        (0.0f < g_SnapTurnDegrees) ? " (snaps)" : " (smoothly)",
         g_SeekSeconds,
+        g_SeekSeconds,
+        (0.0f < g_SnapTurnDegrees) ? " (snaps)" : " (smoothly)",
+        (kTriggersPlayers == g_TriggerMode) ? "next player"
+      : (kTriggersSeek    == g_TriggerMode) ? "seek forward"
+                                            : "widen the view",
         g_SlowMotion ? "slow" : "normal");
 }
 
@@ -1296,8 +1325,17 @@ void ProcessInput() {
     if (b && !g_PrevRecenter) AfxVr_Recenter();
     g_PrevRecenter = b;
 
+    // The demo's own camera cycle - first person, chase, free - on the left stick click.
+    // It was on the right grip, where nobody found it: the operator's words were "I do not
+    // understand how to switch the camera type", and while the base camera was frozen it
+    // also did nothing visible, so it never got learned.
+    //
+    // Same two companions as switching players: end HLAE's free camera first, or the cycle
+    // changes a view that is not being shown; and put the viewer back on the camera,
+    // because entering first person from wherever the sticks had wandered does not look
+    // like first person.
     b = GetPressed(g_ResetAction);
-    if (b && !g_PrevReset) AfxVr_ResetMove();
+    if (b && !g_PrevReset) { QueueCommand("mirv_input end", 0); QueueTap("jump"); AfxVr_ResetMove(); }
     g_PrevReset = b;
 
     b = GetPressed(g_PauseAction);
@@ -1313,30 +1351,36 @@ void ProcessInput() {
     }
     g_PrevSlowMo = b;
 
-    // Switching players puts the viewer back on that player rather than wherever the
-    // sticks had wandered to - otherwise you follow someone from across the map.
-    //
-    // And it ends HLAE's free camera first. With that camera active it owns the view
-    // entirely, so "next player" changes who the demo is following and the picture does
-    // not move at all - which, with a headset on and no console in sight, is
-    // indistinguishable from the button being broken. Somebody pressing "next player" is
-    // asking to look at a player; the free camera is two presses away again.
-    b = GetPressed(g_NextAction);
-    if (b && !g_PrevNext) { QueueCommand("mirv_input end", 0); QueueTap("attack"); AfxVr_ResetMove(); }
+    // X and Y move through the demo. They swapped jobs with the triggers: seeking is rare
+    // and a face button is fine for it.
+    b = GetPressed(g_NextAction);       // Y
+    if (b && !g_PrevNext) QueueSeek(+g_SeekSeconds);
     g_PrevNext = b;
 
-    b = GetPressed(g_PrevAction);
-    if (b && !g_PrevPrev) { QueueCommand("mirv_input end", 0); QueueTap("attack2"); AfxVr_ResetMove(); }
+    b = GetPressed(g_PrevAction);       // X
+    if (b && !g_PrevPrev) QueueSeek(-g_SeekSeconds);
     g_PrevPrev = b;
 
-    b = GetPressed(g_ModeAction);
-    if (b && !g_PrevMode) QueueTap("jump"); // the demo's "next camera"
+    // Back onto whoever the demo is following, from wherever the sticks have taken you.
+    b = GetPressed(g_ModeAction);       // right grip
+    if (b && !g_PrevMode) AfxVr_ResetMove();
     g_PrevMode = b;
 
     bool forward = GetPressed(g_SeekForwardAction);
     bool back    = GetPressed(g_SeekBackAction);
 
-    if (g_TriggersTuneFov) {
+    if (kTriggersPlayers == g_TriggerMode) {
+        // Switching players puts the viewer back on that player rather than wherever the
+        // sticks had wandered to - otherwise you follow someone from across the map.
+        //
+        // And it ends HLAE's free camera first. With that camera active it owns the view
+        // entirely, so "next player" changes who the demo is following and the picture
+        // does not move at all - which, with a headset on and no console in sight, is
+        // indistinguishable from the button being broken. Somebody pressing "next player"
+        // is asking to look at a player; the free camera is one press away again.
+        if (forward && !g_PrevSeekForward) { QueueCommand("mirv_input end", 0); QueueTap("attack");  AfxVr_ResetMove(); }
+        if (back    && !g_PrevSeekBack)    { QueueCommand("mirv_input end", 0); QueueTap("attack2"); AfxVr_ResetMove(); }
+    } else if (kTriggersFov == g_TriggerMode) {
         // Right widens, left narrows: the same hands as "later" and "earlier", which is
         // the only mapping anyone guesses right with a headset on.
         int direction = 0;
@@ -1375,6 +1419,7 @@ void ProcessInput() {
         if (forward && !g_PrevSeekForward) QueueSeek(+g_SeekSeconds);
         if (back && !g_PrevSeekBack) QueueSeek(-g_SeekSeconds);
     }
+    if (kTriggersFov != g_TriggerMode) g_TriggerRepeat = 0;
 
     g_PrevSeekForward = forward;
     g_PrevSeekBack = back;
@@ -3151,36 +3196,43 @@ CON_COMMAND(mirv_vr_views, "cs2-vr-spectator: what the runtime actually reports 
 CON_COMMAND(mirv_vr_triggers, "cs2-vr-spectator: what the controller triggers do - tune the field of view, or seek.")
 {
     if (2 <= args->ArgC()) {
-        if (!_stricmp(args->ArgV(1), "fov"))  { g_TriggersTuneFov = true;  }
-        else if (!_stricmp(args->ArgV(1), "seek")) { g_TriggersTuneFov = false; }
+        if (!_stricmp(args->ArgV(1), "players")) g_TriggerMode = kTriggersPlayers;
+        else if (!_stricmp(args->ArgV(1), "seek")) g_TriggerMode = kTriggersSeek;
+        else if (!_stricmp(args->ArgV(1), "fov")) g_TriggerMode = kTriggersFov;
         else {
-            advancedfx::Warning("mirv_vr_triggers fov|seek\n");
+            advancedfx::Warning("mirv_vr_triggers players|seek|fov\n");
             return;
         }
         advancedfx::Message("mirv_vr_triggers: %s\n",
-            g_TriggersTuneFov
-                ? "right widens the view, left narrows it. Hold to repeat."
-                : "right seeks forward, left seeks back.");
+            (kTriggersPlayers == g_TriggerMode) ? "right is the next player, left the previous."
+          : (kTriggersSeek    == g_TriggerMode) ? "right seeks forward, left seeks back."
+                                                : "right widens the view, left narrows it. Hold to repeat.");
         return;
     }
 
     advancedfx::Message(
-        "mirv_vr_triggers fov|seek - what the two triggers are for.\n"
+        "mirv_vr_triggers players|seek|fov - what the two triggers are for.\n"
+        "\n"
+        "players: right is the next player, left the previous. The default, because it is\n"
+        "      the most frequent thing a spectator does and it belongs under the index\n"
+        "      fingers. X and Y seek instead.\n"
+        "\n"
+        "seek: right forward, left back. HOME and END also do it from the keyboard.\n"
         "\n"
         "fov:  right widens what the engine is asked to render, left narrows it, one per\n"
         "      cent a step, held to repeat. What the runtime is TOLD does not change, so\n"
         "      this is the one dial that is not invisible: it changes how much world goes\n"
         "      into the image while the frustum it is shown in stays honest.\n"
         "\n"
-        "      It is a measurement, not a preference. Look at a far corner, turn and nod,\n"
-        "      and stop when the corner stays nailed to the world. Ignore how big things\n"
-        "      look - the criterion is whether the world moves against your head.\n"
-        "\n"
-        "seek: the original, and what a spectator reaches for. HOME and END do it from the\n"
-        "      keyboard meanwhile.\n"
+        "      A measuring instrument, not a preference. Look at a far corner, turn and\n"
+        "      nod, and stop when the corner stays nailed to the world; ignore how big\n"
+        "      things look. It is how the convention was settled in the first place, and\n"
+        "      the right way to re-check it after any change to the crop or the window.\n"
         "\n"
         "Current: %s, ask scale %.3f.\n",
-        g_TriggersTuneFov ? "fov" : "seek", g_AskScale);
+        (kTriggersPlayers == g_TriggerMode) ? "players"
+      : (kTriggersSeek    == g_TriggerMode) ? "seek" : "fov",
+        g_AskScale);
 }
 
 CON_COMMAND(mirv_vr_askscale, "cs2-vr-spectator: the multiplier on the angle handed to the engine.")
@@ -3373,7 +3425,8 @@ CON_COMMAND(mirv_vr_reset, "cs2-vr-spectator: put every stereo setting back to i
     g_FovScale = 1.0f;
     g_FovVerticalOverrideDegrees = 0.0f;
     g_ReportedFovOverrideDegrees = 0.0f;
-    g_SourceAspectFix = true; // on: the engine does not render the angle it is handed
+    g_SourceAspectFix = false; // off: measured, experiment 18. The per-pass field is already
+                               // aspect-scaled by the engine; applying the 4:3 chain scales it twice.
     g_Calibrating = false;
 
     advancedfx::Message(
