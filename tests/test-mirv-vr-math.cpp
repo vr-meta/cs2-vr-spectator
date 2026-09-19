@@ -442,6 +442,7 @@ static void TestYawThenPitchQuat();
 static void TestRoomOffsetToWorld();
 static void TestRegionPlacementRoundTrip();
 static void TestRayQuadHit();
+static void TestDecideMode();
 
 static void RunTests() {
     TestAngleVectors();
@@ -462,6 +463,7 @@ static void RunTests() {
     TestRoomOffsetToWorld();
     TestRegionPlacementRoundTrip();
     TestRayQuadHit();
+    TestDecideMode();
 }
 
 CHECK_MAIN()
@@ -1086,6 +1088,119 @@ static void TestRayQuadHit() {
         CHECK_NEAR(NormalizeDegrees(az2 - az), 0.0f, 1e-3);
         CHECK_NEAR(el2, el, 1e-3);
         CHECK_NEAR(d2, dist, 1e-4);
+    }
+}
+
+// ---------------------------------------------------------------------------------
+
+static ModeInputs Inputs(bool session, bool map, bool demo, bool cursor, bool manual) {
+    ModeInputs in;
+    in.sessionRunning = session;
+    in.mapLoaded = map;
+    in.demoPlaying = demo;
+    in.cursorShowing = cursor;
+    in.manualSheet = manual;
+    return in;
+}
+
+static void TestDecideMode() {
+    check::Case("what the headset shows is a function of five facts, and only those");
+
+    // No session: nothing at all, whatever else is true. The hook runs with no headset
+    // in the building far more often than with one.
+    for (int i = 0; i < 16; i++) {
+        ModeResult r = DecideMode(Inputs(false, 0 != (i & 1), 0 != (i & 2), 0 != (i & 4), 0 != (i & 8)));
+        CHECK(kVrModeIdle == r.mode);
+        CHECK(!r.worldInEyes);
+        CHECK(!r.sheet);
+        CHECK(!r.pointer);
+    }
+
+    // No map: the game's own window IS the picture, so it is opaque, and the pointer is
+    // the only way to do anything at all.
+    {
+        ModeResult r = DecideMode(Inputs(true, false, false, false, false));
+        CHECK(kVrModeMenu == r.mode);
+        CHECK(!r.worldInEyes);
+        CHECK(r.sheet);
+        CHECK(r.sheetOpaque);
+        CHECK(r.pointer);
+    }
+
+    // A demo. Fly and scrub; no sheet unless something asks for one.
+    {
+        ModeResult r = DecideMode(Inputs(true, true, true, false, false));
+        CHECK(kVrModeWatch == r.mode);
+        CHECK(r.worldInEyes);
+        CHECK(!r.sheet);
+        CHECK(!r.pointer);
+        CHECK(!ModeTakesGameInput(r));   // a demo never takes walk and fire
+    }
+
+    // A map being played.
+    {
+        ModeResult r = DecideMode(Inputs(true, true, false, false, false));
+        CHECK(kVrModePlay == r.mode);
+        CHECK(r.worldInEyes);
+        CHECK(!r.sheet);
+        CHECK(ModeTakesGameInput(r));
+    }
+
+    // The cursor appearing is the signal that something wants pointing at - team select,
+    // the buy menu, pause, the scoreboard. Over a live world the sheet is TRANSPARENT, so
+    // the player keeps the world under the menu and stays oriented.
+    {
+        ModeResult r = DecideMode(Inputs(true, true, false, true, false));
+        CHECK(kVrModePlay == r.mode);
+        CHECK(r.worldInEyes);
+        CHECK(r.sheet);
+        CHECK(!r.sheetOpaque);
+        CHECK(r.pointer);
+        // And while it is up, the sticks must not also be walking and firing: an absolute
+        // pointer and a relative aim servo on one mouse fight, and the servo wins.
+        CHECK(!ModeTakesGameInput(r));
+    }
+
+    // The menu button does the same thing by hand, for anything the cursor does not cover.
+    {
+        ModeResult r = DecideMode(Inputs(true, true, false, false, true));
+        CHECK(r.sheet);
+        CHECK(!r.sheetOpaque);
+        CHECK(r.pointer);
+        CHECK(!ModeTakesGameInput(r));
+    }
+
+    // Same over a demo: point at the pause menu without leaving the recording.
+    {
+        ModeResult r = DecideMode(Inputs(true, true, true, true, false));
+        CHECK(kVrModeWatch == r.mode);
+        CHECK(r.worldInEyes);
+        CHECK(r.sheet);
+        CHECK(!r.sheetOpaque);
+        CHECK(r.pointer);
+    }
+
+    // With no map the sheet is opaque whatever the cursor or the button say - there is
+    // nothing behind it to keep.
+    for (int i = 0; i < 4; i++) {
+        ModeResult r = DecideMode(Inputs(true, false, false, 0 != (i & 1), 0 != (i & 2)));
+        CHECK(kVrModeMenu == r.mode);
+        CHECK(r.sheetOpaque);
+        CHECK(!r.worldInEyes);
+    }
+
+    // The demo flag never changes what is shown, only who the controls belong to. Worth
+    // pinning: "is there a map" and "is it a recording" are two questions, and answering
+    // the first with the second is the bug that kept VR out of a game against bots.
+    for (int i = 0; i < 4; i++) {
+        bool cursor = 0 != (i & 1), manual = 0 != (i & 2);
+        ModeResult watch = DecideMode(Inputs(true, true, true, cursor, manual));
+        ModeResult play  = DecideMode(Inputs(true, true, false, cursor, manual));
+        CHECK(watch.worldInEyes == play.worldInEyes);
+        CHECK(watch.sheet == play.sheet);
+        CHECK(watch.sheetOpaque == play.sheetOpaque);
+        CHECK(watch.pointer == play.pointer);
+        CHECK(watch.mode != play.mode);
     }
 }
 // ---------------------------------------------------------------------------------

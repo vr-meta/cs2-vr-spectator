@@ -599,5 +599,83 @@ inline bool RayQuadHit(const float rayOrigin[3], const float rayDirection[3],
     return true;
 }
 
+
+// ---------------------------------------------------------------------------------
+// What the headset is showing, and therefore what the controllers do
+// ---------------------------------------------------------------------------------
+
+enum VrMode {
+    kVrModeIdle  = 0,   // no session; nothing is being shown
+    kVrModeMenu  = 1,   // no map: the game's own window, on a screen
+    kVrModeWatch = 2,   // a demo: fly the camera, scrub, change who you watch
+    kVrModePlay  = 3    // a map being played: walk, aim, fire
+};
+
+struct ModeInputs {
+    bool sessionRunning;
+    bool mapLoaded;
+    bool demoPlaying;
+    // Panorama shows the system cursor exactly when it wants something pointed at: the
+    // main menu, team select, the buy menu, pause, settings, the scoreboard, the console.
+    // It hides it when the game owns the mouse. One cheap call, no offsets to go stale,
+    // and it is self-evidently the thing we mean by "there is something to click".
+    bool cursorShowing;
+    bool manualSheet;   // the menu button, held over whatever is loaded
+};
+
+struct ModeResult {
+    int mode;
+    bool worldInEyes;   // render the world into both eyes
+    bool sheet;         // put the whole window on a quad
+    bool sheetOpaque;   // and nothing behind it
+    bool pointer;       // the controller ray, and the mouse it drives
+};
+
+// Deliberately a function of its arguments and nothing else, with tests, because this
+// project has now had three faults in one day that were all the same fault: a mode decided
+// from the wrong signal, silently. The demo tick that is available at the main menu, the
+// level name that reads "<empty>" as a map, and a frame begun in one mode and ended in
+// another.
+inline ModeResult DecideMode(const ModeInputs & in) {
+    ModeResult out;
+    out.mode = kVrModeIdle;
+    out.worldInEyes = false;
+    out.sheet = false;
+    out.sheetOpaque = false;
+    out.pointer = false;
+
+    if (!in.sessionRunning) return out;
+
+    if (!in.mapLoaded) {
+        // Nothing behind the screen to see, so it is the picture rather than an overlay.
+        out.mode = kVrModeMenu;
+        out.sheet = true;
+        out.sheetOpaque = true;
+        out.pointer = true;
+        return out;
+    }
+
+    out.mode = in.demoPlaying ? kVrModeWatch : kVrModePlay;
+    out.worldInEyes = true;
+
+    // Over a live world the sheet is transparent: the main pass is already cleared before
+    // the UI, so the team picker or the buy menu floats over the world instead of
+    // replacing it. Keeping the world visible under a menu is both nicer and the only way
+    // the player stays oriented.
+    if (in.cursorShowing || in.manualSheet) {
+        out.sheet = true;
+        out.sheetOpaque = false;
+        out.pointer = true;
+    }
+    return out;
+}
+
+// While the pointer is driving the mouse, the game must not also be driven by sticks and
+// triggers: an absolute pointer and a relative aim servo on one device fight, and the
+// servo wins. This is the one place that decides it.
+inline bool ModeTakesGameInput(const ModeResult & mode) {
+    return (kVrModePlay == mode.mode) && !mode.pointer;
+}
+
 } // namespace AfxVrMath
 

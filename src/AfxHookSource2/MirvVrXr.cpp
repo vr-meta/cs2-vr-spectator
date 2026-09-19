@@ -32,6 +32,10 @@ extern ID3D11Device * g_pDevice;
 // hook does it.
 extern SOURCESDK::CS2::ISource2EngineToClient * g_pEngineToClient;
 
+// The game's swap chain, owned by RenderSystemDX11Hooks.cpp. Wanted for one thing only:
+// the window handle, so a hit on the sheet can be turned into a point in that window.
+extern IDXGISwapChain * g_pSwapChain;
+
 // 1 CS2 unit is 1 inch; OpenXR is in metres.
 static const float kUnitsPerMetre = 39.3700787f;
 
@@ -48,15 +52,22 @@ bool g_SessionRunning = false;
 // 0 and 1 are the eyes. 2 is the panel: the main pass's image, which still has the HUD and
 // the demo menu composited into it, carried as a flat quad in space rather than smeared
 // across both eyes at screen depth. See MirvVrXr_RenderThread_SubmitPanel.
-const int kSwapchainCount = 3;
+const int kSwapchainCount = 4;
 const int kPanelSwapchain = 2;
+// Eight pixels of solid white, for the pointer dot. Tiny and its own swapchain, because
+// pointing a quad at a corner of the sheet would draw whatever menu pixel happened to be
+// there.
+const int kCursorSwapchain = 3;
+const uint32_t kCursorTexels = 8;
 
 // Enough for the HUD groups the sheet is cut into, with room to add one.
 const int kMaxPanelQuads = 8;
 
-XrSwapchain g_Swapchain[kSwapchainCount] = { XR_NULL_HANDLE, XR_NULL_HANDLE, XR_NULL_HANDLE };
+XrSwapchain g_Swapchain[kSwapchainCount] = { XR_NULL_HANDLE, XR_NULL_HANDLE, XR_NULL_HANDLE, XR_NULL_HANDLE };
 std::vector<ID3D11Texture2D*> g_SwapchainImages[kSwapchainCount];
 uint32_t g_SwapchainWidth = 0, g_SwapchainHeight = 0;
+// What the swapchains were actually created as, for anything else that has to copy into
+// them - the cursor patch, which must be the same format or CopyResource refuses.
 DXGI_FORMAT g_SwapchainFormat = DXGI_FORMAT_UNKNOWN;
 
 // Filled by xrLocateViews on the render thread, consumed by the engine thread at the top
@@ -138,6 +149,37 @@ bool g_FrameWaited = false;
 // PAUSED demo still has a tick, so pausing does not throw the viewer back to a flat
 // screen; quitting to the menu does.
 bool g_MenuMode = false;
+
+// What the headset is showing and who the controllers belong to, decided once a frame by
+// AfxVrMath::DecideMode from five facts and nothing else. g_MenuMode above is kept as the
+// one thing the render thread reads without a lock: whether it owns the whole frame.
+AfxVrMath::ModeResult g_Mode = {};
+AfxVrMath::ModeInputs g_ModeInputs = {};
+
+// Panorama shows the system cursor exactly when it wants something pointed at. Debounced,
+// because the buy menu flickers it and a sheet that blinks in and out is worse than one
+// that is late.
+bool g_CursorShowing = false;
+ULONGLONG g_CursorChangedAt = 0;
+const ULONGLONG kCursorDebounceMs = 150;
+
+bool SystemCursorShowing() {
+    CURSORINFO info = {};
+    info.cbSize = sizeof(info);
+    if (!GetCursorInfo(&info)) return false;
+    return 0 != (info.flags & CURSOR_SHOWING);
+}
+
+
+// Whether the map under us is a recording or a game being played.
+//
+// Separate from g_MenuMode on purpose, because they answer different questions. "Is there
+// a map" decides whether the headset gets a world or a screen; "is it a demo" decides what
+// the HUD is. A demo has a timeline to scrub and a strip naming whoever is being watched;
+// a game against bots has neither, and has ammunition and health instead. Showing a
+// spectator timeline to somebody holding the gun is the kind of wrong that is worse than
+// showing nothing.
+bool g_PlayingDemo = false;
 bool g_MenuPlaced = false;
 XrPosef g_MenuPose = {};
 float g_MenuWidthDegrees = 70.0f;
@@ -330,6 +372,54 @@ XrActionSet g_ActionSet = XR_NULL_HANDLE;
 XrAction g_MoveAction = XR_NULL_HANDLE;
 XrAction g_TurnAction = XR_NULL_HANDLE;
 XrAction g_RecenterAction = XR_NULL_HANDLE;
+
+// Where each hand is pointing.
+//
+// One pose action with two subaction paths rather than two actions, because that is what
+// the runtime expects for a thing every hand has, and it keeps the binding list honest:
+// the same idea bound to /user/hand/left and /user/hand/right, not two ideas that happen
+// to look alike.
+//
+// "aim" and not "grip": grip is where the hand IS, aim is where the controller POINTS, and
+// the difference is about twenty degrees of wrist. Pointing at a menu with the grip pose
+// feels like aiming a torch held by its head.
+XrAction g_AimAction = XR_NULL_HANDLE;
+
+// The menu button on the left controller. The right one belongs to the runtime on this
+// hardware and never reaches an application.
+XrAction g_MenuButtonAction = XR_NULL_HANDLE;
+bool g_PrevMenuButton = false;
+ULONGLONG g_MenuButtonPressedAt = 0;
+
+// Show the game's own window on a screen even though a map is loaded, so the settings and
+// the pause menu are reachable without taking the headset off.
+bool g_MenuOverride = false;
+XrSpace g_AimSpace[2] = { XR_NULL_HANDLE, XR_NULL_HANDLE };   // 0 left, 1 right
+XrPath g_HandPath[2] = { XR_NULL_PATH, XR_NULL_PATH };
+
+// Located once a frame, on the engine thread, at the same instant as the views. Not read
+// from a global by the render thread later: a ray drawn from a different instant than the
+// quad it points at swims against it, which is the same fault as experiment 17 and would
+// look like the pointer lagging the hand.
+XrPosef g_AimPose[2] = {};
+bool g_AimValid[2] = { false, false };
+
+// Where the pointer last hit something, in the room. The render thread draws a dot there;
+// the engine thread is what decided it, because that is also where the mouse is moved
+// from and the two must not disagree.
+bool g_CursorHit = false;
+XrVector3f g_CursorPos = {};
+XrQuaternionf g_CursorOrientation = {};
+int g_CursorHand = -1;
+float g_CursorU = 0.0f, g_CursorV = 0.0f;
+
+// How big the dot is, in metres, and how far in front of the panel it floats so it is not
+// fighting the panel for the same depth.
+bool g_CursorPressed = false;
+
+float g_CursorSizeMetres = 0.016f;
+const float kCursorLiftMetres = 0.008f;
+
 XrAction g_FreeLookAction = XR_NULL_HANDLE;
 XrAction g_ResetAction = XR_NULL_HANDLE;
 XrAction g_PauseAction = XR_NULL_HANDLE;
@@ -485,6 +575,15 @@ void QueueKeyTap(unsigned short vk) {
     }
 }
 
+// One key held or released, rather than tapped. Walking needs this: a tap is a step.
+void QueueKeyState(unsigned short vk, bool down) {
+    std::lock_guard<std::mutex> lock(g_CmdMutex);
+    if (g_PendingKeys.size() < 24) {
+        PendingKey k = { vk, 0, down };
+        g_PendingKeys.push_back(k);
+    }
+}
+
 // Every number a hand touches, in one place and adjustable from the console. They were
 // all guesses to begin with and none of them was ever tried against an alternative; a
 // console variable is what makes trying one cost nothing.
@@ -518,6 +617,48 @@ AfxVrMath::SnapTurnState g_SnapTurn;
 float ShapeStick(float v) {
     return AfxVrMath::ApplyResponseCurve(AfxVrMath::ApplyDeadzone(v, g_StickDeadzone), g_StickCurve);
 }
+
+// Every key the controllers can hold DOWN, in one place.
+//
+// One place because of what happens otherwise. These are real key events: the game hears
+// a key being down and acts until it comes up. Miss a release - a menu opens, the mode
+// changes, focus is lost, the session stops - and the player walks into a wall for ever
+// while wearing a headset, with no keyboard in reach. It has to be impossible by
+// construction, so every exit path calls one function and the list lives next to it.
+enum HeldKey {
+    kHeldForward = 0, kHeldBack, kHeldLeft, kHeldRight, kHeldCrouch, kHeldJump, kHeldCount
+};
+const unsigned short kHeldVk[kHeldCount] = { 'W', 'S', 'A', 'D', VK_CONTROL, VK_SPACE };
+bool g_HeldKey[kHeldCount] = { false, false, false, false, false, false };
+
+void SetHeldKey(int which, bool want) {
+    if (which < 0 || which >= kHeldCount) return;
+    if (want == g_HeldKey[which]) return;
+    g_HeldKey[which] = want;
+    QueueKeyState(kHeldVk[which], want);
+}
+
+void ReleaseHeldKeys() {
+    for (int i = 0; i < kHeldCount; i++) SetHeldKey(i, false);
+}
+
+// Walking.
+//
+// Two thresholds, not one. A single threshold at the edge of the deadzone chatters: a
+// thumb resting at exactly that value sends down, up, down, up sixty times a second, and
+// the game hears a player vibrating. Press at half throw, release at a third.
+const float kWalkPress = 0.5f;
+const float kWalkRelease = 0.3f;
+
+void WalkFromStick(float x, float y) {
+    // Forward, back, left, right as four one-sided amounts, so a diagonal presses two.
+    const float amount[4] = { y, -y, -x, x };
+    for (int i = 0; i < 4; i++) {
+        bool now = g_HeldKey[i] ? (amount[i] > kWalkRelease) : (amount[i] > kWalkPress);
+        SetHeldKey(i, now);
+    }
+}
+
 XrCompositionLayerProjectionView g_ProjViews[2] = {};
 
 // The sub-rectangle of each eye's image that the runtime's own frustum covers. See the
@@ -602,6 +743,7 @@ struct PanelRegion {
     float widthDegrees;        // how wide it should look from where the viewer stands
     float distanceMetres;
     bool enabled;
+    bool demoOnly;             // a piece that only exists while watching a recording
 };
 
 // Measured off docs/experiments/screenshots/exp16-sheet-full.png: the same 0.909 aspect as
@@ -615,9 +757,9 @@ struct PanelRegion {
 PanelRegion g_PanelRegions[] = {
     // Up high and wide, because it is what is being read at a glance. Both teams, the
     // score, the round timer, health and money.
-    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  44.0f, 40.0f, 1.2f, true  },
+    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  44.0f, 40.0f, 1.2f, true,  false },
     // Low and to the left, where a spectator's eyes go when they want the map.
-    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   78.0f, -36.0f, 20.0f, 1.0f, true  },
+    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   78.0f, -36.0f, 20.0f, 1.0f, true,  false },
     // Low and central, like a dashboard. It is also what a controller ray will click one
     // day, so close and below the line of sight is right.
     //
@@ -627,11 +769,11 @@ PanelRegion g_PanelRegions[] = {
     // freeze with no spectated target, so the strip did not exist to be measured. Without
     // it the viewer cannot see who they are watching, which is exactly what was needed to
     // tell whether the switch-player button had done anything.
-    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -66.0f, 50.0f, 0.55f, true },
+    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -66.0f, 50.0f, 0.55f, true,  true  },
     // Off, and NOT measured: there were no kills on screen when the sheet was captured, so
     // this rect is a guess at where the feed appears. Turn it on with mirv_vr_panel region
     // killfeed on and correct it with mirv_vr_panel rect.
-    { "killfeed",0.74f, 0.02f, 1.00f, 0.32f,  -40.0f,  26.0f, 24.0f, 2.0f, false },
+    { "killfeed",0.74f, 0.02f, 1.00f, 0.32f,  -40.0f,  26.0f, 24.0f, 2.0f, false, false },
 };
 const int kPanelRegionCount = (int)(sizeof(g_PanelRegions) / sizeof(g_PanelRegions[0]));
 
@@ -733,7 +875,8 @@ PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
     X(xrWaitFrame) X(xrBeginFrame) X(xrEndFrame) X(xrLocateViews) \
     X(xrStringToPath) X(xrCreateActionSet) X(xrDestroyActionSet) X(xrCreateAction) \
     X(xrSuggestInteractionProfileBindings) X(xrAttachSessionActionSets) \
-    X(xrSyncActions) X(xrGetActionStateVector2f) X(xrGetActionStateBoolean)
+    X(xrSyncActions) X(xrGetActionStateVector2f) X(xrGetActionStateBoolean) \
+    X(xrCreateActionSpace) X(xrLocateSpace) X(xrGetActionStatePose)
 
 #define AFXVR_DECL(name) PFN_##name name##_ = nullptr;
 AFXVR_XR_FUNCS(AFXVR_DECL)
@@ -1150,9 +1293,42 @@ float EffectiveFovDegrees(const XrFovf & fov) {
     return asked;
 }
 
+void DestroySwapchains();
+
+// Eight by eight of opaque white, for the pointer dot. Declared here because the
+// swapchains own its lifetime: it has to match their format, so it goes when they do.
+ID3D11Texture2D * g_CursorWhite = nullptr;
+
+void ReleaseCursorTexture() {
+    if (g_CursorWhite) { g_CursorWhite->Release(); g_CursorWhite = nullptr; }
+}
+
 bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
-    if (g_Swapchain[0] != XR_NULL_HANDLE) return true;
     if (!pTexture) return false;
+
+    D3D11_TEXTURE2D_DESC probe = {};
+    pTexture->GetDesc(&probe);
+
+    // The back buffer can change under us, and does: CS2's own video settings page changes
+    // resolution without a restart, and the operator used it - from inside the headset,
+    // through the menu this feature exists to show. The swapchains were created once and
+    // never again, so afterwards every CopyResource had a source of one size and a
+    // destination of another, which does nothing at all and silently. Worn, the menu
+    // simply froze.
+    //
+    // Recreating here is also the answer to a question this project had filed as open:
+    // whether the back buffer size can change while a session runs. It can, and the
+    // game's own settings page is how.
+    if (g_Swapchain[0] != XR_NULL_HANDLE) {
+        if (probe.Width == g_SwapchainWidth && probe.Height == g_SwapchainHeight) return true;
+
+        advancedfx::Message("AFXVR: back buffer is now %ux%u, was %ux%u - rebuilding the swapchains.\n",
+            probe.Width, probe.Height, g_SwapchainWidth, g_SwapchainHeight);
+        DestroySwapchains();
+        ReleaseCursorTexture();
+        g_MenuPlaced = false;   // the screen's shape follows the buffer's
+    }
+
 
     D3D11_TEXTURE2D_DESC desc = {};
     pTexture->GetDesc(&desc);
@@ -1204,13 +1380,15 @@ bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
         return false;
     }
 
+    g_SwapchainFormat = chosen;
+
     for (int eye = 0; eye < kSwapchainCount; eye++) {
         XrSwapchainCreateInfo info = { XR_TYPE_SWAPCHAIN_CREATE_INFO };
         info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
         info.format = (int64_t)chosen;
         info.sampleCount = 1;
-        info.width = desc.Width;
-        info.height = desc.Height;
+        info.width  = (kCursorSwapchain == eye) ? kCursorTexels : desc.Width;
+        info.height = (kCursorSwapchain == eye) ? kCursorTexels : desc.Height;
         info.faceCount = 1;
         info.arraySize = 1;
         info.mipCount = 1;
@@ -1230,7 +1408,6 @@ bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
 
     g_SwapchainWidth = desc.Width;
     g_SwapchainHeight = desc.Height;
-    g_SwapchainFormat = chosen;
 
     advancedfx::Message("AFXVR: swapchains %ux%u, back buffer format %i -> swapchain %i, %u images each (two eyes and a panel).\n",
         desc.Width, desc.Height, (int)desc.Format, (int)chosen, (unsigned)g_SwapchainImages[0].size());
@@ -1283,6 +1460,23 @@ bool CreateActions() {
     g_ModeAction        = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "specmode", "Next camera mode");
     g_SeekForwardAction = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "seekforward", "Seek forwards");
     g_SeekBackAction    = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "seekback", "Seek backwards");
+    g_MenuButtonAction  = MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "gamemenu", "Game menu");
+
+    // The pointer. Two subaction paths on one action, so left and right are the same idea.
+    g_HandPath[0] = Path("/user/hand/left");
+    g_HandPath[1] = Path("/user/hand/right");
+    {
+        XrActionCreateInfo info = { XR_TYPE_ACTION_CREATE_INFO };
+        info.actionType = XR_ACTION_TYPE_POSE_INPUT;
+        strcpy_s(info.actionName, "aim");
+        strcpy_s(info.localizedActionName, "Pointer");
+        info.countSubactionPaths = 2;
+        info.subactionPaths = g_HandPath;
+        if (!Check(xrCreateAction_(g_ActionSet, &info, &g_AimAction), "xrCreateAction (aim)")) {
+            g_AimAction = XR_NULL_HANDLE;
+        }
+    }
+
 
     if (!g_MoveAction || !g_TurnAction || !g_RecenterAction || !g_FreeLookAction
         || !g_ResetAction || !g_PauseAction || !g_SlowMoAction || !g_NextAction
@@ -1309,6 +1503,14 @@ bool CreateActions() {
         { g_SeekForwardAction, Path("/user/hand/right/input/trigger/value") },
         { g_FreeLookAction,    Path("/user/hand/left/input/squeeze/value") },
         { g_ModeAction,        Path("/user/hand/right/input/squeeze/value") },
+
+        // Where each hand points. "aim" is the pointing pose; "grip" is where the hand
+        // is, about twenty degrees of wrist away from it.
+        { g_AimAction,         Path("/user/hand/left/input/aim/pose") },
+        { g_AimAction,         Path("/user/hand/right/input/aim/pose") },
+
+        // The game's own menu, on a screen, over whatever is loaded.
+        { g_MenuButtonAction,  Path("/user/hand/left/input/menu/click") },
     };
 
     XrInteractionProfileSuggestedBinding suggested = { XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
@@ -1365,6 +1567,26 @@ bool AttachActions() {
     if (!Check(xrAttachSessionActionSets_(g_Session, &attach), "xrAttachSessionActionSets")) return false;
 
     g_ActionsAttached = true;
+
+    // One space per hand, made after attaching because an action space needs an attached
+    // action. A failure here costs the pointer and nothing else, so it warns rather than
+    // refusing the whole session: the sticks and buttons are what a viewer needs first.
+    if (XR_NULL_HANDLE != g_AimAction) {
+        for (int hand = 0; hand < 2; hand++) {
+            XrActionSpaceCreateInfo info = { XR_TYPE_ACTION_SPACE_CREATE_INFO };
+            info.action = g_AimAction;
+            info.subactionPath = g_HandPath[hand];
+            info.poseInActionSpace.orientation.w = 1.0f;
+            if (!Check(xrCreateActionSpace_(g_Session, &info, &g_AimSpace[hand]),
+                       "xrCreateActionSpace (aim)")) {
+                g_AimSpace[hand] = XR_NULL_HANDLE;
+            }
+        }
+    }
+    if (XR_NULL_HANDLE == g_AimSpace[0] && XR_NULL_HANDLE == g_AimSpace[1]) {
+        advancedfx::Warning("AFXVR: no pointer: neither hand's aim pose could be tracked.\n");
+    }
+
     advancedfx::Message("AFXVR: controllers bound. mirv_vr_controls prints the mapping.\n");
     PrintControls();
     return true;
@@ -1388,7 +1610,311 @@ bool GetPressed(XrAction action) {
     return XR_TRUE == state.currentState;
 }
 
+// The window the game presents into. Asked of the swap chain rather than remembered,
+// because a swap chain can be recreated and a remembered handle then points at nothing.
+// The window the game presents into. Defined below; the pointer needs it.
+HWND SwapChainWindow();
+
+// Where the two hands point, at the same instant the views were located.
+void LocateAim(XrTime displayTime) {
+    for (int hand = 0; hand < 2; hand++) {
+        g_AimValid[hand] = false;
+        if (XR_NULL_HANDLE == g_AimSpace[hand] || !xrLocateSpace_) continue;
+
+        XrSpaceLocation location = { XR_TYPE_SPACE_LOCATION };
+        if (XR_FAILED(xrLocateSpace_(g_AimSpace[hand], g_Space, displayTime, &location))) continue;
+
+        // Both flags. A pose that is only "tracked" without being valid is last frame's,
+        // and a pointer that keeps pointing after the controller has gone to sleep is
+        // worse than no pointer.
+        const XrSpaceLocationFlags wanted =
+            XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+        if (wanted != (location.locationFlags & wanted)) continue;
+
+        g_AimPose[hand] = location.pose;
+        g_AimValid[hand] = true;
+    }
+}
+
+// How a hit on the sheet is turned into a mouse.
+//
+// Two ways, because which one Panorama listens to is a question only a headset can answer,
+// and rebuilding to find out costs three minutes a try.
+//
+// "post" sends WM_MOUSEMOVE and the button messages straight to the game's own window.
+// Nothing global moves, so no other application's cursor can be disturbed and the game
+// does not have to be in front - which matters more than it sounds: the first worn attempt
+// clicked nothing at all because the window in front was the PowerShell one the game had
+// been launched from, and the guard below dropped every event. It is also the only route
+// that can reach a row the real cursor cannot: the coordinates are packed into lParam, not
+// clamped to a screen, and the layout is taller than the display.
+//
+// "send" is the real system cursor, which is what a game that reads GetCursorPos or raw
+// input needs. It requires the game to be in front, and it moves the actual pointer.
+enum PointerInput { kPointerPost = 0, kPointerSend = 1 };
+// The system cursor by default, because that is the one proven worn: with the game in
+// front, aiming and clicking CS2's menu works. "post" is the untested alternative that
+// would remove the focus requirement altogether - a dial, not a default, until a headset
+// says otherwise.
+int g_PointerInput = kPointerSend;
+
+void MoveMouseToSheet(float u, float v, bool clickDown, bool clickUp) {
+    HWND hwnd = SwapChainWindow();
+    if (!hwnd) return;
+
+    RECT client = {};
+    if (!GetClientRect(hwnd, &client)) return;
+    int width = client.right - client.left;
+    int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) return;
+
+    int x = (int)(u * (float)width);
+    int y = (int)(v * (float)height);
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= width)  x = width - 1;
+    if (y >= height) y = height - 1;
+
+    if (kPointerPost == g_PointerInput) {
+        LPARAM where = MAKELPARAM(x, y);
+        PostMessageW(hwnd, WM_MOUSEMOVE, g_CursorPressed ? MK_LBUTTON : 0, where);
+        if (clickDown) PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, where);
+        if (clickUp)   PostMessageW(hwnd, WM_LBUTTONUP, 0, where);
+        return;
+    }
+
+    // The system cursor. Guarded on the game being in front, exactly like the synthetic
+    // keys: moving another application's pointer because a hand drifted across a panel is
+    // the kind of thing nobody forgives.
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    if (pid != GetCurrentProcessId()) return;
+
+    POINT point;
+    point.x = x;
+    point.y = y;
+    if (!ClientToScreen(hwnd, &point)) return;
+
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (screenW <= 1 || screenH <= 1) return;
+
+    INPUT inputs[3] = {};
+    int count = 0;
+
+    inputs[count].type = INPUT_MOUSE;
+    inputs[count].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    inputs[count].mi.dx = (LONG)((point.x - screenX) * 65535.0 / (screenW - 1));
+    inputs[count].mi.dy = (LONG)((point.y - screenY) * 65535.0 / (screenH - 1));
+    count++;
+
+    if (clickDown) { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_LEFTDOWN; count++; }
+    if (clickUp)   { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_LEFTUP;   count++; }
+
+    SendInput(count, inputs, sizeof(INPUT));
+}
+
+// Point at the menu screen, and click it.
+//
+// Runs on the engine thread, with the aim poses located this frame and the screen's pose
+// already decided, so the ray and the thing it points at are from one instant. The render
+// thread only draws the answer.
+void EngineThread_PointAtMenu() {
+    bool wasHit = g_CursorHit;
+    g_CursorHit = false;
+
+    if (!g_MenuMode || !g_MenuPlaced) return;
+
+    float quad[4] = { g_MenuPose.orientation.x, g_MenuPose.orientation.y,
+                      g_MenuPose.orientation.z, g_MenuPose.orientation.w };
+    float centre[3] = { g_MenuPose.position.x, g_MenuPose.position.y, g_MenuPose.position.z };
+
+    float halfWidth = tanf(0.5f * g_MenuWidthDegrees * (float)(M_PI / 180.0));
+    float width = 2.0f * g_MenuDistanceMetres * halfWidth;
+    float height = (g_SwapchainWidth > 0)
+        ? width * (float)g_SwapchainHeight / (float)g_SwapchainWidth
+        : width;
+
+    // The right hand wins a tie, because most people point with it and a cursor that
+    // flickers between two hands resting on a desk is unusable. Otherwise the nearer hit.
+    float bestT = 0.0f;
+    int bestHand = -1;
+    float bestU = 0.0f, bestV = 0.0f;
+
+    for (int hand = 0; hand < 2; hand++) {
+        if (!g_AimValid[hand]) continue;
+
+        float origin[3] = { g_AimPose[hand].position.x, g_AimPose[hand].position.y,
+                            g_AimPose[hand].position.z };
+
+        // The aim pose points along its own -Z, the same way a view does.
+        float direction[3];
+        AfxVrMath::QuatRotate(g_AimPose[hand].orientation.x, g_AimPose[hand].orientation.y,
+                              g_AimPose[hand].orientation.z, g_AimPose[hand].orientation.w,
+                              0.0f, 0.0f, -1.0f,
+                              direction[0], direction[1], direction[2]);
+
+        float t = 0.0f, u = 0.0f, v = 0.0f;
+        if (!AfxVrMath::RayQuadHit(origin, direction, centre, quad, width, height, t, u, v)) continue;
+        if (bestHand >= 0 && !(t < bestT) && hand != 1) continue;
+
+        bestT = t; bestHand = hand; bestU = u; bestV = v;
+    }
+
+    // The trigger of the hand that is pointing. In menu mode there is no demo to seek
+    // through, so the seek actions are free and the trigger means what it means everywhere
+    // else: click the thing under the pointer.
+    bool pressed = false;
+    if (bestHand >= 0) {
+        pressed = GetPressed(1 == bestHand ? g_SeekForwardAction : g_SeekBackAction);
+    }
+
+    if (bestHand < 0) {
+        // Let go of a button that was held when the ray left the panel, or the game is
+        // left with the mouse down.
+        if (g_CursorPressed) {
+            MoveMouseToSheet(g_CursorU, g_CursorV, false, true);
+            g_CursorPressed = false;
+        }
+        if (wasHit) advancedfx::Message("AFXVR: pointer off the screen.\n");
+        return;
+    }
+
+    g_CursorHit = true;
+    g_CursorHand = bestHand;
+    g_CursorU = bestU;
+    g_CursorV = bestV;
+    g_CursorOrientation = g_MenuPose.orientation;
+
+    // The hit point, lifted a little towards the viewer so the dot is not fighting the
+    // screen for the same depth.
+    float normal[3];
+    AfxVrMath::QuatRotate(quad[0], quad[1], quad[2], quad[3], 0.0f, 0.0f, 1.0f,
+                          normal[0], normal[1], normal[2]);
+    float right[3], up[3];
+    AfxVrMath::QuatRotate(quad[0], quad[1], quad[2], quad[3], 1.0f, 0.0f, 0.0f, right[0], right[1], right[2]);
+    AfxVrMath::QuatRotate(quad[0], quad[1], quad[2], quad[3], 0.0f, 1.0f, 0.0f, up[0], up[1], up[2]);
+
+    float localX = (bestU - 0.5f) * width;
+    float localY = (0.5f - bestV) * height;
+    g_CursorPos.x = centre[0] + right[0] * localX + up[0] * localY + normal[0] * kCursorLiftMetres;
+    g_CursorPos.y = centre[1] + right[1] * localX + up[1] * localY + normal[1] * kCursorLiftMetres;
+    g_CursorPos.z = centre[2] + right[2] * localX + up[2] * localY + normal[2] * kCursorLiftMetres;
+
+    bool pressEdge   =  pressed && !g_CursorPressed;
+    bool releaseEdge = !pressed &&  g_CursorPressed;
+    g_CursorPressed = pressed;
+
+    MoveMouseToSheet(bestU, bestV, pressEdge, releaseEdge);
+
+    if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
+        advancedfx::Message("AFXVR: pointer hand=%s t=%.2f m u=%.3f v=%.3f trigger=%i\n",
+            bestHand ? "right" : "left", bestT, bestU, bestV, pressed ? 1 : 0);
+    }
+}
+
+HWND SwapChainWindow() {
+    if (!g_pSwapChain) return NULL;
+    DXGI_SWAP_CHAIN_DESC desc = {};
+    if (FAILED(g_pSwapChain->GetDesc(&desc))) return NULL;
+    return desc.OutputWindow;
+}
+
+// Aiming, firing and changing weapons, in a game rather than a recording.
+//
+// All of it goes through the same queue the keys do, drained on the engine thread, because
+// the input is read on whichever thread is running the frame loop and SendInput from two
+// threads at once is a race nobody would ever find.
+struct PendingMouse {
+    int dx, dy;          // relative counts, as a mouse would send
+    int wheel;           // notches, positive is away from the hand
+    bool leftDown, leftUp, rightDown, rightUp;
+};
+PendingMouse g_PendingMouse = {};
+
+void QueueMouseMove(int dx, int dy) {
+    std::lock_guard<std::mutex> lock(g_CmdMutex);
+    g_PendingMouse.dx += dx;
+    g_PendingMouse.dy += dy;
+}
+
+void QueueMouseWheel(int notches) {
+    std::lock_guard<std::mutex> lock(g_CmdMutex);
+    g_PendingMouse.wheel += notches;
+}
+
+void QueueMouseButton(bool right, bool down) {
+    std::lock_guard<std::mutex> lock(g_CmdMutex);
+    if (right) { if (down) g_PendingMouse.rightDown = true; else g_PendingMouse.rightUp = true; }
+    else       { if (down) g_PendingMouse.leftDown  = true; else g_PendingMouse.leftUp  = true; }
+}
+
+// How fast the right stick turns you, in mouse counts a second at full throw. A count is
+// not a degree - the game's own sensitivity decides that - so this is a number to be tuned
+// by the person holding the controller, not derived.
+float g_AimSpeed = 1400.0f;
+
+bool g_FireHeld = false;
+bool g_AltFireHeld = false;
+bool g_PrevWeaponNext = false;
+bool g_PrevWeaponPrev = false;
+
+void ReleaseGameButtons() {
+    if (g_FireHeld)    { g_FireHeld = false;    QueueMouseButton(false, false); }
+    if (g_AltFireHeld) { g_AltFireHeld = false; QueueMouseButton(true, false); }
+}
+
+// The whole playing layout, kept in one function so it can be read as a layout rather
+// than found scattered through the spectating one.
+//
+//   left stick    walk               right stick   turn and look
+//   left grip     crouch             right grip    jump
+//   left trigger  secondary fire     right trigger fire
+//   B             previous weapon    A             next weapon
+//
+// Held things are held: crouch and jump are keys down, fire is a button down, and every
+// one of them is released by ReleaseHeldKeys and ReleaseGameButtons on any way out of
+// this mode. The weapons are edges, one notch of wheel each - which is what CS2 binds to
+// invnext and invprev by default, so nothing has to be rebound inside the game.
+void PlayingInput(float dt) {
+    float x = 0.0f, y = 0.0f;
+
+    if (GetVec2(g_MoveAction, x, y)) WalkFromStick(x, y);
+    else ReleaseHeldKeys();
+
+    // Turning is the mouse, because in a game the view IS the player's aim and the mouse
+    // is what the game lets move it. Until the aim servo lands this is the only way to
+    // turn, and the picture still follows the head on top of it.
+    if (GetVec2(g_TurnAction, x, y)) {
+        float turn = ShapeStick(x);
+        float pitch = ShapeStick(y);
+        if (turn != 0.0f || pitch != 0.0f) {
+            QueueMouseMove((int)(turn * g_AimSpeed * dt), (int)(-pitch * g_AimSpeed * dt));
+        }
+    }
+
+    SetHeldKey(kHeldCrouch, GetPressed(g_FreeLookAction));   // left grip
+    SetHeldKey(kHeldJump,   GetPressed(g_ModeAction));       // right grip
+
+    bool fire = GetPressed(g_SeekForwardAction);             // right trigger
+    if (fire != g_FireHeld) { g_FireHeld = fire; QueueMouseButton(false, fire); }
+
+    bool altFire = GetPressed(g_SeekBackAction);             // left trigger
+    if (altFire != g_AltFireHeld) { g_AltFireHeld = altFire; QueueMouseButton(true, altFire); }
+
+    bool next = GetPressed(g_PauseAction);                   // A
+    if (next && !g_PrevWeaponNext) QueueMouseWheel(1);
+    g_PrevWeaponNext = next;
+
+    bool prev = GetPressed(g_SlowMoAction);                  // B
+    if (prev && !g_PrevWeaponPrev) QueueMouseWheel(-1);
+    g_PrevWeaponPrev = prev;
+}
+
 void ProcessInput() {
+
     if (!g_ActionsAttached || XR_SESSION_STATE_FOCUSED != g_State) return;
 
     XrActiveActionSet active = { g_ActionSet, XR_NULL_PATH };
@@ -1402,7 +1928,45 @@ void ProcessInput() {
     g_LastInputTick = now;
     if (dt > 0.1f) dt = 0.1f; // a hitch must not teleport the viewer
 
+    // The menu button, in every mode: a short press puts the game's own window on a screen
+    // over whatever is loaded, a long one sends Escape.
+    //
+    // They were one press to begin with, doing both, and that is wrong in the case it
+    // exists for: with a team picker or a buy menu ALREADY up, Escape dismisses the thing
+    // the viewer wanted to point at.
+    {
+        bool b = GetPressed(g_MenuButtonAction);
+        if (b && !g_PrevMenuButton) {
+            g_MenuButtonPressedAt = GetTickCount64();
+        } else if (!b && g_PrevMenuButton) {
+            if (GetTickCount64() - g_MenuButtonPressedAt >= 500) {
+                QueueKeyTap(VK_ESCAPE);
+                advancedfx::Message("AFXVR: escape.\n");
+            } else {
+                g_MenuOverride = !g_MenuOverride;
+                advancedfx::Message("AFXVR: the window %s.\n",
+                    g_MenuOverride ? "is on a screen in front of you" : "is off the screen");
+            }
+        }
+        g_PrevMenuButton = b;
+    }
+
+    // Playing a map is a different instrument from watching a recording, so it is a
+    // different layout rather than the same one with exceptions in it. While a sheet is up
+    // neither applies: the pointer owns the mouse, and an absolute pointer fighting a
+    // relative aim on one device is a fight the aim wins.
+    if (AfxVrMath::ModeTakesGameInput(g_Mode)) {
+        PlayingInput(dt);
+        return;
+    }
+
+    ReleaseHeldKeys();
+    ReleaseGameButtons();
+
+    if (AfxVrMath::kVrModePlay == g_Mode.mode) return;   // a map, but a sheet is up
+
     float x = 0.0f, y = 0.0f;
+
     if (GetVec2(g_MoveAction, x, y)) {
         float r = ShapeStick(x), f = ShapeStick(y);
         if (r || f) AfxVr_AddMove(r * g_MoveSpeed * dt, f * g_MoveSpeed * dt, 0.0f);
@@ -1505,7 +2069,23 @@ void ProcessInput() {
     // the only way round that does not surprise anybody. Hiding does not re-place: a
     // hide and a show must bring the panels back exactly where they were, or it is not a
     // hide, it is a move. Re-placing is the Menu button and F11.
+    // The game's own menu, on a screen, without taking the headset off.
+    //
+    // Escape as well as the screen: with a map loaded the window shows the game, and what
+    // was asked for is the settings. Escape is what puts CS2's menu in front of it, and
+    // the same press takes it away again.
+    b = GetPressed(g_MenuButtonAction);
+    if (b && !g_PrevMenuButton) {
+        g_MenuOverride = !g_MenuOverride;
+        QueueKeyTap(VK_ESCAPE);
+        advancedfx::Message("AFXVR: %s\n", g_MenuOverride
+            ? "the game's own menu, on a screen. Point at it and pull the trigger."
+            : "back to the world.");
+    }
+    g_PrevMenuButton = b;
+
     b = GetPressed(g_RecenterAction);
+
     if (b && !g_PrevRecenter) {
         g_RecenterPressedAt = GetTickCount64();
     } else if (!b && g_PrevRecenter) {
@@ -1738,6 +2318,12 @@ void EngineThread_WaitAndLocate() {
     ProcessInput();
 
     LocateViews(g_FrameState.predictedDisplayTime);
+
+    // The hands, at the same instant as the eyes, and then what they are pointing at. On
+    // this thread deliberately: the mouse is moved from here too, and a pointer decided in
+    // one place cannot disagree with the dot drawn from it.
+    LocateAim(g_FrameState.predictedDisplayTime);
+    EngineThread_PointAtMenu();
 }
 
 // "session state 1" is not a diagnosis. IDLE in particular means the runtime has taken
@@ -2309,6 +2895,7 @@ void MirvVrXr_EngineThread_Frame() {
     {
         std::vector<std::string> due;
         std::vector<PendingKey> dueKeys;
+        PendingMouse dueMouse = {};
         float seekSeconds = 0.0f;
         {
             std::lock_guard<std::mutex> lock(g_CmdMutex);
@@ -2324,6 +2911,9 @@ void MirvVrXr_EngineThread_Frame() {
             seekSeconds = g_PendingSeekSeconds;
             g_PendingSeekSeconds = 0.0f;
 
+            dueMouse = g_PendingMouse;
+            g_PendingMouse = PendingMouse();
+
             for (size_t i = 0; i < g_PendingKeys.size(); ) {
                 if (0 >= g_PendingKeys[i].delay) {
                     dueKeys.push_back(g_PendingKeys[i]);
@@ -2337,6 +2927,38 @@ void MirvVrXr_EngineThread_Frame() {
 
         // Outside the lock: SendInput can block, and the render thread wants this mutex.
         for (size_t i = 0; i < dueKeys.size(); i++) SendGameKey(dueKeys[i].vk, dueKeys[i].down);
+
+        // The mouse, the same way and for the same reason.
+        if (dueMouse.dx || dueMouse.dy || dueMouse.wheel
+            || dueMouse.leftDown || dueMouse.leftUp || dueMouse.rightDown || dueMouse.rightUp) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+            if (pid == GetCurrentProcessId()) {
+                INPUT inputs[4] = {};
+                int count = 0;
+                if (dueMouse.dx || dueMouse.dy) {
+                    inputs[count].type = INPUT_MOUSE;
+                    inputs[count].mi.dwFlags = MOUSEEVENTF_MOVE;
+                    inputs[count].mi.dx = dueMouse.dx;
+                    inputs[count].mi.dy = dueMouse.dy;
+                    count++;
+                }
+                if (dueMouse.leftDown)  { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;  count++; }
+                if (dueMouse.leftUp)    { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_LEFTUP;    count++; }
+                if (dueMouse.rightDown) { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN; count++; }
+                if (dueMouse.rightUp)   { inputs[count].type = INPUT_MOUSE; inputs[count].mi.dwFlags = MOUSEEVENTF_RIGHTUP;   count++; }
+                if (count) SendInput(count, inputs, sizeof(INPUT));
+
+                if (dueMouse.wheel) {
+                    INPUT wheel = {};
+                    wheel.type = INPUT_MOUSE;
+                    wheel.mi.dwFlags = MOUSEEVENTF_WHEEL;
+                    wheel.mi.mouseData = (DWORD)(dueMouse.wheel * WHEEL_DELTA);
+                    SendInput(1, &wheel, sizeof(INPUT));
+                }
+            }
+        }
+
 
         if (0.0f != seekSeconds) {
             int tick = 0;
@@ -2362,34 +2984,75 @@ void MirvVrXr_EngineThread_Frame() {
         }
     }
 
-    // Is there a world under this session? Decided here, once a frame, before anything
-    // depends on it - the pass loop asks MirvVrXr_WantsPasses immediately afterwards.
-    //
-    // NOT the demo tick, which was the first guess and was wrong: GetDemoFile() hands back
-    // an object at the main menu too, so the tick reads as available with nothing loaded,
-    // the session stayed in world mode with no world, and the game stalled exactly as
-    // before. IsPlayingDemo is the engine's own answer, and the level name catches the
-    // moment between "a demo is opening" and "there is a map".
+    // What the headset is showing, and therefore who the controllers belong to. Decided
+    // here, once a frame, before anything depends on it - the pass loop asks
+    // MirvVrXr_WantsPasses immediately afterwards.
     {
-        bool haveWorld = false;
-        const char * level = "";
-        if (g_pEngineToClient) {
-            level = g_pEngineToClient->GetLevelNameShort();
-            if (!level) level = "";
-            haveWorld = g_pEngineToClient->IsPlayingDemo() && level[0];
+        AfxVrMath::ModeInputs in;
+        in.sessionRunning = g_SessionRunning;
+        in.demoPlaying = g_pEngineToClient && g_pEngineToClient->IsPlayingDemo();
+        in.manualSheet = g_MenuOverride;
+
+        const char * level = g_pEngineToClient ? g_pEngineToClient->GetLevelNameShort() : "";
+        if (!level) level = "";
+        // "<empty>" is a literal the engine hands back when nothing is loaded, not an
+        // empty string. Testing level[0] alone reads the '<' as a map name, which is how
+        // VR mode once believed it had a world with nothing loaded at all.
+        in.mapLoaded = level[0] && 0 != strcmp(level, "<empty>");
+
+        // Debounced: the buy menu flickers the cursor, and a sheet that blinks is worse
+        // than one that is a sixth of a second late.
+        bool cursorNow = SystemCursorShowing();
+        ULONGLONG now = GetTickCount64();
+        if (cursorNow != g_CursorShowing) {
+            if (0 == g_CursorChangedAt) g_CursorChangedAt = now;
+            else if (now - g_CursorChangedAt >= kCursorDebounceMs) {
+                g_CursorShowing = cursorNow;
+                g_CursorChangedAt = 0;
+            }
+        } else {
+            g_CursorChangedAt = 0;
+        }
+        in.cursorShowing = g_CursorShowing;
+
+        AfxVrMath::ModeResult next = AfxVrMath::DecideMode(in);
+
+        if (next.mode != g_Mode.mode || next.sheet != g_Mode.sheet) {
+            // The inputs, not just the verdict. Every mode fault this project has had was
+            // a signal that was wrong and said nothing about why.
+            advancedfx::Message(
+                "AFXVR: mode %s (map \"%s\", demo %i, cursor %i, button %i) - %s%s\n",
+                AfxVrMath::kVrModeMenu  == next.mode ? "MENU" :
+                AfxVrMath::kVrModeWatch == next.mode ? "WATCH" :
+                AfxVrMath::kVrModePlay  == next.mode ? "PLAY" : "idle",
+                level, in.demoPlaying ? 1 : 0, in.cursorShowing ? 1 : 0, in.manualSheet ? 1 : 0,
+                next.worldInEyes ? "world in both eyes" : "a screen",
+                next.sheet ? (next.sheetOpaque ? "" : ", with the window over it") : "");
+
+            // Anything the last mode was holding down. A player walking into a wall for
+            // ever because a menu came up is the kind of thing a headset makes genuinely
+            // unpleasant, and it must be impossible by construction rather than by care.
+            ReleaseHeldKeys();
+            ReleaseGameButtons();
+
+            if (next.sheet && !g_Mode.sheet) {
+                // A synthetic cursor only reaches the game while it is the foreground
+                // window, and after a launch it usually is not: the window in front is
+                // whatever shell started it. Worn, that looked exactly like a broken
+                // pointer - the dot moved, because drawing it needs no focus, and nothing
+                // ever clicked.
+                if (HWND hwnd = SwapChainWindow()) {
+                    SetForegroundWindow(hwnd);
+                    SetFocus(hwnd);
+                }
+            }
+            if (!next.worldInEyes) g_MenuPlaced = false;
         }
 
-        bool menu = g_SessionRunning && !haveWorld;
-        if (menu != g_MenuMode) {
-            g_MenuMode = menu;
-            g_MenuPlaced = false;
-            // The inputs, not just the verdict. The first version of this test was wrong
-            // and said nothing about why, which cost a launch.
-            advancedfx::Message(menu
-                ? "AFXVR: no world (playing demo %i, level \"%s\") - the game's own window goes on one screen.\n"
-                : "AFXVR: world up (playing demo %i, level \"%s\") - both eyes render it.\n",
-                (g_pEngineToClient && g_pEngineToClient->IsPlayingDemo()) ? 1 : 0, level);
-        }
+        g_ModeInputs = in;
+        g_Mode = next;
+        g_PlayingDemo = in.demoPlaying;
+        g_MenuMode = !next.worldInEyes && next.sheet;
     }
 
     // In low-latency mode this is where the frame's poses come from, located a few
@@ -2704,6 +3367,74 @@ static void ProbePanelAlpha(ID3D11DeviceContext * pContext, ID3D11Texture2D * pT
 //
 // The quad carries the WHOLE back buffer, 2528x2780, not the 2560x1600 of it that reaches
 // the monitor. What the desktop shows is cropped; what the headset gets is not.
+// The white patch is refilled every frame rather than made a static swapchain image: a
+// static one is acquired and released exactly once, and if anything goes wrong during that
+// single chance there is no second. Eight by eight costs nothing to copy.
+bool EnsureCursorTexture(ID3D11Device * pDevice, DXGI_FORMAT format) {
+    if (g_CursorWhite) return true;
+    if (!pDevice) return false;
+
+    std::vector<unsigned char> texels(kCursorTexels * kCursorTexels * 4, 0xFF);
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = kCursorTexels;
+    desc.Height = kCursorTexels;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA data = {};
+    data.pSysMem = &texels[0];
+    data.SysMemPitch = kCursorTexels * 4;
+
+    if (FAILED(pDevice->CreateTexture2D(&desc, &data, &g_CursorWhite))) {
+        g_CursorWhite = nullptr;
+        return false;
+    }
+    return true;
+}
+
+// Copies the white patch into the cursor swapchain and fills in the quad that shows it.
+// Returns false if there is nothing to draw.
+bool BuildCursorQuad(ID3D11DeviceContext * pContext, XrCompositionLayerQuad & quad) {
+    if (!g_CursorHit) return false;
+    if (XR_NULL_HANDLE == g_Swapchain[kCursorSwapchain]) return false;
+    if (!EnsureCursorTexture(g_pDevice, g_SwapchainFormat)) return false;
+
+    uint32_t imageIndex = 0;
+    XrSwapchainImageAcquireInfo acquire = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    if (!Check(xrAcquireSwapchainImage_(g_Swapchain[kCursorSwapchain], &acquire, &imageIndex),
+               "xrAcquireSwapchainImage (cursor)")) return false;
+
+    bool ok = false;
+    XrSwapchainImageWaitInfo wait = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wait.timeout = XR_INFINITE_DURATION;
+    if (Check(xrWaitSwapchainImage_(g_Swapchain[kCursorSwapchain], &wait), "xrWaitSwapchainImage (cursor)")) {
+        pContext->CopyResource(g_SwapchainImages[kCursorSwapchain][imageIndex], g_CursorWhite);
+        ok = true;
+    }
+    XrSwapchainImageReleaseInfo release = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    xrReleaseSwapchainImage_(g_Swapchain[kCursorSwapchain], &release);
+    if (!ok) return false;
+
+    quad = XrCompositionLayerQuad{ XR_TYPE_COMPOSITION_LAYER_QUAD };
+    quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    quad.space = g_Space;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.pose.position = g_CursorPos;
+    quad.pose.orientation = g_CursorOrientation;
+    quad.subImage.swapchain = g_Swapchain[kCursorSwapchain];
+    quad.subImage.imageRect.offset = { 0, 0 };
+    quad.subImage.imageRect.extent = { (int32_t)kCursorTexels, (int32_t)kCursorTexels };
+    quad.subImage.imageArrayIndex = 0;
+    quad.size.width = g_CursorSizeMetres;
+    quad.size.height = g_CursorSizeMetres;
+    return true;
+}
+
 static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
     // A frame may already be open, and that is exactly the case this has to handle rather
     // than step around.
@@ -2830,9 +3561,17 @@ static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture
     // one.
     quad.size.height = quad.size.width * (float)g_SwapchainHeight / (float)g_SwapchainWidth;
 
-    const XrCompositionLayerBaseHeader * layers[1];
+    // The dot goes on top of the sheet, so it is submitted after it: layer order is paint
+    // order, and a cursor behind the thing it points at is not a cursor.
+    XrCompositionLayerQuad cursor = {};
+    bool haveCursor = BuildCursorQuad(pContext, cursor);
+
+    const XrCompositionLayerBaseHeader * layers[2];
     int layerCount = 0;
-    if (haveSheet && g_MenuPlaced) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&quad;
+    if (haveSheet && g_MenuPlaced) {
+        layers[layerCount++] = (XrCompositionLayerBaseHeader*)&quad;
+        if (haveCursor) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&cursor;
+    }
 
     XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
     endInfo.displayTime = g_RtFrameState.predictedDisplayTime;
@@ -3215,6 +3954,10 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             for (int i = 0; i < kPanelRegionCount && quadCount < kMaxPanelQuads; i++) {
                 const PanelRegion & region = g_PanelRegions[i];
                 if (!region.enabled) continue;
+                // The timeline and the strip naming who is being watched exist only in a
+                // recording. In a game they are not there to copy, and the rect would
+                // carry whatever the player's own HUD happens to put in those rows.
+                if (region.demoOnly && !g_PlayingDemo) continue;
 
                 int x0 = (int)(region.u0 * (float)g_SwapchainWidth  + 0.5f);
                 int x1 = (int)(region.u1 * (float)g_SwapchainWidth  + 0.5f);
@@ -3452,7 +4195,50 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
 // "this feels wrong" and an answer, when the only instrument is a person wearing the
 // headset and the only way to test is to change it and look again.
 
+CON_COMMAND(mirv_vr_pointer, "cs2-vr-spectator: the controller ray that points at the screen.")
+{
+    int argc = args->ArgC();
+    if (2 <= argc) {
+        const char * arg1 = args->ArgV(1);
+        if (!_stricmp(arg1, "post") || !_stricmp(arg1, "send")) {
+            g_PointerInput = (0 == _stricmp(arg1, "post")) ? kPointerPost : kPointerSend;
+            advancedfx::Message("mirv_vr_pointer: %s\n",
+                kPointerPost == g_PointerInput
+                    ? "messages posted to the game's window. Nothing global moves."
+                    : "the real system cursor. The game has to be in front.");
+            return;
+        }
+        if (!_stricmp(arg1, "size") && 3 <= argc) {
+            g_CursorSizeMetres = (float)atof(args->ArgV(2));
+            if (g_CursorSizeMetres < 0.002f) g_CursorSizeMetres = 0.002f;
+            if (g_CursorSizeMetres > 0.2f)   g_CursorSizeMetres = 0.2f;
+            advancedfx::Message("mirv_vr_pointer: dot %.0f mm.\n", g_CursorSizeMetres * 1000.0f);
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "mirv_vr_pointer post|send  - how a hit becomes a mouse.\n"
+        "mirv_vr_pointer size <m>   - how big the dot is. Now %.0f mm.\n"
+        "\n"
+        "post: WM_MOUSEMOVE and the button messages straight to the game's window. Nothing\n"
+        "      global moves, no other application's cursor can be touched, and the game\n"
+        "      does not have to be in front - which it often is not, because the window\n"
+        "      that launched it is. It can also address a row the real cursor cannot: the\n"
+        "      coordinates are packed into lParam, not clamped to a screen.\n"
+        "send: the real system cursor, for anything reading GetCursorPos or raw input.\n"
+        "      Refuses unless the game is the foreground window.\n"
+        "\n"
+        "Aim with either hand; that hand's trigger clicks. The right hand wins if both are\n"
+        "on the screen, because a cursor flickering between two resting hands is unusable.\n"
+        "Currently: %s, pointing at %s\n",
+        g_CursorSizeMetres * 1000.0f,
+        kPointerPost == g_PointerInput ? "post" : "send",
+        g_CursorHit ? "the screen" : "nothing");
+}
+
 CON_COMMAND(mirv_vr_menu, "cs2-vr-spectator: the game's own window on one screen, when there is no demo to show.")
+
 {
     int argc = args->ArgC();
     if (2 <= argc) {
