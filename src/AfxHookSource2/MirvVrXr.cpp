@@ -600,9 +600,9 @@ struct PanelRegion {
 PanelRegion g_PanelRegions[] = {
     // Up high and wide, because it is what is being read at a glance. Both teams, the
     // score, the round timer, health and money.
-    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  34.0f, 40.0f, 2.0f, true  },
+    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  58.0f, 40.0f, 2.0f, true  },
     // Low and to the left, where a spectator's eyes go when they want the map.
-    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   48.0f, -36.0f, 20.0f, 1.6f, true  },
+    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   78.0f, -36.0f, 20.0f, 1.6f, true  },
     // Low and central, like a dashboard. It is also what a controller ray will click one
     // day, so close and below the line of sight is right.
     //
@@ -612,7 +612,7 @@ PanelRegion g_PanelRegions[] = {
     // freeze with no spectated target, so the strip did not exist to be measured. Without
     // it the viewer cannot see who they are watching, which is exactly what was needed to
     // tell whether the switch-player button had done anything.
-    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -46.0f, 50.0f, 1.4f, true  },
+    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -66.0f, 50.0f, 1.4f, true  },
     // Off, and NOT measured: there were no kills on screen when the sheet was captured, so
     // this rect is a guess at where the feed appears. Turn it on with mirv_vr_panel region
     // killfeed on and correct it with mirv_vr_panel rect.
@@ -3054,7 +3054,13 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
 
         if (!_stricmp(arg1, "spread")) {
             if (3 <= argc) {
-                g_PanelSpread = (float)atof(args->ArgV(2));
+                // "more" and "less" rather than a number, because the operator has no
+                // console: the window is taller than the display, so Panorama puts the
+                // console's input line below the bottom of the screen. Everything they
+                // adjust has to reach them through a key or a controller.
+                if (!_stricmp(args->ArgV(2), "more")) g_PanelSpread *= 1.1f;
+                else if (!_stricmp(args->ArgV(2), "less")) g_PanelSpread /= 1.1f;
+                else g_PanelSpread = (float)atof(args->ArgV(2));
                 if (g_PanelSpread < 0.0f) g_PanelSpread = 0.0f;
                 if (g_PanelSpread > 2.0f) g_PanelSpread = 2.0f;
             }
