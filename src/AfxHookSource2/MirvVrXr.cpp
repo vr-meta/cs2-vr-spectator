@@ -602,10 +602,25 @@ struct FrustumCentre {
 // On by default: rendering without it leaves 14 degrees of constant angular divergence,
 // which no eye-separation setting can compensate because the error does not vary with
 // distance. Off restores the old behaviour for comparison.
-// 0 off, +1 outward as the runtime reports, -1 inverted. The sign is the one thing here
-// that cannot be reasoned out safely: get it backwards and the error doubles instead of
-// cancelling, which looks similar enough to be mistaken for "the fix did not work".
-int g_CentreFrustum = 1;
+// 0 off, +1 outward as the runtime reports, -1 inverted.
+//
+// OFF, and it should stay off. The idea was that since the headset's frustum is not
+// centred on the eye's forward axis - [-54, +40] for the left eye, mirrored for the right
+// - and CS2 can only render a centred frustum, the offset should be carried by turning the
+// camera instead.
+//
+// It is wrong, and wrong in an instructive way. The Quest 3 reports the *same orientation*
+// for both eyes; the asymmetry is in the frustum bounds alone. Turning each camera outward
+// introduces a relative rotation between the eyes that the displays do not have, and a
+// relative rotation is the one thing two images cannot be fused through. It shows as a
+// single horizontal line in the world appearing at two different angles - which is exactly
+// how it was reported, with a drawing that made it unmistakable.
+//
+// The right answer for a renderer that can only do symmetric frustums is the original one:
+// render the smallest symmetric frustum that contains the asymmetric one and report
+// honestly that that is what was rendered. It wastes a seventh of the pixels and is
+// correct.
+int g_CentreFrustum = 0;
 
 // Roll from the headset, into the game camera. Also a sign that has never been tested on
 // its own: 0 forces it flat, -1 inverts it. A mismatch between the roll we render with and
@@ -2213,6 +2228,34 @@ CON_COMMAND(mirv_vr_views, "cs2-vr-spectator: what the runtime actually reports 
             SymmetricFovDegrees(v[eye].fov));
     }
 
+    // What the runtime says is only half the story. This is what the game was actually
+    // told, at the point of the write - the only place that can distinguish "the setting
+    // is not arriving" from "the setting arrives and does nothing".
+    advancedfx::Message("\n  What the camera was actually given, per pass:\n");
+    float o1[3], a1[3], f1, o2[3], a2[3], f2;
+    bool have1 = AfxVr_GetLastApplied(1, o1, a1, &f1);
+    bool have2 = AfxVr_GetLastApplied(2, o2, a2, &f2);
+
+    if (have1) advancedfx::Message("    pass 1  org (%.2f %.2f %.2f)  ang (%.2f %.2f %.2f)  fov %.1f\n",
+        o1[0], o1[1], o1[2], a1[0], a1[1], a1[2], f1);
+    else advancedfx::Message("    pass 1  nothing written yet\n");
+
+    if (have2) advancedfx::Message("    pass 2  org (%.2f %.2f %.2f)  ang (%.2f %.2f %.2f)  fov %.1f\n",
+        o2[0], o2[1], o2[2], a2[0], a2[1], a2[2], f2);
+    else advancedfx::Message("    pass 2  nothing written yet\n");
+
+    if (have1 && have2) {
+        float dx = o2[0] - o1[0], dy = o2[1] - o1[1], dz = o2[2] - o1[2];
+        float separation = sqrtf(dx * dx + dy * dy + dz * dz);
+        advancedfx::Message(
+            "    the two cameras are %.3f units apart (%.1f mm), and %.2f degrees of yaw\n"
+            "    %s\n",
+            separation, separation * 25.4f, a2[1] - a1[1],
+            separation < 0.01f
+                ? "    ZERO - the eye offsets are not reaching the render at all"
+                : "");
+    }
+
     advancedfx::Message(
         "\n"
         "  What to look for. A horizontal asymmetry of more than a degree or two, or a\n"
@@ -2390,4 +2433,24 @@ CON_COMMAND(mirv_vr_centre, "cs2-vr-spectator: render each eye around the real c
         "\n"
         "Off restores the old behaviour, for comparison. Current: %s.\n",
         g_CentreFrustum ? "on" : "off");
+}
+
+CON_COMMAND(mirv_vr_reset, "cs2-vr-spectator: put every stereo setting back to its default, in one command.")
+{
+    g_IpdScale = 1.0f;
+    g_Monoscopic = false;
+    g_SwapEyes = false;
+    g_CentreFrustum = 1;
+    g_RollMode = 1;
+    g_FovOverrideDegrees = 0.0f;
+    g_FovScale = 1.0f;
+    g_FovVerticalOverrideDegrees = 0.0f;
+    g_ReportedFovOverrideDegrees = 0.0f;
+    g_SourceAspectFix = false;
+    g_Calibrating = false;
+
+    advancedfx::Message(
+        "mirv_vr_reset: separation x1, stereo, eyes in runtime order, frustum centring on,\n"
+        "  roll as reported, no field-of-view overrides, calibration off.\n"
+        "  Everything is now at its default, which is the only state worth comparing from.\n");
 }

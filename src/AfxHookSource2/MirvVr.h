@@ -31,6 +31,12 @@ void AfxVr_AfterViewSetup(void * pViewStruct, float tx, float ty, float tz,
 // Called from the render pass loop, before the given pass renders.
 void AfxVr_OnBeginRenderPass(int passIndex);
 
+// What was last actually written into the view struct for a pass, as opposed to what was
+// asked for. The difference between those two is where an evening goes: a setting that
+// changes nothing on screen is either not arriving or not being applied, and only the
+// values at the point of the write can tell the two apart.
+bool AfxVr_GetLastApplied(int passIndex, float outOrigin[3], float outAngles[3], float * outFov);
+
 // The client builds its world-to-screen and projection matrices once a frame, from the
 // base camera, in a function main.cpp already hooks. The HUD is drawn once per *pass* and
 // reads those matrices - so name tags and health numbers land where they would have been

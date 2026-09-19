@@ -59,6 +59,59 @@ inline void MoveInViewPlane(float viewYawDegrees, float right, float forward, fl
     outDelta[2] = up;
 }
 
+// An OpenXR orientation quaternion as Source's (pitch, yaw, roll) in degrees.
+//
+// Source and OpenXR do not agree on axes: Source's world is X forward, Y left, Z up, with
+// positive pitch looking down; OpenXR's is X right, Y up, Z back, with positive pitch
+// looking up. Yaw agrees, the other two are inverted.
+//
+// This was written from memory and never checked, which mattered the moment the two eyes
+// stopped sharing an orientation: a conversion that is wrong by a consistent amount
+// cancels between identical eyes and does not cancel between different ones. It shows up
+// as one horizontal line in the world appearing at two different angles.
+//
+// tests/ checks it the only way that does not just re-state the same assumption: convert
+// to angles, run Source's own AngleVectors, and compare against rotating the basis vectors
+// by the quaternion directly.
+inline void QuatToSourceAngles(float qx, float qy, float qz, float qw,
+                               float & pitchDegrees, float & yawDegrees, float & rollDegrees) {
+    double sinPitch = 2.0 * ((double)qw * qx - (double)qy * qz);
+    if (sinPitch > 1.0) sinPitch = 1.0;
+    if (sinPitch < -1.0) sinPitch = -1.0;
+
+    double pitch = asin(sinPitch);
+    double yaw   = atan2(2.0 * ((double)qw * qy + (double)qz * qx),
+                         1.0 - 2.0 * ((double)qx * qx + (double)qy * qy));
+    double roll  = atan2(2.0 * ((double)qw * qz + (double)qx * qy),
+                         1.0 - 2.0 * ((double)qx * qx + (double)qz * qz));
+
+    const double r2d = 180.0 / 3.14159265358979323846;
+    pitchDegrees = (float)(-pitch * r2d);
+    yawDegrees   = (float)( yaw   * r2d);
+    rollDegrees  = (float)(-roll  * r2d);
+}
+
+// Rotate a vector by a quaternion.
+inline void QuatRotate(float qx, float qy, float qz, float qw,
+                       float x, float y, float z,
+                       float & ox, float & oy, float & oz) {
+    float tx = 2.0f * (qy * z - qz * y);
+    float ty = 2.0f * (qz * x - qx * z);
+    float tz = 2.0f * (qx * y - qy * x);
+    ox = x + qw * tx + (qy * tz - qz * ty);
+    oy = y + qw * ty + (qz * tx - qx * tz);
+    oz = z + qw * tz + (qx * ty - qy * tx);
+}
+
+// An OpenXR-frame direction in Source's world axes. Source: X forward, Y left, Z up.
+// OpenXR: X right, Y up, Z back. So forward is -Z, left is -X, up is +Y.
+inline void XrDirectionToSource(float x, float y, float z,
+                                float & sx, float & sy, float & sz) {
+    sx = -z;
+    sy = -x;
+    sz =  y;
+}
+
 // Fold an angle into (-180, 180].
 inline float NormalizeDegrees(float degrees) {
     while (degrees > 180.0f) degrees -= 360.0f;

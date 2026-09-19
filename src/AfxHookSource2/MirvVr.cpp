@@ -46,6 +46,12 @@ struct Eye {
 // 3 is the pass loop's spare.
 Eye g_Eyes[4];
 
+// The last values actually written into the view struct, per pass, for reporting.
+float g_AppliedOrigin[4][3] = {};
+float g_AppliedAngles[4][3] = {};
+float g_AppliedFov[4] = {};
+bool g_Applied[4] = {};
+
 void * g_ViewStruct = nullptr;
 float g_BaseOrigin[3] = { 0.0f, 0.0f, 0.0f };
 float g_BaseAngles[3] = { 0.0f, 0.0f, 0.0f };
@@ -276,6 +282,13 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
 
     g_Dirty = true;
 
+    for (int i = 0; i < 3; i++) {
+        g_AppliedOrigin[passIndex][i] = pOrigin[i];
+        g_AppliedAngles[passIndex][i] = pAngles[i];
+    }
+    g_AppliedFov[passIndex] = *pFov;
+    g_Applied[passIndex] = true;
+
     // The pose is in place; now let the client rebuild what it derives from it, so the
     // HUD drawn during this pass is placed for this eye.
     RebuildViewMatrices();
@@ -492,4 +505,15 @@ CON_COMMAND(mirv_vr_remakematrix, "cs2-vr-spectator: call the client's matrix bu
         "Current value: %s%s\n",
         g_HudFix ? "1" : "0",
         nullptr == g_MakeMatrix ? " (unavailable: the matrix builder was not hooked)" : "");
+}
+
+bool AfxVr_GetLastApplied(int passIndex, float outOrigin[3], float outAngles[3], float * outFov) {
+    if (passIndex < 0 || passIndex > 3) return false;
+    if (!g_Applied[passIndex]) return false;
+    for (int i = 0; i < 3; i++) {
+        outOrigin[i] = g_AppliedOrigin[passIndex][i];
+        outAngles[i] = g_AppliedAngles[passIndex][i];
+    }
+    if (outFov) *outFov = g_AppliedFov[passIndex];
+    return true;
 }

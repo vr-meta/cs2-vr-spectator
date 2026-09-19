@@ -395,6 +395,8 @@ static void TestSteamInfPath() {
 
 // ---------------------------------------------------------------------------------
 
+static void TestQuatToSourceAngles(); // defined below, after the helpers it needs
+
 static void RunTests() {
     TestAngleVectors();
     TestEyeSeparation();
@@ -406,6 +408,118 @@ static void RunTests() {
     TestCheckView();
     TestSteamInfValue();
     TestSteamInfPath();
+    TestQuatToSourceAngles();
 }
 
 CHECK_MAIN()
+
+// ---------------------------------------------------------------------------------
+
+// Build a quaternion for a rotation of `degrees` about an axis, in OpenXR's frame.
+static void AxisAngle(float ax, float ay, float az, float degrees,
+                      float & qx, float & qy, float & qz, float & qw) {
+    float r = (float)(degrees * 3.14159265358979323846 / 180.0);
+    float s = sinf(0.5f * r);
+    qx = ax * s; qy = ay * s; qz = az * s; qw = cosf(0.5f * r);
+}
+
+static void QuatMultiply(float ax, float ay, float az, float aw,
+                         float bx, float by, float bz, float bw,
+                         float & ox, float & oy, float & oz, float & ow) {
+    ow = aw * bw - ax * bx - ay * by - az * bz;
+    ox = aw * bx + ax * bw + ay * bz - az * by;
+    oy = aw * by - ax * bz + ay * bw + az * bx;
+    oz = aw * bz + ax * by - ay * bx + az * bw;
+}
+
+static void TestQuatToSourceAngles() {
+    check::Case("a quaternion converts to Source angles that describe the same rotation");
+
+    // The check that does not simply restate the assumption: take the angles this function
+    // produces, run them through Source's own AngleVectors, and compare the resulting
+    // basis against rotating the basis vectors by the quaternion directly. If the two
+    // agree, the conversion describes the same rotation whatever convention either side
+    // happens to use internally.
+    //
+    // It matters because two eyes with different orientations no longer cancel a shared
+    // error between them. A wrong conversion then shows as one horizontal line in the
+    // world appearing at two different angles in the two eyes - which is what it did.
+    struct Case { float axisX, axisY, axisZ, degrees; const char * what; };
+    const Case cases[] = {
+        { 0, 1, 0,   0.0f, "identity" },
+        { 0, 1, 0,  30.0f, "yaw left" },
+        { 0, 1, 0, -30.0f, "yaw right" },
+        { 1, 0, 0,  25.0f, "pitch up" },
+        { 1, 0, 0, -25.0f, "pitch down" },
+        { 0, 0, 1,  20.0f, "roll" },
+        { 0, 0, 1, -20.0f, "roll the other way" },
+    };
+
+    for (int i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+        float qx, qy, qz, qw;
+        AxisAngle(cases[i].axisX, cases[i].axisY, cases[i].axisZ, cases[i].degrees, qx, qy, qz, qw);
+
+        float pitch, yaw, roll;
+        QuatToSourceAngles(qx, qy, qz, qw, pitch, yaw, roll);
+
+        float angles[3] = { pitch, yaw, roll };
+        float fromAngles[3][3];
+        AngleVectors(angles, fromAngles[0], fromAngles[1], fromAngles[2]);
+
+        // The same three directions, obtained by rotating OpenXR's basis and mapping into
+        // Source's world. Forward is -Z, right is +X, up is +Y.
+        const float basis[3][3] = { { 0, 0, -1 }, { 1, 0, 0 }, { 0, 1, 0 } };
+        for (int v = 0; v < 3; v++) {
+            float rx, ry, rz;
+            QuatRotate(qx, qy, qz, qw, basis[v][0], basis[v][1], basis[v][2], rx, ry, rz);
+            float sx, sy, sz;
+            XrDirectionToSource(rx, ry, rz, sx, sy, sz);
+
+            CHECK_NEAR(fromAngles[v][0], sx, 2e-3);
+            CHECK_NEAR(fromAngles[v][1], sy, 2e-3);
+            CHECK_NEAR(fromAngles[v][2], sz, 2e-3);
+        }
+    }
+
+    // And the case that actually bit: a head that is pitched, with a small extra yaw
+    // applied about its OWN up axis - which is what pointing an eye at its frustum centre
+    // does. If the conversion is wrong, the roll that comes out differs between an eye
+    // turned one way and an eye turned the other, and the two images rotate apart.
+    {
+        float hx, hy, hz, hw;
+        AxisAngle(1, 0, 0, -25.0f, hx, hy, hz, hw); // head pitched down
+
+        float rollLeft = 0.0f, rollRight = 0.0f;
+        for (int side = 0; side < 2; side++) {
+            float ox, oy, oz, ow;
+            AxisAngle(0, 1, 0, side ? -7.0f : 7.0f, ox, oy, oz, ow);
+
+            float qx, qy, qz, qw;
+            QuatMultiply(hx, hy, hz, hw, ox, oy, oz, ow, qx, qy, qz, qw);
+
+            float pitch, yaw, roll;
+            QuatToSourceAngles(qx, qy, qz, qw, pitch, yaw, roll);
+
+            float angles[3] = { pitch, yaw, roll };
+            float f[3], r[3], u[3];
+            AngleVectors(angles, f, r, u);
+
+            float fx, fy, fz;
+            QuatRotate(qx, qy, qz, qw, 0.0f, 0.0f, -1.0f, fx, fy, fz);
+            float sx, sy, sz;
+            XrDirectionToSource(fx, fy, fz, sx, sy, sz);
+
+            CHECK_NEAR(f[0], sx, 2e-3);
+            CHECK_NEAR(f[1], sy, 2e-3);
+            CHECK_NEAR(f[2], sz, 2e-3);
+
+            (side ? rollRight : rollLeft) = roll;
+        }
+
+        // The two eyes are turned by equal and opposite amounts about the same axis, so
+        // whatever roll the conversion reports must be equal and opposite too. Any other
+        // answer is a relative roll between the eyes, and a relative roll is precisely
+        // what cannot be fused.
+        CHECK_NEAR(rollLeft, -rollRight, 1e-3);
+    }
+}
