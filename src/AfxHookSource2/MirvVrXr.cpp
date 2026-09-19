@@ -357,6 +357,7 @@ int g_TriggerMode = kTriggersPlayers;
 int g_TriggerRepeat = 0;
 const int kTriggerRepeatFrames = 5;
 
+ULONGLONG g_RecenterPressedAt = 0;
 bool g_SlowMotion = false;
 ULONGLONG g_LastInputTick = 0;
 
@@ -599,9 +600,9 @@ struct PanelRegion {
 PanelRegion g_PanelRegions[] = {
     // Up high and wide, because it is what is being read at a glance. Both teams, the
     // score, the round timer, health and money.
-    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  16.0f, 46.0f, 2.0f, true  },
+    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  34.0f, 40.0f, 2.0f, true  },
     // Low and to the left, where a spectator's eyes go when they want the map.
-    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   30.0f, -18.0f, 26.0f, 1.6f, true  },
+    { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   48.0f, -36.0f, 20.0f, 1.6f, true  },
     // Low and central, like a dashboard. It is also what a controller ray will click one
     // day, so close and below the line of sight is right.
     //
@@ -611,17 +612,35 @@ PanelRegion g_PanelRegions[] = {
     // freeze with no spectated target, so the strip did not exist to be measured. Without
     // it the viewer cannot see who they are watching, which is exactly what was needed to
     // tell whether the switch-player button had done anything.
-    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -32.0f, 54.0f, 1.4f, true  },
+    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -46.0f, 50.0f, 1.4f, true  },
     // Off, and NOT measured: there were no kills on screen when the sheet was captured, so
     // this rect is a guess at where the feed appears. Turn it on with mirv_vr_panel region
     // killfeed on and correct it with mirv_vr_panel rect.
-    { "killfeed",0.74f, 0.02f, 1.00f, 0.32f,  -30.0f,  10.0f, 24.0f, 2.0f, false },
+    { "killfeed",0.74f, 0.02f, 1.00f, 0.32f,  -40.0f,  26.0f, 24.0f, 2.0f, false },
 };
 const int kPanelRegionCount = (int)(sizeof(g_PanelRegions) / sizeof(g_PanelRegions[0]));
 
 // False puts the whole sheet back on one quad, which is what this started as and is still
 // the honest way to see what the HUD actually contains.
 bool g_PanelCutUp = true;
+
+// How far out of the way the groups sit, as one number: every group's azimuth and
+// elevation is multiplied by it.
+//
+// The operator's request was "spread the HUD further into the corners, so it is not so
+// much in the centre", and answering that with three commands of three numbers each is not
+// a control anyone will use twice. One factor is. The table above is 1.0.
+//
+// The Quest's usable field is about 44 degrees up, 55 down and 50 either side, so there is
+// not much room above 1.3 before a group leaves the display entirely.
+float g_PanelSpread = 1.0f;
+
+// Whether the quads are submitted at all. Separate from g_PanelEnabled, which is whether
+// the machinery runs: hiding the HUD keeps copying and clearing, so bringing it back does
+// not cost a frame of stale sheet, and it comes back exactly where it was rather than
+// being re-placed in front of wherever you happen to be looking.
+bool g_PanelShown = true;
+
 
 // Frames of alpha reporting still owed, from mirv_vr_panel alpha.
 //
@@ -1384,8 +1403,25 @@ void ProcessInput() {
     if (b && !g_PrevFreeLook) { AfxVr_SetFreeLook(!AfxVr_GetFreeLook()); if (AfxVr_GetFreeLook()) AfxVr_Recenter(); }
     g_PrevFreeLook = b;
 
+    // Right stick click: a short press hides and shows the HUD, a long one recentres.
+    //
+    // The frequent action goes on the short press and the rare one on the long, which is
+    // the only way round that does not surprise anybody. Hiding does not re-place: a
+    // hide and a show must bring the panels back exactly where they were, or it is not a
+    // hide, it is a move. Re-placing is the Menu button and F11.
     b = GetPressed(g_RecenterAction);
-    if (b && !g_PrevRecenter) AfxVr_Recenter();
+    if (b && !g_PrevRecenter) {
+        g_RecenterPressedAt = GetTickCount64();
+    } else if (!b && g_PrevRecenter) {
+        ULONGLONG held = GetTickCount64() - g_RecenterPressedAt;
+        if (held >= 500) {
+            AfxVr_Recenter();
+            advancedfx::Message("AFXVR: recentred.\n");
+        } else {
+            g_PanelShown = !g_PanelShown;
+            advancedfx::Message("AFXVR: HUD %s.\n", g_PanelShown ? "shown" : "hidden");
+        }
+    }
     g_PrevRecenter = b;
 
     // The demo's own camera cycle - first person, chase, free - on the left stick click.
@@ -1526,8 +1562,8 @@ XrPosef PlaceRegion(const PanelRegion & region) {
 
     double anchorYaw = 2.0 * atan2((double)g_PanelPose.orientation.y,
                                    (double)g_PanelPose.orientation.w);
-    double yaw = anchorYaw + region.azimuthDegrees * d2r;
-    double el  = region.elevationDegrees * d2r;
+    double yaw = anchorYaw + region.azimuthDegrees * g_PanelSpread * d2r;
+    double el  = region.elevationDegrees * g_PanelSpread * d2r;
 
     double cosEl = cos(el), sinEl = sin(el);
 
@@ -2549,7 +2585,7 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         XrCompositionLayerQuad quads[kMaxPanelQuads];
         int quadCount = 0;
 
-        bool havePanel = g_PanelEnabled && g_PanelCopied && g_PanelPlaced
+        bool havePanel = g_PanelEnabled && g_PanelShown && g_PanelCopied && g_PanelPlaced
             && XR_NULL_HANDLE != g_Swapchain[kPanelSwapchain]
             && g_SwapchainWidth > 0 && g_SwapchainHeight > 0;
 
@@ -3016,9 +3052,31 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
             return;
         }
 
+        if (!_stricmp(arg1, "spread")) {
+            if (3 <= argc) {
+                g_PanelSpread = (float)atof(args->ArgV(2));
+                if (g_PanelSpread < 0.0f) g_PanelSpread = 0.0f;
+                if (g_PanelSpread > 2.0f) g_PanelSpread = 2.0f;
+            }
+            advancedfx::Message(
+                "mirv_vr_panel: spread %.2f - every group's azimuth and elevation, times that.\n"
+                "  0 stacks them all in front of you; the Quest runs out of display somewhere\n"
+                "  above 1.3.\n",
+                g_PanelSpread);
+            return;
+        }
+
+        if (!_stricmp(arg1, "show") || !_stricmp(arg1, "hide")) {
+            g_PanelShown = (0 == _stricmp(arg1, "show"));
+            advancedfx::Message("mirv_vr_panel: %s.\n", g_PanelShown ? "shown" : "hidden");
+            return;
+        }
+
         if (!_stricmp(arg1, "layout")) {
-            advancedfx::Message("mirv_vr_panel layout (%s):\n",
-                g_PanelCutUp ? "groups" : "one sheet, so none of this is in use");
+            advancedfx::Message("mirv_vr_panel layout (%s, %s, spread %.2f):\n",
+                g_PanelCutUp ? "groups" : "one sheet, so none of this is in use",
+                g_PanelShown ? "shown" : "hidden",
+                g_PanelSpread);
             for (int i = 0; i < kPanelRegionCount; i++) {
                 const PanelRegion & r = g_PanelRegions[i];
                 advancedfx::Message(
@@ -3126,6 +3184,8 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
         "mirv_vr_panel region <g> <az> <el> <deg> [m]  - move and size one group.\n"
         "mirv_vr_panel region <g> on|off\n"
         "mirv_vr_panel rect <g> <u0> <v0> <u1> <v1>    - which part of the sheet it is.\n"
+        "mirv_vr_panel spread <k>  - how far out of the way every group sits, in one number.\n"
+        "mirv_vr_panel show|hide   - without moving anything. Also the right stick click.\n"
         "\n"
         "The timeline, the scoreboard and the speed controls are a flat overlay the game\n"
         "draws at screen depth. Copied into each eye, that is doubled, at the wrong\n"
