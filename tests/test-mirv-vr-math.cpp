@@ -398,6 +398,7 @@ static void TestSteamInfPath() {
 static void TestQuatToSourceAngles(); // defined below, after the helpers it needs
 static void TestComposeSourceAngles();
 static void TestShouldRestoreBaseView();
+static void TestYawThenPitchQuat();
 
 static void RunTests() {
     TestAngleVectors();
@@ -413,6 +414,7 @@ static void RunTests() {
     TestQuatToSourceAngles();
     TestComposeSourceAngles();
     TestShouldRestoreBaseView();
+    TestYawThenPitchQuat();
 }
 
 CHECK_MAIN()
@@ -751,5 +753,57 @@ static void TestShouldRestoreBaseView() {
         nudged.origin[2] = nextafterf(written.origin[2], 1e9f);
         CHECK(nudged.origin[2] != written.origin[2]);
         CHECK(false == AfxVrMath::ShouldRestoreBaseView(true, true, written, nudged));
+    }
+}
+
+// ---------------------------------------------------------------------------------
+
+static void TestYawThenPitchQuat() {
+    check::Case("yaw then local pitch keeps a panel level, whatever direction it faces");
+
+    for (int yawDeg = -180; yawDeg <= 180; yawDeg += 30) {
+        for (int pitchDeg = -60; pitchDeg <= 60; pitchDeg += 15) {
+            float yaw = (float)(yawDeg * 3.14159265358979323846 / 180.0);
+            float pitch = (float)(pitchDeg * 3.14159265358979323846 / 180.0);
+
+            float qx, qy, qz, qw;
+            YawThenPitchQuat(yaw, pitch, qx, qy, qz, qw);
+
+            CHECK_NEAR(qx * qx + qy * qy + qz * qz + qw * qw, 1.0, 1e-5);
+
+            // The property the HUD panels need and the one a wrong sign destroys: the
+            // local X axis - the panel's own horizontal - stays horizontal. Pitching about
+            // the world's X instead rolls it by about sin(yaw)*pitch, which is zero at yaw
+            // 0 and gross everywhere else, so a desk check facing forwards sees nothing.
+            float rx, ry, rz;
+            QuatRotate(qx, qy, qz, qw, 1.0f, 0.0f, 0.0f, rx, ry, rz);
+            CHECK_NEAR(ry, 0.0, 2e-6);
+
+            // And the face points back the way it was placed: for a panel put at azimuth
+            // `yaw` and elevation `pitch`, its +Z must be the direction from the panel to
+            // the anchor.
+            float nx, ny, nz;
+            QuatRotate(qx, qy, qz, qw, 0.0f, 0.0f, 1.0f, nx, ny, nz);
+            CHECK_NEAR(nx, sin(yaw) * cos(pitch), 2e-6);
+            CHECK_NEAR(ny, -sin(pitch), 2e-6);
+            CHECK_NEAR(nz, cos(yaw) * cos(pitch), 2e-6);
+        }
+    }
+
+    // The sign that was wrong, stated as a number so it cannot come back quietly. At yaw
+    // 90 and pitch 30 the two orders differ; the wrong one has a local X with a vertical
+    // component of half.
+    {
+        float yaw = (float)(90.0 * 3.14159265358979323846 / 180.0);
+        float pitch = (float)(30.0 * 3.14159265358979323846 / 180.0);
+        float qx, qy, qz, qw;
+        YawThenPitchQuat(yaw, pitch, qx, qy, qz, qw);
+        CHECK(qz < 0.0f);   // -sin(yaw/2)sin(pitch/2), not plus
+
+        float rx, ry, rz;
+        // The bug was exactly one sign, on z, and nothing else.
+        QuatRotate(qx, qy, -qz, qw, 1.0f, 0.0f, 0.0f, rx, ry, rz);
+        (void)rx; (void)rz;
+        CHECK_NEAR(ry, 0.5, 1e-3);   // half the panel width of tilt, at this yaw and pitch
     }
 }

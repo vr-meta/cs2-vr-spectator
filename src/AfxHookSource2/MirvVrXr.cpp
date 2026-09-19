@@ -396,14 +396,77 @@ void QueueSeek(float seconds) {
     g_PendingSeekSeconds += seconds;
 }
 
-// Presses and releases a game action, the way the demo's own spectator controls are
-// driven. spec_next and spec_prev exist as commands but do nothing during demo playback -
-// the hints on screen say MOUSE1 and SPACE for a reason.
+// Presses and releases a game action.
+//
+// This does NOT switch players, and it never did: the demo's spectator controls are driven
+// from the key event, not from the button state a console "+attack" sets. The on-screen
+// hint reads "[MOUSE1]: Next Player" because it is a binding lookup in the input layer, and
+// that layer never sees a command dispatched through ExecuteClientCmd. The operator found
+// it: the keyboard arrows switched players and the controller buttons did not, running the
+// same "+attack" by two different routes.
+//
+// Kept for the things that ARE console commands. QueueKeyTap is what spectator input needs.
 void QueueTap(const char * action) {
     std::string down("+"); down += action;
     std::string up("-");   up   += action;
     QueueCommand(down.c_str(), 0);
     QueueCommand(up.c_str(), 2);
+}
+
+// A real key, down now and up two frames later.
+//
+// Synthesised with SendInput and the scancode flag, which is how scripts/send-key.ps1
+// reaches this game from outside and the only route the demo's spectator input is known to
+// accept. The keys are the ones vr_keys.cfg binds - RIGHT, LEFT and UP - so the controller
+// takes exactly the path the operator proved works, through the same binds, rather than a
+// second mechanism that might behave differently.
+//
+// That is a real coupling: without those binds loaded the controller's player switching
+// does nothing. Said here and in vr_keys.cfg, because a silent dependency between a config
+// file and a DLL is the kind of thing that costs an evening.
+struct PendingKey { unsigned short vk; int delay; bool down; };
+std::vector<PendingKey> g_PendingKeys;
+
+void SendGameKey(unsigned short vk, bool down) {
+    // SendInput goes to whatever has focus. With a headset on, a window that has quietly
+    // lost focus is invisible - and the key would land in another application.
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    if (pid != GetCurrentProcessId()) {
+        static ULONGLONG lastWarned = 0;
+        ULONGLONG now = GetTickCount64();
+        if (now - lastWarned > 3000) {
+            lastWarned = now;
+            advancedfx::Warning(
+                "AFXVR: the game window is not in the foreground, so controller buttons that\n"
+                "AFXVR: work through a key press are going nowhere. Click the game window.\n");
+        }
+        return;
+    }
+
+    INPUT input = {};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.wScan = (WORD)MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+    input.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0 : KEYEVENTF_KEYUP);
+    // The arrows, like Home and the page keys, live on the extended part of the keyboard
+    // and are not recognised without this.
+    if (VK_LEFT == vk || VK_UP == vk || VK_RIGHT == vk || VK_DOWN == vk
+        || VK_HOME == vk || VK_END == vk || VK_PRIOR == vk || VK_NEXT == vk
+        || VK_INSERT == vk || VK_DELETE == vk) {
+        input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    SendInput(1, &input, sizeof(input));
+}
+
+void QueueKeyTap(unsigned short vk) {
+    std::lock_guard<std::mutex> lock(g_CmdMutex);
+    if (g_PendingKeys.size() < 16) {
+        PendingKey down = { vk, 0, true };
+        PendingKey up   = { vk, 2, false };
+        g_PendingKeys.push_back(down);
+        g_PendingKeys.push_back(up);
+    }
 }
 
 // Every number a hand touches, in one place and adjustable from the console. They were
@@ -1335,7 +1398,7 @@ void ProcessInput() {
     // because entering first person from wherever the sticks had wandered does not look
     // like first person.
     b = GetPressed(g_ResetAction);
-    if (b && !g_PrevReset) { QueueCommand("mirv_input end", 0); QueueTap("jump"); AfxVr_ResetMove(); }
+    if (b && !g_PrevReset) { QueueCommand("mirv_input end", 0); QueueKeyTap(VK_UP); AfxVr_ResetMove(); }
     g_PrevReset = b;
 
     b = GetPressed(g_PauseAction);
@@ -1378,8 +1441,8 @@ void ProcessInput() {
         // does not move at all - which, with a headset on and no console in sight, is
         // indistinguishable from the button being broken. Somebody pressing "next player"
         // is asking to look at a player; the free camera is one press away again.
-        if (forward && !g_PrevSeekForward) { QueueCommand("mirv_input end", 0); QueueTap("attack");  AfxVr_ResetMove(); }
-        if (back    && !g_PrevSeekBack)    { QueueCommand("mirv_input end", 0); QueueTap("attack2"); AfxVr_ResetMove(); }
+        if (forward && !g_PrevSeekForward) { QueueCommand("mirv_input end", 0); QueueKeyTap(VK_RIGHT); AfxVr_ResetMove(); }
+        if (back    && !g_PrevSeekBack)    { QueueCommand("mirv_input end", 0); QueueKeyTap(VK_LEFT);  AfxVr_ResetMove(); }
     } else if (kTriggersFov == g_TriggerMode) {
         // Right widens, left narrows: the same hands as "later" and "earlier", which is
         // the only mapping anyone guesses right with a headset on.
@@ -1473,13 +1536,18 @@ XrPosef PlaceRegion(const PanelRegion & region) {
     pose.position.y = g_PanelPose.position.y + (float)( sinEl            * region.distanceMetres);
     pose.position.z = g_PanelPose.position.z + (float)(-cos(yaw) * cosEl * region.distanceMetres);
 
-    // qYaw about Y, then qPitch about the quad's own X.
-    double sy = sin(yaw * 0.5), cy = cos(yaw * 0.5);
-    double sp = sin(el  * 0.5), cp = cos(el  * 0.5);
-    pose.orientation.w = (float)(cy * cp);
-    pose.orientation.x = (float)(cy * sp);
-    pose.orientation.y = (float)(sy * cp);
-    pose.orientation.z = (float)(sy * sp);
+    // qYaw about Y, then qPitch about the quad's OWN X - composed with the same helper the
+    // eye code uses, rather than expanded by hand.
+    //
+    // It was expanded by hand, and the z term came out +sin(yaw/2)sin(el/2) where the
+    // product gives minus that. The difference is pitching about the WORLD's X instead of
+    // the quad's, which rolls every quad by about sin(yaw)*elevation: zero at anchor yaw 0,
+    // which is where it was checked, and gross at whatever yaw the viewer happened to be
+    // facing. In the headset the score strip leaned ten degrees one way and the timeline
+    // thirty-five the other.
+    AfxVrMath::YawThenPitchQuat((float)yaw, (float)el,
+                                pose.orientation.x, pose.orientation.y,
+                                pose.orientation.z, pose.orientation.w);
 
     return pose;
 }
@@ -1843,6 +1911,7 @@ void MirvVrXr_EngineThread_Frame() {
     // handler only raises a flag.
     {
         std::vector<std::string> due;
+        std::vector<PendingKey> dueKeys;
         float seekSeconds = 0.0f;
         {
             std::lock_guard<std::mutex> lock(g_CmdMutex);
@@ -1857,7 +1926,20 @@ void MirvVrXr_EngineThread_Frame() {
             }
             seekSeconds = g_PendingSeekSeconds;
             g_PendingSeekSeconds = 0.0f;
+
+            for (size_t i = 0; i < g_PendingKeys.size(); ) {
+                if (0 >= g_PendingKeys[i].delay) {
+                    dueKeys.push_back(g_PendingKeys[i]);
+                    g_PendingKeys.erase(g_PendingKeys.begin() + i);
+                } else {
+                    g_PendingKeys[i].delay--;
+                    i++;
+                }
+            }
         }
+
+        // Outside the lock: SendInput can block, and the render thread wants this mutex.
+        for (size_t i = 0; i < dueKeys.size(); i++) SendGameKey(dueKeys[i].vk, dueKeys[i].down);
 
         if (0.0f != seekSeconds) {
             int tick = 0;

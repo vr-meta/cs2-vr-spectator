@@ -181,6 +181,27 @@ inline void ComposeSourceAngles(const float base[3], const float head[3], float 
     RotationToSourceAngles(m, out);
 }
 
+// A yaw about the world's up axis, then a pitch about the result's OWN right axis.
+//
+// The order is the whole content of this function. Yaw-then-local-pitch keeps the thing
+// level: its local X axis stays horizontal whatever the two angles are. Pitching about the
+// WORLD's X instead - which is what the other order gives, and what a hand-expanded
+// quaternion product gives if one sign is wrong - rolls it by about sin(yaw)*pitch. That
+// is zero at yaw 0, so it survives every desk check, and it tilted the HUD panels by
+// thirty-five degrees the moment the viewer faced a different direction.
+//
+// Right-handed, y up, as OpenXR uses.
+inline void YawThenPitchQuat(float yawRadians, float pitchRadians,
+                             float & x, float & y, float & z, float & w) {
+    double sy = sin(yawRadians * 0.5), cy = cos(yawRadians * 0.5);
+    double sp = sin(pitchRadians * 0.5), cp = cos(pitchRadians * 0.5);
+    // (0, sy, 0, cy) * (sp, 0, 0, cp)
+    w = (float)( cy * cp);
+    x = (float)( cy * sp);
+    y = (float)( sy * cp);
+    z = (float)(-sy * sp);
+}
+
 // Fold an angle into (-180, 180].
 inline float NormalizeDegrees(float degrees) {
     while (degrees > 180.0f) degrees -= 360.0f;
