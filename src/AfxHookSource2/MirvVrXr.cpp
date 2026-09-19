@@ -1639,6 +1639,18 @@ void MirvVrXr_EngineThread_Frame() {
         AfxVr_SetEye(pass + 1, true, right, forward, up, dPitch, dYaw, dRoll, fovDegrees);
     }
 
+    // The panel needs a head pose to be placed in front of, and there is none until the
+    // session is up - so "mirv_vr_panel on" in a startup config could never place it, and
+    // the panel silently did not appear. Place it the first time a pose exists.
+    if (g_PanelEnabled && !g_PanelPlaced) {
+        XrPosef mid = views[0].pose;
+        mid.position.x = 0.5f * (views[0].pose.position.x + views[1].pose.position.x);
+        mid.position.y = 0.5f * (views[0].pose.position.y + views[1].pose.position.y);
+        mid.position.z = 0.5f * (views[0].pose.position.z + views[1].pose.position.z);
+        PlacePanelFrom(mid);
+        advancedfx::Message("AFXVR: panel placed in front of where you were looking.\n");
+    }
+
     // And the head itself, once, for everything that reads the camera once a frame
     // rather than once a pass: the audio listener, the client's world-to-screen matrix,
     // culling. Those never saw the viewer at all while the head lived only between
