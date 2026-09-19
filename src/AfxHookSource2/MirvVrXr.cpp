@@ -12,6 +12,7 @@
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
 
 #define _USE_MATH_DEFINES
+#include <tlhelp32.h>
 #include <math.h>
 #include <string>
 #include <vector>
@@ -1395,6 +1396,38 @@ void EngineThread_WaitAndLocate() {
 // the session and is declining to run it - usually because the headset is not being worn,
 // or because something else owns the compositor - and reading that as a bug in the hook
 // wastes an evening.
+// Is SteamVR running?
+//
+// On a Quest over Link, SteamVR is not an alternative to the Oculus runtime - it is a
+// client of it, and while it is up it is the application the Oculus compositor is
+// scheduling. A second, native session opened underneath it gets a session that says it is
+// running and an xrWaitFrame that takes hundreds of milliseconds, until CS2's render thread
+// is parked inside the wait and the game stops responding. From the outside that looks
+// exactly like whatever shipped last being broken, which is an expensive thing for it to
+// look like.
+//
+// One snapshot at session start; nothing here runs per frame.
+bool SteamVrIsRunning() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (INVALID_HANDLE_VALUE == snapshot) return false;
+
+    bool found = false;
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (0 == _wcsicmp(entry.szExeFile, L"vrserver.exe")
+             || 0 == _wcsicmp(entry.szExeFile, L"vrcompositor.exe")) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+
+    CloseHandle(snapshot);
+    return found;
+}
+
 const char * SessionStateName(XrSessionState s) {
     switch (s) {
         case XR_SESSION_STATE_IDLE:         return "IDLE - created, but the runtime will not run it yet (headset not worn? another app in front?)";
@@ -1597,7 +1630,19 @@ bool MirvVrXr_SessionStart() {
 
     if (CreateActions()) AttachActions();
 
+    // Cheap, once, and it turns an hour of bisecting a hang into one line of log.
+    if (SteamVrIsRunning()) {
+        advancedfx::Warning(
+            "AFXVR: SteamVR is running.\n"
+            "AFXVR: On a Quest over Link, SteamVR is a client of the Oculus runtime and holds\n"
+            "AFXVR: the headset. A session opened underneath it is not scheduled: xrWaitFrame\n"
+            "AFXVR: takes hundreds of milliseconds, the frame rate collapses, and CS2 stops\n"
+            "AFXVR: responding with its render thread parked inside the wait.\n"
+            "AFXVR: Close SteamVR. scripts/start-vr.ps1 refuses to launch while it is up.\n");
+    }
+
     advancedfx::Message("AFXVR: session created; waiting for the runtime to make it ready.\n");
+
     return true;
 }
 
@@ -2355,9 +2400,15 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             g_FpsWindowStart = now;
             g_FpsFrames = 0;
             if (g_LogFps) {
-                advancedfx::Message("AFXVR: %.1f frames/s submitted at %ux%u per eye (%.2f ms)\n",
+                // The state, but only when it is not the one that means "we have the
+                // headset". A collapsed frame rate with the session merely VISIBLE is the
+                // compositor declining to schedule us, not a regression in the renderer,
+                // and reading it as the latter has already cost an afternoon.
+                advancedfx::Message("AFXVR: %.1f frames/s submitted at %ux%u per eye (%.2f ms)%s%s\n",
                     g_SubmitFps, g_SwapchainWidth, g_SwapchainHeight,
-                    g_SubmitFps > 0.0f ? 1000.0f / g_SubmitFps : 0.0f);
+                    g_SubmitFps > 0.0f ? 1000.0f / g_SubmitFps : 0.0f,
+                    (XR_SESSION_STATE_FOCUSED == g_State) ? "" : "  session ",
+                    (XR_SESSION_STATE_FOCUSED == g_State) ? "" : SessionStateName(g_State));
                 advancedfx::Message(
                     "AFXVR:   xrWaitFrame %.2f ms (worst %.2f)  locate %.2f  copy %.2f x%i  xrEndFrame %.2f\n",
                     g_StageWaitFrame.Mean(), g_StageWaitFrame.worstMs,
