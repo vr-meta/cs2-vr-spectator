@@ -32,6 +32,7 @@ param(
     [int]$Height     = 2780,     # window size IS the eye size
     [int]$FpsMax     = 90,
     [switch]$NoStart,            # skip the F9
+    [switch]$NoDemo,             # stop at CS2's own menu instead of loading a demo
     [switch]$KeepSteamVr         # start anyway with SteamVR running
 )
 
@@ -70,10 +71,28 @@ Write-Host "frame cap: $FpsMax" -ForegroundColor Cyan
 # be copied by hand, which is how a config in the game and a config in git drift apart.
 & (Join-Path $here 'deploy-cfg.ps1')
 
-& (Join-Path $here 'launch-cs2-experiment.ps1') `
-    -SelfBuilt -VrReady -MetaRuntime `
-    -ExecCfg vr -Width $Width -Height $Height -FpsMax $FpsMax -Demo $Demo `
-    -AutoStart:(-not $NoStart)
+# -NoDemo stops at CS2's own menu. Everything else about a worn launch is unchanged -
+# the runtime, the eye size, the frame cap, the configs - because the question it exists
+# for is what the MENU looks like through the headset, and that only means anything at the
+# size and shape a session actually runs at. Autostart is off with it: the gate is a demo
+# playing, and there will not be one.
+$launch = @{
+    SelfBuilt = $true; VrReady = $true; MetaRuntime = $true
+    ExecCfg = 'vr'; Width = $Width; Height = $Height; FpsMax = $FpsMax
+    AutoStart = (-not $NoStart) -and (-not $NoDemo)
+}
+if (-not $NoDemo) { $launch.Demo = $Demo }
+
+& (Join-Path $here 'launch-cs2-experiment.ps1') @launch
+
+if ($NoDemo) {
+    Write-Host ''
+    Write-Host 'Stopped at the menu, no demo. The session does not start by itself without one.' -ForegroundColor Green
+    Write-Host '  scripts\send-command.ps1 "mirv_vr_xr start"           begins it' -ForegroundColor Green
+    Write-Host '  scripts\send-command.ps1 "mirv_vr_panel sheet" "mirv_vr_panel opaque"' -ForegroundColor Green
+    Write-Host '                                                        puts the whole window on one quad' -ForegroundColor Green
+    exit 0
+}
 
 if ($NoStart) {
     Write-Host 'Launched. Press F9 in the game when the demo is up.' -ForegroundColor Green
