@@ -71,6 +71,13 @@ hook\
 Put the DLL at `hook\AfxHookSource2.dll` instead and every resource path resolves one level
 too high, silently — no error, just no shaders.
 
+And it finds itself with `GetModuleHandleW(L"AfxHookSource2.dll")`, by that exact name. Give
+the file any other name and the handle is null, the folder string is left empty, and every
+`resources\...` path becomes relative to the process's working directory — which is CS2's,
+not ours. Also silent. So the zip may not rename the DLL to something friendlier, an
+installer may not version-stamp it, and a second copy kept side by side for comparison has
+to live in a separate tree rather than beside the first under a different name.
+
 This is also why the loader search added in *the hook stops needing this particular
 machine* looks both beside the DLL and one directory up: beside it is where the zip puts
 it, one up is where a hand-assembled HLAE tree has it.
