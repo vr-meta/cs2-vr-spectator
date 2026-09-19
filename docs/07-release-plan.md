@@ -85,6 +85,14 @@ Asked for the same afternoon: start CS2 at an ordinary size, use its own menus, 
 demo from the Watch tab, and only when the map is up press F9 — "and the resolution and the
 rest fix themselves". And the launcher must not be tied to one recording.
 
+> **Decided, 2026-09-19, by the person who wears it:** aim straight at CS2's own menu
+> inside the headset (the option described under 2 below), and do **not** pursue the
+> runtime resolution switch if the menu works. One window size for the whole launch, no
+> video mode to save and restore, nothing to leak into `cs2_video.txt` — the simpler
+> machine wins. The resolution switch stays in this document only as the way out if the
+> desk check shows the main menu is unusable at 0.91:1; that check is therefore the first
+> thing to do, before any of the menu work is built.
+
 Two things stand in the way, and only one of them is ours.
 
 **Ours: the eye size is the window size.** Submission is a `CopyResource` of the back

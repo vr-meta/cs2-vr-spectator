@@ -60,9 +60,18 @@ hook\resources\shaders\...
 ```
 
 The hook finds its resources from **its own path** — strip the file name, go up one
-directory — and it looks itself up by the name `AfxHookSource2.dll`. Move the DLL up a
-level, flatten the folders or rename it, and nothing errors: the shaders are simply not
-found. Never "tidy" this tree. See `docs/experiments/21-what-the-zip-has-to-contain.md`.
+directory — and it looks itself up by the exact name `AfxHookSource2.dll`. Move the DLL up
+a level or flatten the folders, and every resource path resolves one directory too high.
+Rename it and it is worse: the lookup returns nothing, the folder is left **empty**, and
+`resources\...` is then resolved against the process's working directory — CS2's install,
+not ours. Neither case reports an error. So:
+
+- never "tidy" this tree;
+- no version stamp in the DLL's file name — the version lives in the folder name;
+- a second build for comparison is a second complete tree (`<version>\hook\x64\...`), never
+  a second file beside the first.
+
+See `docs/experiments/21-what-the-zip-has-to-contain.md`.
 
 ## 4. Check what a session needs, and report each as a line
 
