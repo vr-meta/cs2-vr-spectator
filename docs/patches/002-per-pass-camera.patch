@@ -230,7 +230,7 @@ index 73b7c00..eec70b0 100644
  
      bool m_Shutdown = false;
 diff --git a/AfxHookSource2/main.cpp b/AfxHookSource2/main.cpp
-index efbea01..508bec1 100644
+index efbea01..9b229ae 100644
 --- a/AfxHookSource2/main.cpp
 +++ b/AfxHookSource2/main.cpp
 @@ -21,6 +21,7 @@
@@ -265,7 +265,7 @@ index efbea01..508bec1 100644
  	if (g_S2CamIO.GetCamExport())
  	{
  		CamIO::CamData camData;
-@@ -978,6 +989,20 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
+@@ -978,6 +989,28 @@ void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
  	g_WorldToScreenMatrix.m[3][2] = proj[4*3+2];
  	g_WorldToScreenMatrix.m[3][3] = proj[4*3+3];
  
@@ -273,6 +273,14 @@ index efbea01..508bec1 100644
 +	// eye so the client's world-to-screen matrix matches the camera that pass renders
 +	// with. Registered here because only this translation unit holds the trampoline.
 +	AfxVr_SetMakeMatrix(g_Old_CViewRender_UnkMakeMatrix);
++
++	// cs2-vr-spectator: the engine's own projection, so "what field of view did CS2
++	// actually render" stops being a model and becomes a measurement. [0][0] is
++	// 1/tan(horizontal half-angle), [1][1] is 1/tan(vertical half-angle).
++	{
++		float * proj = (float*)((unsigned char*)This + 0x218);
++		AfxVr_SetProjectionDiagonal(proj[0], proj[5]);
++	}
 +
 +	// cs2-vr-spectator: is the projection rebuilt once per frame or once per pass, and is
 +	// this the same object the view setup trampoline writes into?

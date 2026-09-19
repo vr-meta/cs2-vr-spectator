@@ -386,6 +386,19 @@ XrCompositionLayerProjectionView g_ProjViews[2] = {};
 // The sub-rectangle of each eye's image that the runtime's own frustum covers. See the
 // long note where it is computed.
 bool g_CropToRuntimeFov = true;
+
+// OFF, and it must stay off until the measurement is of the right camera.
+//
+// The idea was sound: read the field of view the engine actually rendered out of its own
+// projection matrix instead of trusting the number we handed it. The execution was not.
+// The matrix is built once per frame, AFTER the passes, with the base camera restored -
+// which this project's own patch notes say in as many words. So what gets measured is the
+// demo camera's 90 degrees, not the eyes'. Claiming that wrecked a configuration that had
+// just been reported as perfect, smoke and all.
+//
+// To make this work the projection would have to be sampled per pass, while the eye's
+// camera is still in the struct. Until then, claim what we asked for.
+bool g_UseMeasuredFov = false;
 XrRect2Di g_CropRect[2] = {};
 bool g_CropValid[2] = { false, false };
 
@@ -1429,7 +1442,27 @@ bool MirvVrXr_SessionStart() {
 }
 
 void MirvVrXr_SessionStop() {
-    if (g_SessionRunning && xrEndSession_) { xrEndSession_(g_Session); g_SessionRunning = false; }
+    // Stop wanting passes FIRST, so the pass loop queues no further eye submissions, then
+    // give whatever frame is in flight a moment to finish before the swapchains it is
+    // copying into are destroyed.
+    //
+    // Skipping this is how the game died: a key that stopped and restarted the session in
+    // one frame tore the swapchains out from under the render thread, and the runtime
+    // answered XR_ERROR_GRAPHICS_DEVICE_INVALID followed by DXGI_ERROR_DEVICE_REMOVED.
+    // It is also the likeliest explanation for the XR_ERROR_RUNTIME_FAILURE this project
+    // has hit before on repeated stop and start.
+    bool wasRunning = g_SessionRunning;
+    g_SessionRunning = false;
+
+    if (wasRunning) {
+        for (int i = 0; i < 200 && g_FrameBegun; i++) Sleep(1);
+        if (g_FrameBegun) {
+            advancedfx::Warning(
+                "AFXVR: a frame was still open after 200 ms; stopping anyway.\n");
+        }
+    }
+
+    if (wasRunning && xrEndSession_) xrEndSession_(g_Session);
     DestroySwapchains();
     if (XR_NULL_HANDLE != g_Space && xrDestroySpace_) { xrDestroySpace_(g_Space); g_Space = XR_NULL_HANDLE; }
     if (XR_NULL_HANDLE != g_Session && xrDestroySession_) { xrDestroySession_(g_Session); g_Session = XR_NULL_HANDLE; }
@@ -1693,7 +1726,23 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             // the frustum we WANTED, not the number we handed the engine to get it. With
             // the aspect fix off those are the same; with it on they differ by exactly the
             // engine's 4:3 convention, which is the point.
+            // Claim what the engine actually rendered, measured from its own projection
+            // matrix, not what we asked it for.
+            //
+            // CS2 clamps the view field of view. Ask for 127 degrees on this window and it
+            // renders 68.6 horizontal, 73.7 vertical - which is exactly fov 90 at this
+            // aspect, the engine's own ceiling. We were claiming 108. The ratio of tangents
+            // is 2.0, so the runtime shrank the image to half size and the world looked
+            // twice as far away as it is, which is precisely how it was described.
+            //
+            // Measuring removes the whole question. Whatever the engine does with the
+            // request - honours it, clamps it, ignores it - the claim matches the image.
+            float measuredH = 0.0f, measuredV = 0.0f;
+            bool measured = g_UseMeasuredFov && AfxVr_GetRenderedFovDegrees(&measuredH, &measuredV)
+                            && measuredH > 1.0f && measuredV > 1.0f;
+
             float claimed = WantedFovDegrees(rendered[eye].fov);
+            if (measured) claimed = measuredH;
             if (0 != g_CentreFrustum) {
                 claimed = 2.0f * centre.halfHorizontal;
                 if (g_FovOverrideDegrees > 0.0f) claimed = g_FovOverrideDegrees;
@@ -1704,6 +1753,10 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             float vHalf = half;
             if (g_FovVerticalOverrideDegrees > 0.0f) {
                 vHalf = 0.5f * g_FovVerticalOverrideDegrees * (float)(M_PI / 180.0);
+            } else if (measured) {
+                // Measured too, rather than derived from the aspect. The engine's vertical
+                // is its own business and it has now been read rather than modelled.
+                vHalf = 0.5f * measuredV * (float)(M_PI / 180.0);
             } else if (g_SwapchainWidth && g_SwapchainHeight) {
                 vHalf = atanf(tanf(half) * (float)g_SwapchainHeight / (float)g_SwapchainWidth);
             }
@@ -2340,6 +2393,23 @@ CON_COMMAND(mirv_vr_views, "cs2-vr-spectator: what the runtime actually reports 
     if (have2) advancedfx::Message("    pass 2  org (%.2f %.2f %.2f)  ang (%.2f %.2f %.2f)  fov %.1f\n",
         o2[0], o2[1], o2[2], a2[0], a2[1], a2[2], f2);
     else advancedfx::Message("    pass 2  nothing written yet\n");
+
+    // What the engine's own projection matrix says it rendered, against what we claimed.
+    // These two disagreeing is what makes the world look small and far away: the runtime
+    // is told the image covers more than it does, so it shrinks it to fit.
+    {
+        float renderedH = 0.0f, renderedV = 0.0f;
+        if (AfxVr_GetRenderedFovDegrees(&renderedH, &renderedV)) {
+            advancedfx::Message(
+                "\n  The engine's own projection matrix, for the camera it last built one for:\n"
+                "    rendered %.1f deg horizontal, %.1f deg vertical\n"
+                "    (a measurement, not the 4:3 model - if these disagree with what we claim,\n"
+                "     the world looks the wrong size)\n",
+                renderedH, renderedV);
+        } else {
+            advancedfx::Message("\n  The engine's projection matrix has not been seen yet.\n");
+        }
+    }
 
     if (have1 && have2) {
         float dx = o2[0] - o1[0], dy = o2[1] - o1[1], dz = o2[2] - o1[2];

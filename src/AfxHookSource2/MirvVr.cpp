@@ -517,3 +517,23 @@ bool AfxVr_GetLastApplied(int passIndex, float outOrigin[3], float outAngles[3],
     if (outFov) *outFov = g_AppliedFov[passIndex];
     return true;
 }
+
+namespace {
+float g_Proj00 = 0.0f;
+float g_Proj11 = 0.0f;
+bool g_ProjKnown = false;
+}
+
+void AfxVr_SetProjectionDiagonal(float m00, float m11) {
+    g_Proj00 = m00;
+    g_Proj11 = m11;
+    g_ProjKnown = (m00 > 1e-6f && m11 > 1e-6f);
+}
+
+bool AfxVr_GetRenderedFovDegrees(float * outHorizontal, float * outVertical) {
+    if (!g_ProjKnown) return false;
+    const double r2d = 180.0 / M_PI;
+    if (outHorizontal) *outHorizontal = (float)(2.0 * atan(1.0 / g_Proj00) * r2d);
+    if (outVertical)   *outVertical   = (float)(2.0 * atan(1.0 / g_Proj11) * r2d);
+    return true;
+}

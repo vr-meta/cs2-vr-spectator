@@ -37,6 +37,14 @@ void AfxVr_OnBeginRenderPass(int passIndex);
 // values at the point of the write can tell the two apart.
 bool AfxVr_GetLastApplied(int passIndex, float outOrigin[3], float outAngles[3], float * outFov);
 
+// The engine's own projection matrix diagonal, from the hook in main.cpp. proj[0][0] is
+// 1/tan(horizontal half-angle) and proj[1][1] is 1/tan(vertical half-angle), so this turns
+// "what field of view did CS2 actually render" from a model into a measurement. It matters
+// because the number handed to the engine is not the one it renders: fov in Source is
+// defined at 4:3 and this window is portrait.
+void AfxVr_SetProjectionDiagonal(float m00, float m11);
+bool AfxVr_GetRenderedFovDegrees(float * outHorizontal, float * outVertical);
+
 // The client builds its world-to-screen and projection matrices once a frame, from the
 // base camera, in a function main.cpp already hooks. The HUD is drawn once per *pass* and
 // reads those matrices - so name tags and health numbers land where they would have been
