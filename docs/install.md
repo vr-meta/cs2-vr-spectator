@@ -103,9 +103,18 @@ as above.
 ## 3. Configs
 
 ```powershell
-Copy-Item D:\Dev\cs2-vr-spectator\scripts\cs2\vr.cfg `
+Copy-Item D:\Dev\cs2-vr-spectator\scripts\cs2\vr.cfg, `
+          D:\Dev\cs2-vr-spectator\scripts\cs2\vr_keys.cfg, `
+          D:\Dev\cs2-vr-spectator\scripts\cs2\vr_diag.cfg `
           'D:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\'
 ```
+
+Three files, because a CS2 bind is last-one-wins and says nothing about it. `vr.cfg` holds
+settings and then execs `vr_keys.cfg`, the everyday layout. `vr_diag.cfg` is the stereo
+diagnostics as a separate layout you switch into with **PgDn** and out of with **PgUp**.
+They used to be one file, in which the diagnostics at the bottom quietly took eleven keys
+off the bindings above them while the printed help went on advertising the old layout.
+`scripts/check-cfg.ps1` fails the build if that happens again.
 
 Put a demo where the game can find it — `game\csgo\pro_mirage.dem` in these examples. Use
 a GOTV demo; a locally recorded bot demo did not replay at all.
@@ -153,7 +162,7 @@ finding the keyboard with a headset on.
 
 ## Controls
 
-Keyboard, from `vr.cfg`:
+Keyboard, from `vr_keys.cfg`:
 
 | | |
 | --- | --- |
@@ -161,9 +170,27 @@ Keyboard, from `vr.cfg`:
 | F6 / F7 | free camera on / off |
 | F8 / F10 | free look on / off |
 | F1 | recentre |
+| F12 | back onto the demo camera |
 | F4, F2 / F3 | pause, slow motion / normal speed |
+| INS / DEL, F11 | HUD panel on / off, re-place it where you are looking |
 | HOME / END | HUD off / on |
-| INS / DEL | frame rate logging on / off |
+| PgUp | print the controller map |
+| PgDn | switch to the stereo diagnostics layout |
+
+And in that diagnostics layout, from `vr_diag.cfg`:
+
+| | |
+| --- | --- |
+| HOME / END | session stop / start |
+| F9 / F10 | pose latency low / safe — stop the session first, then start it again |
+| F1 | what the runtime reports for each eye |
+| F2 / F3 | crop to the runtime's frustum on / off |
+| F4 / F5 | frustum centring on / off |
+| F6 | swap the eyes |
+| F7 / F8 | one eye in both on / off |
+| F11 / F12 | frame rate logging on / off |
+| INS / DEL | mouse slower / faster |
+| PgUp | back to the everyday layout |
 
 Controllers. One idea per control: the left hand chooses who you are watching and where
 you stand, the right hand controls how time runs and where the camera points, and the

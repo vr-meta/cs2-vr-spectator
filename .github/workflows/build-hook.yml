@@ -13,12 +13,14 @@ on:
       - 'src/**'
       - 'tests/**'
       - 'docs/patches/**'
+      - 'scripts/**'
       - '.github/workflows/build-hook.yml'
   pull_request:
     paths:
       - 'src/**'
       - 'tests/**'
       - 'docs/patches/**'
+      - 'scripts/**'
       - '.github/workflows/build-hook.yml'
   schedule:
     # Weekly, so upstream moving out from under the patches is noticed by itself rather
@@ -48,6 +50,12 @@ jobs:
           cmake -S tests -B build/tests -DCMAKE_BUILD_TYPE=Release
           cmake --build build/tests
           ctest --test-dir build/tests --output-on-failure
+
+      # A bind in a CS2 config is last-one-wins and silent about it, and the person
+      # pressing the key has a headset on. Two seconds here, an evening otherwise.
+      - name: Key bindings are unambiguous
+        shell: pwsh
+        run: ./scripts/check-cfg.ps1
 
   # Two minutes and no toolchain. The patches stopped applying in sequence once already —
   # 002 had been generated from a tree that already had 001 in it, so it carried 001's hunk
