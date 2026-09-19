@@ -339,6 +339,18 @@ bool g_CaptureBeforeUi = false;
 bool g_PrevRecenter = false, g_PrevFreeLook = false, g_PrevReset = false, g_PrevPause = false;
 bool g_PrevNext = false, g_PrevPrev = false, g_PrevMode = false;
 bool g_PrevSlowMo = false, g_PrevSeekForward = false, g_PrevSeekBack = false;
+
+// What the triggers are for. Seeking was the original answer - it is what a spectator
+// reaches for - but the field of view has to be found by someone wearing the headset, and
+// a dial you have to take the headset off to turn is not a dial. Seeking is on the
+// keyboard meanwhile; mirv_vr_triggers puts it back.
+bool g_TriggersTuneFov = true;
+
+// Frames until the held trigger steps again. One press is one per cent, which is too fine
+// to travel fifteen on, so holding repeats - slowly enough to stop where you meant to.
+int g_TriggerRepeat = 0;
+const int kTriggerRepeatFrames = 5;
+
 bool g_SlowMotion = false;
 ULONGLONG g_LastInputTick = 0;
 
@@ -856,6 +868,35 @@ float g_ReportedFovOverrideDegrees = 0.0f;
 // not even wide enough to cover the headset's 94.
 bool g_SourceAspectFix = true;
 
+// A multiplier on the angle handed to the ENGINE, and on nothing else.
+//
+// Everything else in this file that touches the field of view moves the ask and the claim
+// together, which - with the crop in place - is invisible by construction: the image and
+// the rectangle cut out of it both change, and the result is identical apart from
+// sharpness. That was the point of it, as an invariance test. This is the opposite dial,
+// and the one that matters: it changes how much world goes into the image while the
+// runtime keeps being told the truth about the frustum it will be shown in.
+//
+// It exists because of a measurement nobody has been able to make from a desk. Source's
+// fov is defined at 4:3 and the engine widens it for the window's aspect, so to render 108
+// degrees on this portrait buffer we ask for 127.3. What is not known is whether the field
+// the per-pass write goes into is still in that convention by the time a pass runs, or
+// whether the engine has already rescaled it in place - in which case we ask 127.3 and get
+// 127.3, the crop assumes 108, and the world is shown at tan54/tan63.65 = 0.68 of its size
+// with a residue on every head turn.
+//
+// A person in the headset can find the right number in thirty seconds where the code
+// cannot: look at a far corner, turn and nod, and adjust until the corner stays nailed to
+// the world. Ignore how big things look; the criterion is whether the world moves against
+// the head. If it settles near 0.85 the field is already scaled and the aspect fix is
+// double-counting; if near 1.0 the 4:3 model was right and the complaint is elsewhere.
+//
+// Deliberately NOT reset by mirv_vr_reset. It is a calibration, not a setting, and a reset
+// that silently eats a calibration is how an evening goes.
+float g_AskScale = 1.0f;
+const float kAskScaleStep = 1.01f;
+
+
 float AspectOfImage() {
     if (g_SwapchainWidth && g_SwapchainHeight) {
         return (float)g_SwapchainWidth / (float)g_SwapchainHeight;
@@ -897,12 +938,13 @@ float WantedFovDegrees(const XrFovf & fov) {
     return degrees;
 }
 
-// What to hand the engine. Differs from the above only when the aspect fix is on.
+// What to hand the engine. Differs from WantedFovDegrees when the aspect fix is on, and by
+// the calibration scale, which is the whole reason the two are separate functions.
 float EffectiveFovDegrees(const XrFovf & fov) {
     float wanted = WantedFovDegrees(fov);
-    if (!g_SourceAspectFix) return wanted;
+    float asked = g_SourceAspectFix ? SourceFovForWanted(wanted) : wanted;
 
-    float asked = SourceFovForWanted(wanted);
+    asked *= g_AskScale;
     if (asked < 10.0f) asked = 10.0f;
     if (asked > 178.0f) asked = 178.0f;
     return asked;
@@ -1291,13 +1333,52 @@ void ProcessInput() {
     if (b && !g_PrevMode) QueueTap("jump"); // the demo's "next camera"
     g_PrevMode = b;
 
-    b = GetPressed(g_SeekForwardAction);
-    if (b && !g_PrevSeekForward) QueueSeek(+g_SeekSeconds);
-    g_PrevSeekForward = b;
+    bool forward = GetPressed(g_SeekForwardAction);
+    bool back    = GetPressed(g_SeekBackAction);
 
-    b = GetPressed(g_SeekBackAction);
-    if (b && !g_PrevSeekBack) QueueSeek(-g_SeekSeconds);
-    g_PrevSeekBack = b;
+    if (g_TriggersTuneFov) {
+        // Right widens, left narrows: the same hands as "later" and "earlier", which is
+        // the only mapping anyone guesses right with a headset on.
+        int direction = 0;
+        if (forward && !back) direction = +1;
+        else if (back && !forward) direction = -1;
+
+        if (0 == direction) {
+            g_TriggerRepeat = 0;
+        } else {
+            bool fresh = (forward && !g_PrevSeekForward) || (back && !g_PrevSeekBack);
+            if (fresh) g_TriggerRepeat = 0;
+            if (0 == g_TriggerRepeat) {
+                g_TriggerRepeat = kTriggerRepeatFrames;
+                g_AskScale *= (direction > 0) ? kAskScaleStep : (1.0f / kAskScaleStep);
+                if (g_AskScale < 0.5f) g_AskScale = 0.5f;
+                if (g_AskScale > 1.2f) g_AskScale = 1.2f;
+
+                // The person turning this dial cannot see the console, but the log is what
+                // the number gets read out of afterwards, so print it every time.
+                float claimed = 0.0f, asked = 0.0f;
+                {
+                    std::lock_guard<std::mutex> lock(g_ViewMutex);
+                    if (g_ViewsValid) {
+                        claimed = WantedFovDegrees(g_Views[0].fov);
+                        asked = EffectiveFovDegrees(g_Views[0].fov);
+                    }
+                }
+                advancedfx::Message(
+                    "AFXVR: ask scale %.3f - engine asked %.1f deg, runtime still told %.1f\n",
+                    g_AskScale, asked, claimed);
+            } else {
+                g_TriggerRepeat--;
+            }
+        }
+    } else {
+        if (forward && !g_PrevSeekForward) QueueSeek(+g_SeekSeconds);
+        if (back && !g_PrevSeekBack) QueueSeek(-g_SeekSeconds);
+    }
+
+    g_PrevSeekForward = forward;
+    g_PrevSeekBack = back;
+
 }
 
 // Put the panel in front of a head pose, upright, at the configured distance. Only the
@@ -3024,6 +3105,10 @@ CON_COMMAND(mirv_vr_views, "cs2-vr-spectator: what the runtime actually reports 
         o2[0], o2[1], o2[2], a2[0], a2[1], a2[2], f2);
     else advancedfx::Message("    pass 2  nothing written yet\n");
 
+    advancedfx::Message("\n  Ask scale %.3f%s\n",
+        g_AskScale,
+        (g_AskScale == 1.0f) ? " (untouched)" : " - the engine is asked for that much of the claimed angle");
+
     // What the engine's own projection matrix says it rendered, against what we claimed.
     // These two disagreeing is what makes the world look small and far away: the runtime
     // is told the image covers more than it does, so it shrinks it to fit.
@@ -3061,6 +3146,51 @@ CON_COMMAND(mirv_vr_views, "cs2-vr-spectator: what the runtime actually reports 
         "  the image appearing; it stops the two halves fusing, worse towards the edges.\n"
         "  Eyes currently %s.\n",
         g_SwapEyes ? "SWAPPED by mirv_vr_xr swap" : "in runtime order");
+}
+
+CON_COMMAND(mirv_vr_triggers, "cs2-vr-spectator: what the controller triggers do - tune the field of view, or seek.")
+{
+    if (2 <= args->ArgC()) {
+        if (!_stricmp(args->ArgV(1), "fov"))  { g_TriggersTuneFov = true;  }
+        else if (!_stricmp(args->ArgV(1), "seek")) { g_TriggersTuneFov = false; }
+        else {
+            advancedfx::Warning("mirv_vr_triggers fov|seek\n");
+            return;
+        }
+        advancedfx::Message("mirv_vr_triggers: %s\n",
+            g_TriggersTuneFov
+                ? "right widens the view, left narrows it. Hold to repeat."
+                : "right seeks forward, left seeks back.");
+        return;
+    }
+
+    advancedfx::Message(
+        "mirv_vr_triggers fov|seek - what the two triggers are for.\n"
+        "\n"
+        "fov:  right widens what the engine is asked to render, left narrows it, one per\n"
+        "      cent a step, held to repeat. What the runtime is TOLD does not change, so\n"
+        "      this is the one dial that is not invisible: it changes how much world goes\n"
+        "      into the image while the frustum it is shown in stays honest.\n"
+        "\n"
+        "      It is a measurement, not a preference. Look at a far corner, turn and nod,\n"
+        "      and stop when the corner stays nailed to the world. Ignore how big things\n"
+        "      look - the criterion is whether the world moves against your head.\n"
+        "\n"
+        "seek: the original, and what a spectator reaches for. HOME and END do it from the\n"
+        "      keyboard meanwhile.\n"
+        "\n"
+        "Current: %s, ask scale %.3f.\n",
+        g_TriggersTuneFov ? "fov" : "seek", g_AskScale);
+}
+
+CON_COMMAND(mirv_vr_askscale, "cs2-vr-spectator: the multiplier on the angle handed to the engine.")
+{
+    if (2 <= args->ArgC()) {
+        g_AskScale = (float)atof(args->ArgV(1));
+        if (g_AskScale < 0.5f) g_AskScale = 0.5f;
+        if (g_AskScale > 1.2f) g_AskScale = 1.2f;
+    }
+    advancedfx::Message("mirv_vr_askscale: %.3f\n", g_AskScale);
 }
 
 CON_COMMAND(mirv_vr_fov, "cs2-vr-spectator: override the frustum, when the automatic one does not fuse.")
