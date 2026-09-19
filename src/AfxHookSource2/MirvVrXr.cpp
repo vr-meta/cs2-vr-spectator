@@ -518,6 +518,23 @@ void RotateIntoFrame(const XrQuaternionf & q, float x, float y, float z,
     oz = z + qw * tz + (qx * ty - qy * tx);
 }
 
+// An OpenXR orientation as Source's (pitch, yaw, roll) in degrees. Source inverts pitch
+// and roll relative to OpenXR; yaw agrees.
+void XrQuatToSourceAngles(const XrQuaternionf & q, float & dPitch, float & dYaw, float & dRoll) {
+    double sinPitch = 2.0 * (q.w * q.x - q.y * q.z);
+    if (sinPitch > 1.0) sinPitch = 1.0;
+    if (sinPitch < -1.0) sinPitch = -1.0;
+
+    double pitch = asin(sinPitch);
+    double yaw   = atan2(2.0 * (q.w * q.y + q.z * q.x), 1.0 - 2.0 * (q.x * q.x + q.y * q.y));
+    double roll  = atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.x * q.x + q.z * q.z));
+
+    const double r2d = 180.0 / M_PI;
+    dPitch = (float)(-pitch * r2d);
+    dYaw   = (float)( yaw   * r2d);
+    dRoll  = (float)(-roll  * r2d);
+}
+
 void XrPoseToEye(const XrPosef & pose, const XrPosef & base,
                  float & right, float & forward, float & up,
                  float & dPitch, float & dYaw, float & dRoll) {
@@ -585,7 +602,16 @@ struct FrustumCentre {
 // On by default: rendering without it leaves 14 degrees of constant angular divergence,
 // which no eye-separation setting can compensate because the error does not vary with
 // distance. Off restores the old behaviour for comparison.
-bool g_CentreFrustum = true;
+// 0 off, +1 outward as the runtime reports, -1 inverted. The sign is the one thing here
+// that cannot be reasoned out safely: get it backwards and the error doubles instead of
+// cancelling, which looks similar enough to be mistaken for "the fix did not work".
+int g_CentreFrustum = 1;
+
+// Roll from the headset, into the game camera. Also a sign that has never been tested on
+// its own: 0 forces it flat, -1 inverts it. A mismatch between the roll we render with and
+// the roll we report shows up as the runtime rotating the submitted image, with black
+// wedges where it has no pixels.
+int g_RollMode = 1;
 
 XrQuaternionf QuatAxisAngle(float ax, float ay, float az, float radians) {
     float s = sinf(0.5f * radians);
@@ -1449,30 +1475,67 @@ void MirvVrXr_EngineThread_Frame() {
     base.position.y = 0.5f * (views[0].pose.position.y + views[1].pose.position.y);
     base.position.z = 0.5f * (views[0].pose.position.z + views[1].pose.position.z);
 
+    // One orientation per eye, built as a quaternion, and both halves derived from it.
+    //
+    // The previous attempt turned the eye on the runtime's side by post-multiplying the
+    // quaternion - a rotation about the eye's own up axis - while turning it on the game's
+    // side by adding degrees to a Source yaw, which rotates about the world's vertical.
+    // Those agree only while the head is level. Pitch down and they diverge, oppositely
+    // for each eye, which reads as the two images rolling apart: level at the top of the
+    // view, splitting towards the bottom. Deriving both from the same quaternion makes
+    // that class of mistake impossible rather than merely fixed.
+    const float d2r = (float)(M_PI / 180.0);
+    XrQuaternionf renderOrientation[2];
+
     for (int pass = 0; pass < 2; pass++) {
         int eye = g_SwapEyes ? (1 - pass) : pass;
+
+        XrQuaternionf ori = views[eye].pose.orientation;
+        float fovDegrees = EffectiveFovDegrees(views[eye].fov);
+
+        if (0 != g_CentreFrustum) {
+            FrustumCentre c = CentreOfFrustum(views[eye].fov);
+            float sign = (g_CentreFrustum < 0) ? -1.0f : 1.0f;
+            // Local axes, so the turn means the same thing whatever the head is doing.
+            ori = QuatMul(ori, QuatAxisAngle(0.0f, 1.0f, 0.0f,  sign * c.yawDegrees * d2r));
+            ori = QuatMul(ori, QuatAxisAngle(1.0f, 0.0f, 0.0f, -sign * c.pitchDegrees * d2r));
+
+            fovDegrees = 2.0f * c.halfHorizontal;
+            if (g_FovOverrideDegrees > 0.0f) fovDegrees = g_FovOverrideDegrees;
+            fovDegrees *= g_FovScale;
+        }
+
+        renderOrientation[eye] = ori;
+
+        // The eye offset goes into the frame of the camera that will render it - which is
+        // this rotated one, not the head's.
         float right, forward, up, dPitch, dYaw, dRoll;
-        XrPoseToEye(views[eye].pose, base, right, forward, up, dPitch, dYaw, dRoll);
+        XrPosef frame = base;
+        frame.orientation = ori;
+        XrPoseToEye(views[eye].pose, frame, right, forward, up, dPitch, dYaw, dRoll);
+
+        // dPitch/dYaw/dRoll came out of the eye's own pose; the camera must use the
+        // orientation we just built instead.
+        XrQuatToSourceAngles(ori, dPitch, dYaw, dRoll);
+
+        if (0 == g_RollMode) dRoll = 0.0f;
+        else if (g_RollMode < 0) dRoll = -dRoll;
+
         if (g_Monoscopic) {
             right = forward = up = 0.0f;
         } else {
             right *= g_IpdScale; forward *= g_IpdScale; up *= g_IpdScale;
         }
 
-        float fovDegrees = EffectiveFovDegrees(views[eye].fov);
-
-        if (g_CentreFrustum) {
-            // Point the camera down the middle of the eye's real frustum, and render only
-            // as wide as that frustum actually is.
-            FrustumCentre c = CentreOfFrustum(views[eye].fov);
-            dYaw   += c.yawDegrees;
-            dPitch += c.pitchDegrees;
-            fovDegrees = 2.0f * c.halfHorizontal;
-            if (g_FovOverrideDegrees > 0.0f) fovDegrees = g_FovOverrideDegrees;
-            fovDegrees *= g_FovScale;
-        }
-
         AfxVr_SetEye(pass + 1, true, right, forward, up, dPitch, dYaw, dRoll, fovDegrees);
+    }
+
+    // What the projection layer reports has to be what was rendered, so publish the
+    // orientations actually used rather than the raw ones.
+    {
+        std::lock_guard<std::mutex> lock(g_ViewMutex);
+        g_RenderedViews[0].pose.orientation = renderOrientation[0];
+        g_RenderedViews[1].pose.orientation = renderOrientation[1];
     }
 }
 
@@ -1568,19 +1631,10 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             g_ProjViews[eye] = { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW };
             g_ProjViews[eye].pose = rendered[eye].pose;
 
-            // The camera was turned onto the frustum's centre, so the pose reported for
-            // that image has to be turned the same way. Doing one without the other just
-            // moves the error from the image to the claim about it.
+            // No rotation here. g_RenderedViews already carries the orientation each eye
+            // was actually rendered with, centring included - which is the only way the
+            // two can be guaranteed to agree.
             FrustumCentre centre = CentreOfFrustum(rendered[eye].fov);
-            if (g_CentreFrustum) {
-                const float d2r = (float)(M_PI / 180.0);
-                XrQuaternionf yaw   = QuatAxisAngle(0.0f, 1.0f, 0.0f, centre.yawDegrees * d2r);
-                // c.pitchDegrees is in Source's sense, positive looking down; OpenXR's
-                // pitch is positive looking up.
-                XrQuaternionf pitch = QuatAxisAngle(1.0f, 0.0f, 0.0f, -centre.pitchDegrees * d2r);
-                g_ProjViews[eye].pose.orientation =
-                    QuatMul(QuatMul(rendered[eye].pose.orientation, yaw), pitch);
-            }
 
             // Report the symmetric frustum actually rendered, not the runtime's
             // asymmetric recommendation. The vertical half-angle follows from the image
@@ -1591,7 +1645,7 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             // the aspect fix off those are the same; with it on they differ by exactly the
             // engine's 4:3 convention, which is the point.
             float claimed = WantedFovDegrees(rendered[eye].fov);
-            if (g_CentreFrustum) {
+            if (0 != g_CentreFrustum) {
                 claimed = 2.0f * centre.halfHorizontal;
                 if (g_FovOverrideDegrees > 0.0f) claimed = g_FovOverrideDegrees;
                 claimed *= g_FovScale;
