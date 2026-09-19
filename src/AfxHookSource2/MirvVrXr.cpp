@@ -98,6 +98,23 @@ bool g_ProjViewsValid = false;
 // specification - but "the image will not fuse" has exactly two plausible causes and this
 // tells them apart in one keypress instead of an argument.
 bool g_SwapEyes = false;
+
+// Both eyes from the head's midpoint, zero separation. The two images are then identical
+// by construction, so they must fuse - and if they still do not, the fault is not in the
+// stereo at all but in how the frames are submitted or paired. That is a fork worth one
+// keypress, because the two halves need completely different work.
+bool g_Monoscopic = false;
+
+// Multiplies the eye offsets. The runtime reports a true interpupillary distance and we
+// convert it honestly, so this should be 1 - but "the eyes diverge too strongly" is a
+// complaint about exactly this number, and being able to wind it down until the world
+// fuses turns an argument into a measurement.
+float g_IpdScale = 1.0f;
+
+// Calibration mode. The person who can see the problem is wearing a headset and cannot
+// reach the keyboard, so the controllers have to do it. While this is on, the face buttons
+// and grips adjust the numbers instead of their usual jobs; the sticks still fly.
+bool g_Calibrating = false;
 int g_EyesCopied = 0;
 bool g_ReportedFirstSubmit = false;
 
@@ -532,6 +549,15 @@ float g_FovOverrideDegrees = 0.0f;
 float g_FovScale = 1.0f;
 float g_FovVerticalOverrideDegrees = 0.0f;
 
+// What the projection layer CLAIMS, when it must differ from what we asked the game for.
+//
+// Normally these are the same number and that is the whole point - claim what you drew.
+// But if the engine does not render the angle it is handed, they are not the same, and
+// the only way to find the true relationship is to hold one fixed and move the other
+// until the world looks right. Whatever value fuses tells us what the engine actually
+// rendered. 0 means "the same as we asked for".
+float g_ReportedFovOverrideDegrees = 0.0f;
+
 // Source does not treat `fov` as "the horizontal angle I will render". It treats it as the
 // horizontal angle *at 4:3*, derives the vertical from that, and then recomputes the
 // horizontal for the window's real aspect. On a 16:9 monitor the difference is small
@@ -865,6 +891,76 @@ void ProcessInput() {
     // Edge triggered, or a single press would fire for as long as it is held.
     bool b;
 
+    if (g_Calibrating) {
+        // The face buttons and grips are the dials while this is on. Everything they
+        // normally do is unreachable, which is fine: nobody calibrates and spectates at
+        // the same moment, and the sticks still fly.
+        bool changed = false;
+
+        // Geometric, not additive. A fixed step is either too coarse to settle on a value
+        // or too fine to reach one - the first version stepped by 0.1 and ran into its own
+        // limits before it reached anything interesting. Multiplying gets to a twentieth
+        // or to five times in about seven presses each, while still being fine near 1.
+        const float kStep = 1.25f;
+
+        b = GetPressed(g_PrevAction);   // X
+        if (b && !g_PrevPrev) { g_IpdScale /= kStep; changed = true; }
+        g_PrevPrev = b;
+
+        b = GetPressed(g_NextAction);   // Y
+        if (b && !g_PrevNext) { g_IpdScale *= kStep; changed = true; }
+        g_PrevNext = b;
+
+        // Wide enough not to be in the way. The far ends are absurd for a real headset,
+        // which is the point: if the image only fuses at a twentieth of the reported
+        // separation, that is a finding, not a setting.
+        if (g_IpdScale < 0.02f) g_IpdScale = 0.02f;
+        if (g_IpdScale > 50.0f) g_IpdScale = 50.0f;
+
+        b = GetPressed(g_PauseAction);  // A
+        if (b && !g_PrevPause) {
+            float base = (g_ReportedFovOverrideDegrees > 0.0f) ? g_ReportedFovOverrideDegrees : 108.0f;
+            g_ReportedFovOverrideDegrees = base - 8.0f;
+            changed = true;
+        }
+        g_PrevPause = b;
+
+        b = GetPressed(g_SlowMoAction); // B
+        if (b && !g_PrevSlowMo) {
+            float base = (g_ReportedFovOverrideDegrees > 0.0f) ? g_ReportedFovOverrideDegrees : 108.0f;
+            g_ReportedFovOverrideDegrees = base + 8.0f;
+            changed = true;
+        }
+        g_PrevSlowMo = b;
+
+        if (g_ReportedFovOverrideDegrees > 0.0f) {
+            if (g_ReportedFovOverrideDegrees < 15.0f) g_ReportedFovOverrideDegrees = 15.0f;
+            if (g_ReportedFovOverrideDegrees > 179.0f) g_ReportedFovOverrideDegrees = 179.0f;
+        }
+
+        b = GetPressed(g_FreeLookAction); // left grip
+        if (b && !g_PrevFreeLook) { g_Monoscopic = !g_Monoscopic; changed = true; }
+        g_PrevFreeLook = b;
+
+        b = GetPressed(g_ModeAction);   // right grip
+        if (b && !g_PrevMode) {
+            g_IpdScale = 1.0f;
+            g_ReportedFovOverrideDegrees = 0.0f;
+            g_Monoscopic = false;
+            changed = true;
+        }
+        g_PrevMode = b;
+
+        if (changed) {
+            advancedfx::Message(
+                "AFXVR calibrate: %s | separation x%.2f | claiming %.0f deg\n",
+                g_Monoscopic ? "MONO" : "stereo",
+                g_IpdScale,
+                g_ReportedFovOverrideDegrees > 0.0f ? g_ReportedFovOverrideDegrees : 0.0f);
+        }
+        return;
+    }
+
     b = GetPressed(g_FreeLookAction);
     if (b && !g_PrevFreeLook) { AfxVr_SetFreeLook(!AfxVr_GetFreeLook()); if (AfxVr_GetFreeLook()) AfxVr_Recenter(); }
     g_PrevFreeLook = b;
@@ -986,6 +1082,24 @@ void EngineThread_WaitAndLocate() {
     LocateViews(g_FrameState.predictedDisplayTime);
 }
 
+// "session state 1" is not a diagnosis. IDLE in particular means the runtime has taken
+// the session and is declining to run it - usually because the headset is not being worn,
+// or because something else owns the compositor - and reading that as a bug in the hook
+// wastes an evening.
+const char * SessionStateName(XrSessionState s) {
+    switch (s) {
+        case XR_SESSION_STATE_IDLE:         return "IDLE - created, but the runtime will not run it yet (headset not worn? another app in front?)";
+        case XR_SESSION_STATE_READY:        return "READY - the runtime wants us to begin";
+        case XR_SESSION_STATE_SYNCHRONIZED: return "SYNCHRONIZED - running, not yet visible";
+        case XR_SESSION_STATE_VISIBLE:      return "VISIBLE";
+        case XR_SESSION_STATE_FOCUSED:      return "FOCUSED - visible and receiving input";
+        case XR_SESSION_STATE_STOPPING:     return "STOPPING";
+        case XR_SESSION_STATE_LOSS_PENDING: return "LOSS_PENDING - the runtime is going away";
+        case XR_SESSION_STATE_EXITING:      return "EXITING";
+        default:                            return "UNKNOWN";
+    }
+}
+
 void PollEvents() {
     if (XR_NULL_HANDLE == g_Instance) return;
 
@@ -998,7 +1112,7 @@ void PollEvents() {
         if (XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED == ev.type) {
             const XrEventDataSessionStateChanged & e = *(XrEventDataSessionStateChanged*)&ev;
             g_State = e.state;
-            advancedfx::Message("AFXVR: session state %i\n", (int)g_State);
+            advancedfx::Message("AFXVR: session %s\n", SessionStateName(g_State));
 
             if (XR_SESSION_STATE_READY == g_State && !g_SessionRunning) {
                 XrSessionBeginInfo begin = { XR_TYPE_SESSION_BEGIN_INFO };
@@ -1259,6 +1373,11 @@ void MirvVrXr_EngineThread_Frame() {
         int eye = g_SwapEyes ? (1 - pass) : pass;
         float right, forward, up, dPitch, dYaw, dRoll;
         XrPoseToEye(views[eye].pose, base, right, forward, up, dPitch, dYaw, dRoll);
+        if (g_Monoscopic) {
+            right = forward = up = 0.0f;
+        } else {
+            right *= g_IpdScale; forward *= g_IpdScale; up *= g_IpdScale;
+        }
         AfxVr_SetEye(pass + 1, true, right, forward, up, dPitch, dYaw, dRoll,
             EffectiveFovDegrees(views[eye].fov));
     }
@@ -1336,6 +1455,20 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             else if (g_ViewsValid) { rendered[0] = g_Views[0]; rendered[1] = g_Views[1]; g_ProjViewsValid = true; }
         }
 
+        // Monoscopic means both images really were drawn from the midpoint, so both must be
+        // *reported* from the midpoint too. Reporting the true eye poses for identical
+        // images is what the runtime is asked to reconcile, and it reconciles it by pulling
+        // them apart - which made the one diagnostic that was supposed to be unambiguous
+        // fail by construction.
+        if (g_Monoscopic && g_ProjViewsValid) {
+            XrVector3f mid;
+            mid.x = 0.5f * (rendered[0].pose.position.x + rendered[1].pose.position.x);
+            mid.y = 0.5f * (rendered[0].pose.position.y + rendered[1].pose.position.y);
+            mid.z = 0.5f * (rendered[0].pose.position.z + rendered[1].pose.position.z);
+            rendered[0].pose.position = mid;
+            rendered[1].pose.position = mid;
+        }
+
         // Nothing located yet. The frame still has to be ended -- leaving one open is what
         // stalls the runtime -- so fall through with no layer rather than returning.
         for (int eye = 0; g_ProjViewsValid && eye < 2; eye++) {
@@ -1350,7 +1483,10 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             // the frustum we WANTED, not the number we handed the engine to get it. With
             // the aspect fix off those are the same; with it on they differ by exactly the
             // engine's 4:3 convention, which is the point.
-            float half = 0.5f * WantedFovDegrees(rendered[eye].fov) * (float)(M_PI / 180.0);
+            float claimed = (g_ReportedFovOverrideDegrees > 0.0f)
+                ? g_ReportedFovOverrideDegrees
+                : WantedFovDegrees(rendered[eye].fov);
+            float half = 0.5f * claimed * (float)(M_PI / 180.0);
             float vHalf = half;
             if (g_FovVerticalOverrideDegrees > 0.0f) {
                 vHalf = 0.5f * g_FovVerticalOverrideDegrees * (float)(M_PI / 180.0);
@@ -1488,6 +1624,19 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         if (!_stricmp(arg1, "start"))   { MirvVrXr_SessionStart(); return; }
         if (!_stricmp(arg1, "stop"))    { MirvVrXr_SessionStop(); AfxVr_SetEye(1,false,0,0,0,0,0,0,0); AfxVr_SetEye(2,false,0,0,0,0,0,0,0); advancedfx::Message("AFXVR: session stopped.\n"); return; }
         if (!_stricmp(arg1, "quit"))    { MirvVrXr_Stop(); advancedfx::Message("AFXVR: disconnected.\n"); return; }
+        if (!_stricmp(arg1, "mono")) {
+            g_Monoscopic = (3 <= args->ArgC()) ? (0 != atoi(args->ArgV(2))) : !g_Monoscopic;
+            advancedfx::Message(
+                "AFXVR: %s.\n"
+                "  %s\n",
+                g_Monoscopic ? "monoscopic - both eyes from the midpoint, zero separation"
+                             : "stereo - eyes at the separation the runtime reports",
+                g_Monoscopic
+                    ? "The two images are now identical, so they must fuse. If they still do\n"
+                      "  not, the fault is not the stereo - it is how the frames are submitted."
+                    : "Back to normal.");
+            return;
+        }
         if (!_stricmp(arg1, "swap")) {
             g_SwapEyes = (3 <= args->ArgC()) ? (0 != atoi(args->ArgV(2))) : !g_SwapEyes;
             advancedfx::Message("AFXVR: eyes %s. Takes effect next frame.\n",
@@ -1572,12 +1721,13 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         "mirv_vr_xr latency safe|low - which thread waits for and locates the head.\n"
         "mirv_vr_xr swap [0|1] - exchange which eye gets which image, to test a hunch.\n"
         "\n"
-        "Instance: %s, session: %s, state %i, submitting: %s\n"
+        "Instance: %s, session: %s, submitting: %s\n"
+        "State: %s\n"
         "Last measured: %.1f frames/s at %ux%u per eye.\n",
         MirvVrXr_IsRunning() ? "up" : "down",
         (XR_NULL_HANDLE != g_Session) ? "created" : "none",
-        (int)g_State,
         MirvVrXr_WantsPasses() ? "yes" : "no",
+        SessionStateName(g_State),
         g_SubmitFps, g_SwapchainWidth, g_SwapchainHeight);
 }
 
@@ -1928,6 +2078,23 @@ CON_COMMAND(mirv_vr_fov, "cs2-vr-spectator: override the frustum, when the autom
         return;
     }
 
+    if (3 <= argc && !_stricmp(args->ArgV(1), "report")) {
+        g_ReportedFovOverrideDegrees = (float)atof(args->ArgV(2));
+        advancedfx::Message("mirv_vr_fov: claiming %.1f degrees%s\n",
+            g_ReportedFovOverrideDegrees,
+            g_ReportedFovOverrideDegrees <= 0.0f ? " (same as rendered)" : " regardless of what is rendered");
+        return;
+    }
+
+    if (3 <= argc && !_stricmp(args->ArgV(1), "reportstep")) {
+        float base = (g_ReportedFovOverrideDegrees > 0.0f) ? g_ReportedFovOverrideDegrees : 108.0f;
+        g_ReportedFovOverrideDegrees = base + (float)atof(args->ArgV(2));
+        if (g_ReportedFovOverrideDegrees < 20.0f) g_ReportedFovOverrideDegrees = 20.0f;
+        if (g_ReportedFovOverrideDegrees > 170.0f) g_ReportedFovOverrideDegrees = 170.0f;
+        advancedfx::Message("mirv_vr_fov: claiming %.1f degrees\n", g_ReportedFovOverrideDegrees);
+        return;
+    }
+
     if (3 <= argc && !_stricmp(args->ArgV(1), "vertical")) {
         g_FovVerticalOverrideDegrees = (float)atof(args->ArgV(2));
         advancedfx::Message("mirv_vr_fov: vertical %s\n",
@@ -1993,4 +2160,42 @@ CON_COMMAND(mirv_vr_fovfix, "cs2-vr-spectator: correct for Source computing its 
         wanted, RenderedFovForAsked(wanted),
         g_SourceAspectFix ? "on" : "off",
         wanted, asked);
+}
+
+CON_COMMAND(mirv_vr_calibrate, "cs2-vr-spectator: tune the stereo from the controllers, because the person who can see it is wearing a headset.")
+{
+    if (2 <= args->ArgC()) {
+        g_Calibrating = 0 != atoi(args->ArgV(1));
+    } else {
+        g_Calibrating = !g_Calibrating;
+    }
+
+    if (!g_Calibrating) {
+        advancedfx::Message(
+            "mirv_vr_calibrate: off. Buttons do their usual jobs again.\n"
+            "  Keeping: separation x%.2f, %s, %s\n",
+            g_IpdScale,
+            g_ReportedFovOverrideDegrees > 0.0f ? "claiming an overridden field of view" : "claiming what is rendered",
+            g_Monoscopic ? "MONOSCOPIC" : "stereo");
+        return;
+    }
+
+    advancedfx::Message(
+        "mirv_vr_calibrate: ON. The face buttons and grips are now dials.\n"
+        "\n"
+        "  X / Y          eye separation  -/+ 0.1x     (for \"they diverge too strongly\")\n"
+        "  A / B          claimed field of view -/+ 4 deg\n"
+        "  left grip      monoscopic on/off - both eyes identical, so they MUST fuse\n"
+        "  right grip     back to defaults\n"
+        "  sticks         still fly, as usual\n"
+        "\n"
+        "Start with the left grip. If a monoscopic image still will not fuse, nothing here\n"
+        "will help and the fault is in how frames are submitted, not in the stereo.\n"
+        "If it does fuse, come back to stereo and wind the separation down with X until it\n"
+        "does - whatever number that is tells us what is actually wrong.\n"
+        "\n"
+        "Now: separation x%.2f, %s, %s\n",
+        g_IpdScale,
+        g_ReportedFovOverrideDegrees > 0.0f ? "field of view overridden" : "claiming what is rendered",
+        g_Monoscopic ? "MONOSCOPIC" : "stereo");
 }
