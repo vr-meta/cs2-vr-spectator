@@ -49,6 +49,9 @@ bool g_SessionRunning = false;
 const int kSwapchainCount = 3;
 const int kPanelSwapchain = 2;
 
+// Enough for the HUD groups the sheet is cut into, with room to add one.
+const int kMaxPanelQuads = 8;
+
 XrSwapchain g_Swapchain[kSwapchainCount] = { XR_NULL_HANDLE, XR_NULL_HANDLE, XR_NULL_HANDLE };
 std::vector<ID3D11Texture2D*> g_SwapchainImages[kSwapchainCount];
 uint32_t g_SwapchainWidth = 0, g_SwapchainHeight = 0;
@@ -69,6 +72,42 @@ bool g_RenderedViewsValid = false;
 
 XrFrameState g_FrameState = { XR_TYPE_FRAME_STATE };
 bool g_FrameBegun = false;
+
+// The render thread's own copy, taken once at the top of a frame's submission and used
+// for the whole of it. g_FrameState belongs to whichever thread last waited; this belongs
+// to the frame being ended.
+XrFrameState g_RtFrameState = { XR_TYPE_FRAME_STATE };
+
+// What each frame was rendered with, kept until the render thread gets to it.
+//
+// The engine thread decides the poses for frame N and queues the passes; the render thread
+// submits them some unpredictable time later, by which point the engine thread may be one
+// or two frames further on. Reading the current globals at that point reports a pose the
+// image was never drawn from - and the amount it is wrong by changes frame to frame, which
+// is what judder is. So each pass carries a ticket, and the ticket names an entry here.
+//
+// Eight is several frames of slack; if the render thread ever falls further behind than
+// that the entry is simply gone and the submission falls back to the globals, which is the
+// old behaviour and no worse.
+struct FrameRecord {
+    unsigned long long serial = 0;
+    bool valid = false;
+    XrView rendered[2] = {};
+    XrTime displayTime = 0;
+    XrBool32 shouldRender = XR_FALSE;
+    bool timingValid = false;   // only the low-latency path fills the timing in
+};
+const int kFrameRing = 8;
+FrameRecord g_FrameRing[kFrameRing];
+unsigned long long g_FrameSerial = 0;
+
+// How far behind the render thread was, in frames, when it submitted. Reported with the
+// frame rate: anything but a constant means the pose being reported does not belong to the
+// image, by a different amount every frame.
+unsigned long long g_TicketLagSum = 0;
+unsigned long long g_TicketLagCount = 0;
+unsigned long long g_TicketLagWorst = 0;
+unsigned long long g_TicketMisses = 0;
 
 // Where xrWaitFrame and xrLocateViews happen.
 //
@@ -441,6 +480,52 @@ float g_PanelDistanceMetres = 1.8f;
 // is how a resize or a session restart invalidates it without anyone having to remember.
 ID3D11Texture2D * g_PanelClearFor = nullptr;
 ID3D11RenderTargetView * g_PanelClearRtv = nullptr;
+
+// --- one sheet, or several pieces of it ------------------------------------------------
+//
+// The sheet is the whole window, and the HUD lives around its edges: score across the top,
+// radar in a corner, the player bar and timeline along the bottom. Hung in space as one
+// quad that is a portrait sheet with an empty middle, parked at eye height - the score
+// floats at the horizon in the middle of the map and the timeline lies across the floor.
+// Nothing is where a HUD element wants to be, and making the sheet big enough to read
+// walls off the view.
+//
+// So each group is its own quad, cut out of the SAME swapchain image with its own
+// imageRect, and placed on its own. The rects are fractions of the sheet, which keeps them
+// readable and independent of the window size; v runs down from the top, like imageRect.
+//
+// Everything not named here is simply never shown, which is also how the overhead name
+// tags and the TrueView debug text stay off the panel without a cvar hunt.
+struct PanelRegion {
+    const char * name;
+    float u0, v0, u1, v1;      // the piece of the sheet, as fractions
+    float azimuthDegrees;      // around the anchor; positive is to the left
+    float elevationDegrees;    // positive is up
+    float widthDegrees;        // how wide it should look from where the viewer stands
+    float distanceMetres;
+    bool enabled;
+};
+
+// Measured off a 2528x2780 capture of the sheet. Re-measure with mirv_vr_panel alpha and a
+// screenshot if the window shape or hud_scaling changes - these are fractions, so only the
+// layout matters, not the resolution.
+PanelRegion g_PanelRegions[] = {
+    // Up high and wide, because it is the thing being read at a glance.
+    { "score",   0.26f, 0.00f, 0.71f, 0.17f,    0.0f,  18.0f, 44.0f, 2.0f, true  },
+    // Low and to the left, where a spectator's eyes go when they want the map.
+    { "radar",   0.00f, 0.00f, 0.22f, 0.28f,   26.0f, -20.0f, 24.0f, 1.6f, true  },
+    // Low and central, like a dashboard. It is also what a controller ray will click, so
+    // close and below the line of sight is right.
+    { "bar",     0.00f, 0.80f, 1.00f, 1.00f,    0.0f, -30.0f, 52.0f, 1.4f, true  },
+    // Off by default: a spectator rarely needs their own weapon column, and the region it
+    // sits in is where the overhead name tags land.
+    { "weapons", 0.85f, 0.60f, 1.00f, 0.90f,  -26.0f, -20.0f, 16.0f, 1.6f, false },
+};
+const int kPanelRegionCount = (int)(sizeof(g_PanelRegions) / sizeof(g_PanelRegions[0]));
+
+// False puts the whole sheet back on one quad, which is what this started as and is still
+// the honest way to see what the HUD actually contains.
+bool g_PanelCutUp = true;
 
 // Frames of alpha reporting still owed, from mirv_vr_panel alpha.
 //
@@ -1164,12 +1249,18 @@ void ProcessInput() {
 
     // Switching players puts the viewer back on that player rather than wherever the
     // sticks had wandered to - otherwise you follow someone from across the map.
+    //
+    // And it ends HLAE's free camera first. With that camera active it owns the view
+    // entirely, so "next player" changes who the demo is following and the picture does
+    // not move at all - which, with a headset on and no console in sight, is
+    // indistinguishable from the button being broken. Somebody pressing "next player" is
+    // asking to look at a player; the free camera is two presses away again.
     b = GetPressed(g_NextAction);
-    if (b && !g_PrevNext) { QueueTap("attack"); AfxVr_ResetMove(); }
+    if (b && !g_PrevNext) { QueueCommand("mirv_input end", 0); QueueTap("attack"); AfxVr_ResetMove(); }
     g_PrevNext = b;
 
     b = GetPressed(g_PrevAction);
-    if (b && !g_PrevPrev) { QueueTap("attack2"); AfxVr_ResetMove(); }
+    if (b && !g_PrevPrev) { QueueCommand("mirv_input end", 0); QueueTap("attack2"); AfxVr_ResetMove(); }
     g_PrevPrev = b;
 
     b = GetPressed(g_ModeAction);
@@ -1206,6 +1297,41 @@ void PlacePanelFrom(const XrPosef & head) {
     g_PanelPose.orientation.w = (float)cos(yaw * 0.5);
 
     g_PanelPlaced = true;
+}
+
+// Where one piece of the sheet hangs, relative to the anchor the whole panel was placed
+// at. Azimuth turns it around the viewer, elevation lifts it, and it is tilted to face
+// the anchor - a quad three feet below eye level that is still vertical is read edge-on.
+//
+// OpenXR's quad shows the face whose normal is its local +Z, which is why the existing
+// anchor pose is the head's yaw and not the head's yaw turned around. The pitch is a
+// rotation about the quad's own X after that yaw, so the normal comes out at
+// (sin(yaw)cos(el), -sin(el), cos(yaw)cos(el)) - exactly back along the direction the
+// piece was placed in.
+XrPosef PlaceRegion(const PanelRegion & region) {
+    const double d2r = M_PI / 180.0;
+
+    double anchorYaw = 2.0 * atan2((double)g_PanelPose.orientation.y,
+                                   (double)g_PanelPose.orientation.w);
+    double yaw = anchorYaw + region.azimuthDegrees * d2r;
+    double el  = region.elevationDegrees * d2r;
+
+    double cosEl = cos(el), sinEl = sin(el);
+
+    XrPosef pose = {};
+    pose.position.x = g_PanelPose.position.x + (float)(-sin(yaw) * cosEl * region.distanceMetres);
+    pose.position.y = g_PanelPose.position.y + (float)( sinEl            * region.distanceMetres);
+    pose.position.z = g_PanelPose.position.z + (float)(-cos(yaw) * cosEl * region.distanceMetres);
+
+    // qYaw about Y, then qPitch about the quad's own X.
+    double sy = sin(yaw * 0.5), cy = cos(yaw * 0.5);
+    double sp = sin(el  * 0.5), cp = cos(el  * 0.5);
+    pose.orientation.w = (float)(cy * cp);
+    pose.orientation.x = (float)(cy * sp);
+    pose.orientation.y = (float)(sy * cp);
+    pose.orientation.z = (float)(sy * sp);
+
+    return pose;
 }
 
 // Locate both eyes for a display time and publish them. Shared by the two threading
@@ -1672,7 +1798,28 @@ void MirvVrXr_EngineThread_Frame() {
         std::lock_guard<std::mutex> lock(g_ViewMutex);
         g_RenderedViews[0].pose.orientation = renderOrientation[0];
         g_RenderedViews[1].pose.orientation = renderOrientation[1];
+
+        // One entry per frame, complete, written under the lock in one go. The previous
+        // arrangement published the positions in one lock scope and the orientations in
+        // another, so a reader between the two got half of one frame and half of another.
+        g_FrameSerial++;
+        FrameRecord & record = g_FrameRing[g_FrameSerial % kFrameRing];
+        record.serial = g_FrameSerial;
+        record.rendered[0] = g_RenderedViews[0];
+        record.rendered[1] = g_RenderedViews[1];
+        record.displayTime = g_FrameState.predictedDisplayTime;
+        record.shouldRender = g_FrameState.shouldRender;
+        // Only meaningful in low-latency mode: there the engine thread did the xrWaitFrame
+        // this frame will be begun and ended against. In safe mode the render thread waits
+        // for itself and g_FrameState here is a frame old.
+        record.timingValid = g_LowLatency;
+        record.valid = true;
     }
+}
+
+unsigned long long MirvVrXr_EngineThread_FrameTicket() {
+    std::lock_guard<std::mutex> lock(g_ViewMutex);
+    return g_FrameSerial;
 }
 
 // A concrete format to view a back buffer through. The game's is R8G8B8A8_TYPELESS, which
@@ -1839,7 +1986,8 @@ void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Tex
     xrReleaseSwapchainImage_(g_Swapchain[kPanelSwapchain], &release);
 }
 
-void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
+void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture,
+                                     unsigned long long ticket) {
     if (eyeIndex < 0 || eyeIndex > 1) return;
     if (!pContext || !pTexture) return;
     // Forced passes render but go nowhere: every call below needs a session, and half the
@@ -1854,12 +2002,22 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             // not - the session only just started, say - there is nothing to begin.
             if (!g_FrameWaited) return;
             g_FrameWaited = false;
+
+            // Take a copy now. The engine thread is free to wait again for the next frame
+            // the moment g_FrameWaited is cleared, and it writes g_FrameState when it
+            // does - so the display time this frame is ended with must not be read from
+            // there later on.
+            std::lock_guard<std::mutex> lock(g_ViewMutex);
+            g_RtFrameState = g_FrameState;
         } else {
             g_FrameState = { XR_TYPE_FRAME_STATE };
             XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
             LARGE_INTEGER waitStart = StageStart();
             if (!Check(xrWaitFrame_(g_Session, &waitInfo, &g_FrameState), "xrWaitFrame")) return;
             g_StageWaitFrame.Add(1000.0 * SecondsSince(waitStart));
+            // The render thread is the only writer in this mode, but the copy keeps the
+            // rest of the function reading one thing rather than two.
+            g_RtFrameState = g_FrameState;
         }
 
         XrFrameBeginInfo beginInfo = { XR_TYPE_FRAME_BEGIN_INFO };
@@ -1868,7 +2026,7 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
 
         if (!g_LowLatency) {
             ProcessInput();
-            LocateViews(g_FrameState.predictedDisplayTime);
+            LocateViews(g_RtFrameState.predictedDisplayTime);
         }
 
         g_EyesCopied = 0;
@@ -1882,8 +2040,33 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         g_ProjViewsValid = false;
         {
             std::lock_guard<std::mutex> lock(g_ViewMutex);
-            if (g_RenderedViewsValid) { rendered[0] = g_RenderedViews[0]; rendered[1] = g_RenderedViews[1]; g_ProjViewsValid = true; }
-            else if (g_ViewsValid) { rendered[0] = g_Views[0]; rendered[1] = g_Views[1]; g_ProjViewsValid = true; }
+
+            const FrameRecord & record = g_FrameRing[ticket % kFrameRing];
+            if (0 != ticket && record.valid && record.serial == ticket) {
+                rendered[0] = record.rendered[0];
+                rendered[1] = record.rendered[1];
+                g_ProjViewsValid = true;
+
+                // In low-latency mode the engine thread did this frame's xrWaitFrame, so
+                // the time it predicted travels with the frame too. In safe mode the
+                // render thread's own wait, a few lines up, is the right one.
+                if (record.timingValid) {
+                    g_RtFrameState.predictedDisplayTime = record.displayTime;
+                    g_RtFrameState.shouldRender = record.shouldRender;
+                }
+
+                unsigned long long lag = g_FrameSerial - ticket;
+                g_TicketLagSum += lag;
+                g_TicketLagCount++;
+                if (lag > g_TicketLagWorst) g_TicketLagWorst = lag;
+            } else {
+                // Further behind than the ring is deep, or no frame published yet. The old
+                // behaviour, which is wrong in exactly the way the ticket exists to fix -
+                // so it is counted and reported rather than passed over.
+                if (0 != ticket) g_TicketMisses++;
+                if (g_RenderedViewsValid) { rendered[0] = g_RenderedViews[0]; rendered[1] = g_RenderedViews[1]; g_ProjViewsValid = true; }
+                else if (g_ViewsValid) { rendered[0] = g_Views[0]; rendered[1] = g_Views[1]; g_ProjViewsValid = true; }
+            }
         }
 
         // Monoscopic means both images really were drawn from the midpoint, so both must be
@@ -2022,7 +2205,7 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
 
     if (!g_FrameBegun) return;
 
-    bool canCopy = g_FrameState.shouldRender && XR_NULL_HANDLE != g_Swapchain[eyeIndex];
+    bool canCopy = g_RtFrameState.shouldRender && XR_NULL_HANDLE != g_Swapchain[eyeIndex];
 
     if (canCopy) {
         LARGE_INTEGER copyStart = StageStart();
@@ -2066,47 +2249,89 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
         layer.viewCount = 2;
         layer.views = g_ProjViews;
 
-        // The panel goes on top of the world, so it comes second: the runtime composites
-        // layers in the order given.
-        XrCompositionLayerQuad panel = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        // The panel goes on top of the world, so its quads come after: the runtime
+        // composites layers in the order given.
+        //
         // The HUD was drawn source-over onto a zeroed target, so its colour is already
         // premultiplied by its alpha. Which is why UNPREMULTIPLIED is deliberately not set:
         // that would ask the runtime to divide the colour by the alpha a second time and
         // the edge of every glyph would bloom.
-        panel.layerFlags = g_PanelTransparent
+        const XrCompositionLayerFlags panelFlags = g_PanelTransparent
             ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT
             : 0;
-        panel.space = g_Space;
-        panel.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        panel.pose = g_PanelPose;
-        panel.subImage.swapchain = g_Swapchain[kPanelSwapchain];
-        panel.subImage.imageRect.offset = { 0, 0 };
-        panel.subImage.imageRect.extent = { (int32_t)g_SwapchainWidth, (int32_t)g_SwapchainHeight };
-        panel.subImage.imageArrayIndex = 0;
-        panel.size.width = g_PanelWidthMetres;
-        // Keep the source aspect, whatever it happens to be. The window is the eye size,
-        // so on this machine the panel is taller than it is wide -- ugly, but honest, and
-        // stretching text is worse than an odd shape.
-        panel.size.height = (g_SwapchainWidth > 0)
-            ? g_PanelWidthMetres * (float)g_SwapchainHeight / (float)g_SwapchainWidth
-            : g_PanelWidthMetres;
 
-        const XrCompositionLayerBaseHeader * layers[2] = {
-            (XrCompositionLayerBaseHeader*)&layer,
-            (XrCompositionLayerBaseHeader*)&panel,
-        };
+        XrCompositionLayerQuad quads[kMaxPanelQuads];
+        int quadCount = 0;
+
+        bool havePanel = g_PanelEnabled && g_PanelCopied && g_PanelPlaced
+            && XR_NULL_HANDLE != g_Swapchain[kPanelSwapchain]
+            && g_SwapchainWidth > 0 && g_SwapchainHeight > 0;
+
+        if (havePanel && g_PanelCutUp) {
+            for (int i = 0; i < kPanelRegionCount && quadCount < kMaxPanelQuads; i++) {
+                const PanelRegion & region = g_PanelRegions[i];
+                if (!region.enabled) continue;
+
+                int x0 = (int)(region.u0 * (float)g_SwapchainWidth  + 0.5f);
+                int x1 = (int)(region.u1 * (float)g_SwapchainWidth  + 0.5f);
+                int y0 = (int)(region.v0 * (float)g_SwapchainHeight + 0.5f);
+                int y1 = (int)(region.v1 * (float)g_SwapchainHeight + 0.5f);
+                if (x1 <= x0 || y1 <= y0) continue;
+
+                XrCompositionLayerQuad & quad = quads[quadCount++];
+                quad = XrCompositionLayerQuad{ XR_TYPE_COMPOSITION_LAYER_QUAD };
+                quad.layerFlags = panelFlags;
+                quad.space = g_Space;
+                quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                quad.pose = PlaceRegion(region);
+                quad.subImage.swapchain = g_Swapchain[kPanelSwapchain];
+                quad.subImage.imageRect.offset = { x0, y0 };
+                quad.subImage.imageRect.extent = { x1 - x0, y1 - y0 };
+                quad.subImage.imageArrayIndex = 0;
+
+                // The angular width is the setting; the metres follow from the distance,
+                // and the height follows from the piece's own shape so nothing is
+                // stretched.
+                float halfWidth = tanf(0.5f * region.widthDegrees * (float)(M_PI / 180.0));
+                quad.size.width = 2.0f * region.distanceMetres * halfWidth;
+                quad.size.height = quad.size.width * (float)(y1 - y0) / (float)(x1 - x0);
+            }
+        } else if (havePanel) {
+            XrCompositionLayerQuad & quad = quads[quadCount++];
+            quad = XrCompositionLayerQuad{ XR_TYPE_COMPOSITION_LAYER_QUAD };
+            quad.layerFlags = panelFlags;
+            quad.space = g_Space;
+            quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+            quad.pose = g_PanelPose;
+            quad.subImage.swapchain = g_Swapchain[kPanelSwapchain];
+            quad.subImage.imageRect.offset = { 0, 0 };
+            quad.subImage.imageRect.extent = { (int32_t)g_SwapchainWidth, (int32_t)g_SwapchainHeight };
+            quad.subImage.imageArrayIndex = 0;
+            quad.size.width = g_PanelWidthMetres;
+            // Keep the source aspect, whatever it happens to be. The window is the eye
+            // size, so on this machine the sheet is taller than it is wide -- ugly, but
+            // honest, and stretching text is worse than an odd shape.
+            quad.size.height = g_PanelWidthMetres * (float)g_SwapchainHeight / (float)g_SwapchainWidth;
+        }
+
+        const XrCompositionLayerBaseHeader * layers[1 + kMaxPanelQuads];
+        int layerCount = 0;
 
         XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
-        endInfo.displayTime = g_FrameState.predictedDisplayTime;
+        endInfo.displayTime = g_RtFrameState.predictedDisplayTime;
         endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
 
         bool haveWorld = (2 == g_EyesCopied) && g_ProjViewsValid;
-        bool havePanel = g_PanelEnabled && g_PanelCopied && g_PanelPlaced
-            && XR_NULL_HANDLE != g_Swapchain[kPanelSwapchain];
 
-        if (haveWorld && havePanel)      { endInfo.layerCount = 2; endInfo.layers = layers; }
-        else if (haveWorld)              { endInfo.layerCount = 1; endInfo.layers = layers; }
-        else                             { endInfo.layerCount = 0; endInfo.layers = nullptr; }
+        if (haveWorld) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&layer;
+        // Only with a world layer under them: a frame of nothing but HUD quads is a frame
+        // with no world in it, which is worse than a frame with no HUD.
+        if (haveWorld) {
+            for (int i = 0; i < quadCount; i++) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&quads[i];
+        }
+
+        endInfo.layerCount = (uint32_t)layerCount;
+        endInfo.layers = layerCount ? layers : nullptr;
 
         g_PanelCopied = false;
 
@@ -2132,6 +2357,15 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
                     g_StageLocate.Mean(), g_StageCopy.Mean(),
                     g_StageCopy.count ? g_StageCopy.count / (g_StageWaitFrame.count ? g_StageWaitFrame.count : 1) : 0,
                     g_StageEndFrame.Mean());
+                // How far behind the engine thread the render thread was when it reported
+                // each frame's pose. A constant is fine - the runtime corrects for a known
+                // offset. A varying one is judder, and used to be invisible.
+                advancedfx::Message(
+                    "AFXVR:   render thread %.2f frames behind (worst %llu)%s\n",
+                    g_TicketLagCount ? (double)g_TicketLagSum / (double)g_TicketLagCount : 0.0,
+                    (unsigned long long)g_TicketLagWorst,
+                    g_TicketMisses ? "  SOME FRAMES FELL OUT OF THE RING" : "");
+                g_TicketLagSum = 0; g_TicketLagCount = 0; g_TicketLagWorst = 0; g_TicketMisses = 0;
             }
             g_StageWaitFrame.Reset();
             g_StageLocate.Reset();
@@ -2481,6 +2715,82 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
             return;
         }
 
+        if (!_stricmp(arg1, "sheet") || !_stricmp(arg1, "groups")) {
+            g_PanelCutUp = (0 == _stricmp(arg1, "groups"));
+            advancedfx::Message("mirv_vr_panel: %s.\n",
+                g_PanelCutUp
+                    ? "cut into groups, each placed on its own"
+                    : "one sheet, the whole window on one quad");
+            return;
+        }
+
+        if (!_stricmp(arg1, "layout")) {
+            advancedfx::Message("mirv_vr_panel layout (%s):\n",
+                g_PanelCutUp ? "groups" : "one sheet, so none of this is in use");
+            for (int i = 0; i < kPanelRegionCount; i++) {
+                const PanelRegion & r = g_PanelRegions[i];
+                advancedfx::Message(
+                    "  %-8s %s  u %.2f-%.2f v %.2f-%.2f   az %+6.1f  el %+6.1f  %5.1f deg wide at %.2f m\n",
+                    r.name, r.enabled ? "on " : "off",
+                    r.u0, r.u1, r.v0, r.v1,
+                    r.azimuthDegrees, r.elevationDegrees, r.widthDegrees, r.distanceMetres);
+            }
+            return;
+        }
+
+        if (3 <= argc && (!_stricmp(arg1, "region") || !_stricmp(arg1, "rect"))) {
+            PanelRegion * found = nullptr;
+            for (int i = 0; i < kPanelRegionCount; i++) {
+                if (!_stricmp(args->ArgV(2), g_PanelRegions[i].name)) { found = &g_PanelRegions[i]; break; }
+            }
+            if (!found) {
+                advancedfx::Warning("mirv_vr_panel: no group called \"%s\". mirv_vr_panel layout lists them.\n",
+                    args->ArgV(2));
+                return;
+            }
+
+            if (!_stricmp(arg1, "rect")) {
+                if (7 > argc) {
+                    advancedfx::Warning("mirv_vr_panel rect <group> <u0> <v0> <u1> <v1>\n");
+                    return;
+                }
+                found->u0 = (float)atof(args->ArgV(3));
+                found->v0 = (float)atof(args->ArgV(4));
+                found->u1 = (float)atof(args->ArgV(5));
+                found->v1 = (float)atof(args->ArgV(6));
+                advancedfx::Message("mirv_vr_panel: %s takes u %.3f-%.3f, v %.3f-%.3f of the sheet.\n",
+                    found->name, found->u0, found->u1, found->v0, found->v1);
+                return;
+            }
+
+            if (4 == argc && (!_stricmp(args->ArgV(3), "on") || !_stricmp(args->ArgV(3), "off"))) {
+                found->enabled = (0 == _stricmp(args->ArgV(3), "on"));
+                advancedfx::Message("mirv_vr_panel: %s %s.\n", found->name, found->enabled ? "on" : "off");
+                return;
+            }
+
+            if (6 > argc) {
+                advancedfx::Warning(
+                    "mirv_vr_panel region <group> <azimuth> <elevation> <width-degrees> [distance]\n"
+                    "mirv_vr_panel region <group> on|off\n");
+                return;
+            }
+            found->azimuthDegrees   = (float)atof(args->ArgV(3));
+            found->elevationDegrees = (float)atof(args->ArgV(4));
+            found->widthDegrees     = (float)atof(args->ArgV(5));
+            if (found->widthDegrees < 2.0f) found->widthDegrees = 2.0f;
+            if (found->widthDegrees > 140.0f) found->widthDegrees = 140.0f;
+            if (7 <= argc) {
+                found->distanceMetres = (float)atof(args->ArgV(6));
+                if (found->distanceMetres < 0.3f) found->distanceMetres = 0.3f;
+                if (found->distanceMetres > 20.0f) found->distanceMetres = 20.0f;
+            }
+            advancedfx::Message("mirv_vr_panel: %s at az %+.1f el %+.1f, %.1f deg wide at %.2f m.\n",
+                found->name, found->azimuthDegrees, found->elevationDegrees,
+                found->widthDegrees, found->distanceMetres);
+            return;
+        }
+
         if (!_stricmp(arg1, "alpha")) {
             int frames = (3 <= argc) ? atoi(args->ArgV(2)) : 1;
             if (frames < 1) frames = 1;
@@ -2518,6 +2828,12 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
         "mirv_vr_panel transparent - carry the HUD alone, on nothing. The default.\n"
         "mirv_vr_panel opaque      - carry the whole main pass, world and all.\n"
         "mirv_vr_panel alpha [n]   - read back what the HUD left in the alpha channel.\n"
+        "mirv_vr_panel groups      - cut the sheet up, one quad per HUD group. The default.\n"
+        "mirv_vr_panel sheet       - the whole window on one quad, as it used to be.\n"
+        "mirv_vr_panel layout      - print the groups and where each one hangs.\n"
+        "mirv_vr_panel region <g> <az> <el> <deg> [m]  - move and size one group.\n"
+        "mirv_vr_panel region <g> on|off\n"
+        "mirv_vr_panel rect <g> <u0> <v0> <u1> <v1>    - which part of the sheet it is.\n"
         "\n"
         "The timeline, the scoreboard and the speed controls are a flat overlay the game\n"
         "draws at screen depth. Copied into each eye, that is doubled, at the wrong\n"

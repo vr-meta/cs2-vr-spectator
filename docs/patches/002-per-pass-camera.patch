@@ -70,7 +70,7 @@ index cea3626..ad2a751 100644
          }
      }
 diff --git a/AfxHookSource2/RenderSystemDX11Hooks.cpp b/AfxHookSource2/RenderSystemDX11Hooks.cpp
-index 73b7c00..4bbaffa 100644
+index 73b7c00..3f77b3a 100644
 --- a/AfxHookSource2/RenderSystemDX11Hooks.cpp
 +++ b/AfxHookSource2/RenderSystemDX11Hooks.cpp
 @@ -8,6 +8,8 @@
@@ -142,7 +142,7 @@ index 73b7c00..4bbaffa 100644
          if (m_Recording) {
              if (m_AutoForceFullReSmoke) {
                  if (!m_Restore_smoke_volume_lod_ratio_change) {
-@@ -3012,10 +3046,49 @@ public:
+@@ -3012,10 +3046,54 @@ public:
      }
  
      bool EngineThread_HasNextRenderPass() {
@@ -172,12 +172,17 @@ index 73b7c00..4bbaffa 100644
 +            m_VrPassesDone++;
 +            auto & pRenderPassCommands = g_RenderCommands.EngineThread_GetCommands();
 +            bool beforeUi = MirvVrXr_CaptureBeforeUi();
-+            auto submit = [eyeIndex, beforeUi](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
++            // cs2-vr-spectator: which frame's pose and timing this pass is being rendered
++            // with, captured here on the engine thread and carried to the render thread by
++            // value. Reading it there instead is a race: the engine thread is often a
++            // frame or two further on by the time the pass is submitted.
++            unsigned long long vrTicket = MirvVrXr_EngineThread_FrameTicket();
++            auto submit = [eyeIndex, beforeUi, vrTicket](ID3D11DeviceContext * pDeviceContext, ID3D11Texture2D * pTexture) {
 +                if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
 +                    advancedfx::Message("AFXVR: eye %i captured at %s (render thread)\n",
 +                        eyeIndex, beforeUi ? "BeforeUi" : "BeforePresent");
 +                }
-+                MirvVrXr_RenderThread_SubmitEye(eyeIndex, pDeviceContext, pTexture);
++                MirvVrXr_RenderThread_SubmitEye(eyeIndex, pDeviceContext, pTexture, vrTicket);
 +            };
 +            // BeforeUi fires once per pass, immediately before that pass's UI is
 +            // composited, so capturing there gives an eye with no HUD and no demo menu in
@@ -193,7 +198,7 @@ index 73b7c00..4bbaffa 100644
          auto it = m_RecordingExtraPassesIterator;
          while(it != m_RecordingExtraPasses.end()) {
              it->EngineThread_BeginFrame();
-@@ -3041,6 +3114,36 @@ public:
+@@ -3041,6 +3119,36 @@ public:
      }    
  
      void EngineThread_BeginMainRenderPass() {
@@ -230,7 +235,7 @@ index 73b7c00..4bbaffa 100644
          for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
              it->EngineThread_BeginFrame();
          }
-@@ -3563,6 +3666,10 @@ private:
+@@ -3563,6 +3671,10 @@ private:
      std::multiset<CStream,RenderPassCompare> m_RecordingExtraPasses;
      std::multiset<CStream,RenderPassCompare>::iterator m_RecordingExtraPassesIterator;
  

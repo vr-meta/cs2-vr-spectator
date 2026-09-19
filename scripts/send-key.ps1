@@ -71,9 +71,10 @@ public class SendKeyOne {
 
     public static void Tap(ushort vk) {
         ushort scan = MapVirtualKey(vk, 0);
-        // Home, End, Insert, Delete, Page Up and Page Down live on the extended part of
-        // the keyboard and are not seen without this flag.
-        uint ext = (vk == 0x24 || vk == 0x23 || vk == 0x2D || vk == 0x2E || vk == 0x21 || vk == 0x22) ? 0x0001u : 0u;
+        // Home, End, Insert, Delete, the page keys and the arrows live on the extended part
+        // of the keyboard and are not seen without this flag.
+        uint ext = (vk == 0x24 || vk == 0x23 || vk == 0x2D || vk == 0x2E || vk == 0x21 || vk == 0x22 ||
+                    vk == 0x25 || vk == 0x26 || vk == 0x27 || vk == 0x28) ? 0x0001u : 0u;
         INPUT[] inp = new INPUT[2];
         inp[0].type = 1; inp[0].ki.wVk = vk; inp[0].ki.wScan = scan; inp[0].ki.dwFlags = 0x0008 | ext;
         inp[1].type = 1; inp[1].ki.wVk = vk; inp[1].ki.wScan = scan; inp[1].ki.dwFlags = 0x0008 | 0x0002 | ext;
@@ -88,7 +89,8 @@ $vk = @{ F1 = 0x70; F2 = 0x71; F3 = 0x72; F4 = 0x73; F5 = 0x74
          # same whatever the keyboard layout, which a Russian layout's "e" is not.
          TILDE = 0xC0; CONSOLE = 0xC0
          HOME = 0x24; END = 0x23; INS = 0x2D; DEL = 0x2E
-         PGUP = 0x21; PGDN = 0x22 }[$Key.ToUpper()]
+         PGUP = 0x21; PGDN = 0x22
+         LEFTARROW = 0x25; UPARROW = 0x26; RIGHTARROW = 0x27; DOWNARROW = 0x28 }[$Key.ToUpper()]
 
 if (-not $vk) { throw "Unsupported key: $Key" }
 

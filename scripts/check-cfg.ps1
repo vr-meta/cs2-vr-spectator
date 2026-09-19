@@ -49,7 +49,7 @@ foreach ($file in $Path) {
         }
         elseif ($line -match '^echo\s') {
             # Keys are named in the echo text as bare words: "F9/F5 headset", "PGDN ...".
-            foreach ($m in [regex]::Matches($line.ToUpper(), '\b(F1[0-2]|F[1-9]|HOME|END|INS|DEL|PGUP|PGDN)\b')) {
+            foreach ($m in [regex]::Matches($line.ToUpper(), '\b(F1[0-2]|F[1-9]|HOME|END|INS|DEL|PGUP|PGDN|LEFTARROW|RIGHTARROW|UPARROW|DOWNARROW)\b')) {
                 [void]$echoed.Add($m.Groups[1].Value)
             }
         }

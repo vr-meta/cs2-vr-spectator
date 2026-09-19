@@ -39,8 +39,25 @@ bool MirvVrXr_WantsPasses();
 // would mean the session could never start.
 void MirvVrXr_EngineThread_Frame();
 
+// Engine thread, when a pass is queued: which frame's pose and timing that pass is being
+// rendered with. The number is opaque; hand it back to MirvVrXr_RenderThread_SubmitEye.
+//
+// It exists because the render thread runs behind the engine thread by an amount that
+// varies from frame to frame. Everything the projection layer has to report - the pose
+// each eye was rendered from, the predicted display time, whether the runtime wanted the
+// frame drawn at all - used to be read from globals at submission time, by which point
+// the engine thread had often already overwritten them for the NEXT frame. Sometimes.
+//
+// A pose that is wrong by one frame at a hundred degrees a second is nearly three degrees
+// out, and the runtime reprojects by the difference it was told about. Wrong by a
+// different amount each frame, that is not swim; that is judder, and no amount of frame
+// rate fixes it.
+unsigned long long MirvVrXr_EngineThread_FrameTicket();
+
 // Render thread, from the pass's BeforeUi or BeforePresent command. eyeIndex is 0 or 1.
-void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture);
+// `ticket` is what MirvVrXr_EngineThread_FrameTicket returned when this pass was queued.
+void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture,
+                                     unsigned long long ticket);
 
 // Render thread, from the MAIN pass's BeforePresent command. The main pass is the one
 // image that still has the HUD and the demo menu composited into it once the eyes have
