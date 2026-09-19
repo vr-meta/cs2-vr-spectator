@@ -201,6 +201,26 @@ bool g_MenuMode = false;
 AfxVrMath::ModeResult g_Mode = {};
 AfxVrMath::ModeInputs g_ModeInputs = {};
 
+// How the aim is driven.
+//
+//   hand   the right controller points, as every VR shooter does and as UEVR's
+//          "Aim Method: Right Controller" does for flat games. The game's own aim is
+//          servoed onto the direction the hand points; the crosshair shows where that
+//          actually is, which during motion trails the hand by a frame or two.
+//   stick  the right thumbstick moves the aim, with the deadzone cone. What was built
+//          first, from a misreading: the user said "joystick" and meant the controller.
+//   off    nothing touches the mouse.
+//
+// Off by default, and staying off: this drives the real mouse of a machine somebody else
+// is sitting at, and nothing built on top of the hook should start doing that unasked.
+// vr.cfg asks for hand, which is how a shipped release gets a game that can be aimed -
+// the decision is in the config, where it can be read, rather than in this line.
+//
+// Declared here, above everything, rather than beside the servo that uses it, because
+// PrintControls has to name the current method and runs long before that code.
+enum AimMethod { kAimOff = 0, kAimHand = 1, kAimStick = 2 };
+int g_AimMethod = kAimOff;
+
 // Panorama shows the system cursor exactly when it wants something pointed at. Debounced,
 // because the buy menu flickers it and a sheet that blinks in and out is worse than one
 // that is late.
@@ -1648,11 +1668,25 @@ bool CreateActions() {
 }
 
 void PrintControls() {
+    // Two layouts, because there are two things to do and the same eight buttons have to
+    // serve both. Which one is live is not a setting: the hook decides from what the game
+    // is doing (a demo is playing, a map is loaded, a cursor is showing), so both are
+    // printed and the live one is marked. PgUp is how somebody wearing the headset gets
+    // this into console.log, which is the only place they can read it afterwards.
+    //
+    // This is also the table the README copies. It has been wrong once already - it still
+    // claimed the right stick click recentred, long after a short press had become show and
+    // hide the HUD - and a wrong table is worse than none: the person reading it cannot see
+    // the code to check.
+    bool playing = (AfxVrMath::kVrModePlay == g_Mode.mode);
+
     advancedfx::Message(
         "\n"
-        "Controllers\n"
+        "Controllers -- currently %s\n"
+        "\n"
+        "WATCHING a demo%s\n"
         "  left hand -- who you are watching, and where you are standing\n"
-        "    stick            walk, in the direction you are looking\n"
+        "    stick            fly, in the direction you are looking\n"
         "    stick click      next camera mode: first person, chase, free\n"
         "    trigger          %s\n"
         "    grip             free look on / off  (currently %s)\n"
@@ -1660,14 +1694,13 @@ void PrintControls() {
         "    Y                forward %.0f s\n"
         "  right hand -- how time runs, and where the camera points\n"
         "    stick            turn%s, and rise or descend\n"
-        "    stick click      recentre\n"
+        "    stick click      short: hide or show the HUD.  long: recentre\n"
         "    trigger          %s\n"
         "    grip             back onto the player\n"
         "    A                pause / resume\n"
-        "    B                slow motion / normal speed  (currently %s)\n"
-        "\n"
-        "What the triggers do is mirv_vr_triggers: players, seek or fov.\n"
-        "Speeds and feel: mirv_vr_speed, mirv_vr_turn, mirv_vr_stick, mirv_vr_seek.\n",
+        "    B                slow motion / normal speed  (currently %s)\n",
+        playing ? "PLAYING" : "watching, or idle",
+        playing ? "" : "   <- live",
         (kTriggersPlayers == g_TriggerMode) ? "previous player"
       : (kTriggersSeek    == g_TriggerMode) ? "seek back"
                                             : "narrow the view",
@@ -1679,6 +1712,36 @@ void PrintControls() {
       : (kTriggersSeek    == g_TriggerMode) ? "seek forward"
                                             : "widen the view",
         g_SlowMotion ? "slow" : "normal");
+
+    advancedfx::Message(
+        "\n"
+        "PLAYING a map%s\n"
+        "  left hand\n"
+        "    stick            walk, relative to your body\n"
+        "    stick click      slow walk on / off  (currently %s)\n"
+        "    trigger          use: defuse, plant, open, pick a gun off the floor\n"
+        "    grip             crouch  (held)\n"
+        "    X / Y            pick a team, while the picker is up\n"
+        "  right hand\n"
+        "    stick            turn the body\n"
+        "    stick click      reload\n"
+        "    trigger          fire  (held)\n"
+        "    grip             jump  (held)\n"
+        "    A                next weapon\n"
+        "    B                alternative fire  (held)\n"
+        "  aim               %s\n"
+        "\n"
+        "EITHER WAY\n"
+        "    left menu        CS2's own menu on a screen, and Escape with it\n"
+        "\n"
+        "What the triggers do while watching is mirv_vr_triggers: players, seek or fov.\n"
+        "Aiming is mirv_vr_aim hand|stick|off; vr.cfg asks for hand.\n"
+        "Speeds and feel: mirv_vr_speed, mirv_vr_turn, mirv_vr_stick, mirv_vr_seek.\n",
+        playing ? "   <- live" : "",
+        g_HeldKey[kHeldWalk] ? "walking" : "running",
+        (kAimHand  == g_AimMethod) ? "the right controller, inside a window around where you look"
+      : (kAimStick == g_AimMethod) ? "the right stick"
+                                   : "OFF -- nothing moves the mouse (mirv_vr_aim hand)");
 }
 
 bool AttachActions() {
@@ -2132,19 +2195,6 @@ void ResetAimLearning() {
     g_GainInitialised = true;
 }
 
-// How the aim is driven.
-//
-//   hand   the right controller points, as every VR shooter does and as UEVR's
-//          "Aim Method: Right Controller" does for flat games. The game's own aim is
-//          servoed onto the direction the hand points; the crosshair shows where that
-//          actually is, which during motion trails the hand by a frame or two.
-//   stick  the right thumbstick moves the aim, with the deadzone cone. What was built
-//          first, from a misreading: the user said "joystick" and meant the controller.
-//   off    nothing touches the mouse.
-//
-// Off until it has been worn once, because it sends input into a game somebody is inside.
-enum AimMethod { kAimOff = 0, kAimHand = 1, kAimStick = 2 };
-int g_AimMethod = kAimOff;
 
 AfxVrMath::AimTracker g_TrackYaw;
 AfxVrMath::AimTracker g_TrackPitch;
