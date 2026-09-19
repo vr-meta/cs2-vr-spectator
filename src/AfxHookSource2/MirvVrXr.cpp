@@ -92,6 +92,12 @@ bool g_FrameWaited = false;
 // Whether g_ProjViews describes anything. False before the first successful locate, and
 // the frame is then ended with no layer rather than with a made-up one.
 bool g_ProjViewsValid = false;
+
+// Exchange which located view drives which render pass, and which swapchain each is
+// submitted to. There is no reason this should ever be needed - view 0 is the left eye by
+// specification - but "the image will not fuse" has exactly two plausible causes and this
+// tells them apart in one keypress instead of an argument.
+bool g_SwapEyes = false;
 int g_EyesCopied = 0;
 bool g_ReportedFirstSubmit = false;
 
@@ -512,6 +518,83 @@ float SymmetricFovDegrees(const XrFovf & fov) {
     float a = fabsf(fov.angleLeft), b = fabsf(fov.angleRight);
     float half = a > b ? a : b;
     return (float)(2.0 * half * 180.0 / M_PI);
+}
+
+// Overrides for the frustum, because the automatic answer is only right if CS2 renders
+// exactly the field of view it is handed - and on a 2528x2780 window, which is portrait
+// and nothing like the 4:3 the engine's fov convention is written around, that is an
+// assumption rather than a fact.
+//
+// 0 means automatic. Whatever comes out of here is used for BOTH what the game renders and
+// what the projection layer claims - those two must never disagree, which is the whole
+// reason this is one function and not two numbers.
+float g_FovOverrideDegrees = 0.0f;
+float g_FovScale = 1.0f;
+float g_FovVerticalOverrideDegrees = 0.0f;
+
+// Source does not treat `fov` as "the horizontal angle I will render". It treats it as the
+// horizontal angle *at 4:3*, derives the vertical from that, and then recomputes the
+// horizontal for the window's real aspect. On a 16:9 monitor the difference is small
+// enough to ignore. On a 2528x2780 window - portrait, aspect 0.909 - asking for 108
+// degrees gets about 86 rendered.
+//
+// That gap is invisible while the reported interpupillary distance is small, because the
+// disparity it corrupts is proportional to it. SteamVR reports 22 mm here and it looked
+// almost right; Meta's runtime reports the true 61 mm and the two eyes stop fusing.
+//
+// So: given the frustum we actually want, work out what to ask Source for.
+bool g_SourceAspectFix = false;
+
+float AspectOfImage() {
+    if (g_SwapchainWidth && g_SwapchainHeight) {
+        return (float)g_SwapchainWidth / (float)g_SwapchainHeight;
+    }
+    return 1.0f;
+}
+
+// The engine's chain, forwards: what it actually renders when handed `askedDegrees`.
+float RenderedFovForAsked(float askedDegrees) {
+    const double d2r = M_PI / 180.0, r2d = 180.0 / M_PI;
+    double aspect = AspectOfImage();
+    if (aspect <= 0.0) return askedDegrees;
+    double halfY = atan(tan(0.5 * askedDegrees * d2r) * 0.75);
+    double halfX = atan(tan(halfY) * aspect);
+    return (float)(2.0 * halfX * r2d);
+}
+
+// The angle to hand the engine so that it renders `wantedDegrees` horizontally.
+float SourceFovForWanted(float wantedDegrees) {
+    const double d2r = M_PI / 180.0, r2d = 180.0 / M_PI;
+    double halfX = 0.5 * wantedDegrees * d2r;
+    double aspect = AspectOfImage();
+    if (aspect <= 0.0) return wantedDegrees;
+
+    // Undo the engine's chain: vertical from the wanted horizontal at this aspect, then
+    // the 4:3 horizontal that would have produced that vertical.
+    double halfY = atan(tan(halfX) / aspect);
+    double half43 = atan(tan(halfY) / 0.75);
+    return (float)(2.0 * half43 * r2d);
+}
+
+// What the frustum should be: the smallest symmetric one containing the runtime's
+// asymmetric recommendation, unless overridden.
+float WantedFovDegrees(const XrFovf & fov) {
+    float degrees = (g_FovOverrideDegrees > 0.0f) ? g_FovOverrideDegrees : SymmetricFovDegrees(fov);
+    degrees *= g_FovScale;
+    if (degrees < 10.0f) degrees = 10.0f;
+    if (degrees > 170.0f) degrees = 170.0f;
+    return degrees;
+}
+
+// What to hand the engine. Differs from the above only when the aspect fix is on.
+float EffectiveFovDegrees(const XrFovf & fov) {
+    float wanted = WantedFovDegrees(fov);
+    if (!g_SourceAspectFix) return wanted;
+
+    float asked = SourceFovForWanted(wanted);
+    if (asked < 10.0f) asked = 10.0f;
+    if (asked > 178.0f) asked = 178.0f;
+    return asked;
 }
 
 bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
@@ -1172,11 +1255,12 @@ void MirvVrXr_EngineThread_Frame() {
     base.position.y = 0.5f * (views[0].pose.position.y + views[1].pose.position.y);
     base.position.z = 0.5f * (views[0].pose.position.z + views[1].pose.position.z);
 
-    for (int eye = 0; eye < 2; eye++) {
+    for (int pass = 0; pass < 2; pass++) {
+        int eye = g_SwapEyes ? (1 - pass) : pass;
         float right, forward, up, dPitch, dYaw, dRoll;
         XrPoseToEye(views[eye].pose, base, right, forward, up, dPitch, dYaw, dRoll);
-        AfxVr_SetEye(eye + 1, true, right, forward, up, dPitch, dYaw, dRoll,
-            SymmetricFovDegrees(views[eye].fov));
+        AfxVr_SetEye(pass + 1, true, right, forward, up, dPitch, dYaw, dRoll,
+            EffectiveFovDegrees(views[eye].fov));
     }
 }
 
@@ -1262,9 +1346,15 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             // asymmetric recommendation. The vertical half-angle follows from the image
             // aspect - equal to the horizontal one only when the image is square, which
             // is what the first 1080x1080 test happened to be.
-            float half = 0.5f * SymmetricFovDegrees(rendered[eye].fov) * (float)(M_PI / 180.0);
+            // What the image is claimed to cover must be what the image actually covers -
+            // the frustum we WANTED, not the number we handed the engine to get it. With
+            // the aspect fix off those are the same; with it on they differ by exactly the
+            // engine's 4:3 convention, which is the point.
+            float half = 0.5f * WantedFovDegrees(rendered[eye].fov) * (float)(M_PI / 180.0);
             float vHalf = half;
-            if (g_SwapchainWidth && g_SwapchainHeight) {
+            if (g_FovVerticalOverrideDegrees > 0.0f) {
+                vHalf = 0.5f * g_FovVerticalOverrideDegrees * (float)(M_PI / 180.0);
+            } else if (g_SwapchainWidth && g_SwapchainHeight) {
                 vHalf = atanf(tanf(half) * (float)g_SwapchainHeight / (float)g_SwapchainWidth);
             }
 
@@ -1303,7 +1393,10 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
     // what stalls the runtime.
     if (1 == eyeIndex) {
         for (int eye = 0; eye < 2; eye++) {
-            g_ProjViews[eye].subImage.swapchain = g_Swapchain[eye];
+            // g_ProjViews is indexed by *view*, which the runtime requires to be left then
+            // right. The swapchain it points at is the one the pass that rendered that
+            // view wrote into, which is not the same index once the eyes are swapped.
+            g_ProjViews[eye].subImage.swapchain = g_Swapchain[g_SwapEyes ? (1 - eye) : eye];
             g_ProjViews[eye].subImage.imageRect.offset = { 0, 0 };
             g_ProjViews[eye].subImage.imageRect.extent = { (int32_t)g_SwapchainWidth, (int32_t)g_SwapchainHeight };
             g_ProjViews[eye].subImage.imageArrayIndex = 0;
@@ -1395,6 +1488,12 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         if (!_stricmp(arg1, "start"))   { MirvVrXr_SessionStart(); return; }
         if (!_stricmp(arg1, "stop"))    { MirvVrXr_SessionStop(); AfxVr_SetEye(1,false,0,0,0,0,0,0,0); AfxVr_SetEye(2,false,0,0,0,0,0,0,0); advancedfx::Message("AFXVR: session stopped.\n"); return; }
         if (!_stricmp(arg1, "quit"))    { MirvVrXr_Stop(); advancedfx::Message("AFXVR: disconnected.\n"); return; }
+        if (!_stricmp(arg1, "swap")) {
+            g_SwapEyes = (3 <= args->ArgC()) ? (0 != atoi(args->ArgV(2))) : !g_SwapEyes;
+            advancedfx::Message("AFXVR: eyes %s. Takes effect next frame.\n",
+                g_SwapEyes ? "SWAPPED" : "in runtime order");
+            return;
+        }
         if (!_stricmp(arg1, "latency")) {
             bool want = g_LowLatency;
             if (3 <= args->ArgC()) {
@@ -1471,6 +1570,7 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         "mirv_vr_xr passes [n] - render n extra passes with no session, for debugging.\n"
         "mirv_vr_xr ui in|out - whether the HUD and demo menu are baked into the eyes.\n"
         "mirv_vr_xr latency safe|low - which thread waits for and locates the head.\n"
+        "mirv_vr_xr swap [0|1] - exchange which eye gets which image, to test a hunch.\n"
         "\n"
         "Instance: %s, session: %s, state %i, submitting: %s\n"
         "Last measured: %.1f frames/s at %ux%u per eye.\n",
@@ -1725,4 +1825,172 @@ CON_COMMAND(mirv_vr_panel, "cs2-vr-spectator: the demo menu on a flat panel in s
         g_PanelWidthMetres,
         g_PanelPlaced ? "yes" : "not yet",
         g_SessionRunning ? "running" : "not running");
+}
+
+CON_COMMAND(mirv_vr_views, "cs2-vr-spectator: what the runtime actually reports for each eye.")
+{
+    if (XR_NULL_HANDLE == g_Session) {
+        advancedfx::Message("mirv_vr_views: no session.\n");
+        return;
+    }
+
+    XrView v[2];
+    bool valid = false;
+    {
+        std::lock_guard<std::mutex> lock(g_ViewMutex);
+        if (g_ViewsValid) { v[0] = g_Views[0]; v[1] = g_Views[1]; valid = true; }
+    }
+    if (!valid) {
+        advancedfx::Message("mirv_vr_views: nothing located yet.\n");
+        return;
+    }
+
+    const double r2d = 180.0 / M_PI;
+
+    // Along the head's own right axis, not the world's x. Comparing world coordinates
+    // reports a separation that swings with which way the viewer is facing and reads as
+    // "the eyes are swapped" whenever they turn round - which it did, and which cost an
+    // entirely wrong diagnosis before it was noticed.
+    const XrQuaternionf & q0 = v[0].pose.orientation;
+    float rx = 1.0f - 2.0f * (q0.y * q0.y + q0.z * q0.z);
+    float ry = 2.0f * (q0.x * q0.y + q0.w * q0.z);
+    float rz = 2.0f * (q0.x * q0.z - q0.w * q0.y);
+
+    float dx = v[1].pose.position.x - v[0].pose.position.x;
+    float dy = v[1].pose.position.y - v[0].pose.position.y;
+    float dz = v[1].pose.position.z - v[0].pose.position.z;
+
+    float alongRight = dx * rx + dy * ry + dz * rz;
+    float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+
+    advancedfx::Message(
+        "mirv_vr_views - straight from xrLocateViews, before anything of ours touches it.\n"
+        "\n"
+        "  Eyes are %.1f mm apart, %+.1f mm of that along the head's right axis.\n"
+        "  %s\n"
+        "\n",
+        1000.0f * distance, 1000.0f * alongRight,
+        (alongRight > 0.0f) ? "view 0 is the left eye, as the specification says."
+                            : "view 0 is the RIGHT eye - the eyes really are the wrong way round.");
+
+    for (int eye = 0; eye < 2; eye++) {
+        double l = v[eye].fov.angleLeft * r2d;
+        double r = v[eye].fov.angleRight * r2d;
+        double u = v[eye].fov.angleUp * r2d;
+        double d = v[eye].fov.angleDown * r2d;
+
+        // Symmetric frustums have equal and opposite half-angles. A canted display does
+        // not, and the difference is what we currently throw away.
+        double hAsym = (r + l);   // zero when symmetric, since l is negative
+        double vAsym = (u + d);
+
+        const XrQuaternionf & q = v[eye].pose.orientation;
+        double yaw = atan2(2.0 * (q.w * q.y + q.z * q.x), 1.0 - 2.0 * (q.x * q.x + q.y * q.y)) * r2d;
+
+        advancedfx::Message(
+            "  view %i  pos (%+.3f %+.3f %+.3f) m   yaw %+.2f deg\n"
+            "          fov  left %+.2f  right %+.2f  up %+.2f  down %+.2f  (degrees)\n"
+            "          asymmetry: horizontal %+.2f, vertical %+.2f\n"
+            "          we render and report a symmetric %.2f deg\n",
+            eye,
+            v[eye].pose.position.x, v[eye].pose.position.y, v[eye].pose.position.z,
+            yaw, l, r, u, d, hAsym, vAsym,
+            SymmetricFovDegrees(v[eye].fov));
+    }
+
+    advancedfx::Message(
+        "\n"
+        "  What to look for. A horizontal asymmetry of more than a degree or two, or a\n"
+        "  per-eye yaw that is not zero, means the headset's displays are canted and the\n"
+        "  symmetric frustum we render is not the one we are claiming. That does not stop\n"
+        "  the image appearing; it stops the two halves fusing, worse towards the edges.\n"
+        "  Eyes currently %s.\n",
+        g_SwapEyes ? "SWAPPED by mirv_vr_xr swap" : "in runtime order");
+}
+
+CON_COMMAND(mirv_vr_fov, "cs2-vr-spectator: override the frustum, when the automatic one does not fuse.")
+{
+    int argc = args->ArgC();
+
+    if (2 <= argc && !_stricmp(args->ArgV(1), "auto")) {
+        g_FovOverrideDegrees = 0.0f;
+        g_FovScale = 1.0f;
+        g_FovVerticalOverrideDegrees = 0.0f;
+        advancedfx::Message("mirv_vr_fov: automatic.\n");
+        return;
+    }
+
+    if (3 <= argc && !_stricmp(args->ArgV(1), "scale")) {
+        g_FovScale = (float)atof(args->ArgV(2));
+        if (g_FovScale < 0.2f) g_FovScale = 0.2f;
+        if (g_FovScale > 2.0f) g_FovScale = 2.0f;
+        advancedfx::Message("mirv_vr_fov: scale %.3f\n", g_FovScale);
+        return;
+    }
+
+    if (3 <= argc && !_stricmp(args->ArgV(1), "vertical")) {
+        g_FovVerticalOverrideDegrees = (float)atof(args->ArgV(2));
+        advancedfx::Message("mirv_vr_fov: vertical %s\n",
+            g_FovVerticalOverrideDegrees > 0.0f ? "overridden" : "from the image aspect");
+        return;
+    }
+
+    if (2 <= argc) {
+        g_FovOverrideDegrees = (float)atof(args->ArgV(1));
+        advancedfx::Message("mirv_vr_fov: %.1f degrees horizontal%s\n",
+            g_FovOverrideDegrees,
+            g_FovOverrideDegrees <= 0.0f ? " (automatic)" : "");
+        return;
+    }
+
+    advancedfx::Message(
+        "mirv_vr_fov <degrees>       - horizontal field of view. 0 or 'auto' for automatic.\n"
+        "mirv_vr_fov scale <k>       - multiply the automatic value instead.\n"
+        "mirv_vr_fov vertical <deg>  - override the vertical too. 0 derives it from aspect.\n"
+        "\n"
+        "The automatic value is the smallest symmetric frustum containing the runtime's\n"
+        "asymmetric one - 2 x the larger half-angle. On a Quest 3 that is 108 degrees for a\n"
+        "true frustum of 94 off-centre by 7, which is correct only if CS2 renders exactly\n"
+        "the number it is given. On a portrait window it may not: the engine's fov\n"
+        "convention is written around 4:3.\n"
+        "\n"
+        "If the two eyes will not fuse, this is the dial. Whatever it produces is used both\n"
+        "for what the game renders and for what the projection layer claims, so the two\n"
+        "cannot drift apart.\n"
+        "\n"
+        "Current: %s%.1f deg horizontal, scale %.3f, vertical %s.\n",
+        g_FovOverrideDegrees > 0.0f ? "" : "automatic -> ",
+        g_FovOverrideDegrees > 0.0f ? g_FovOverrideDegrees : 0.0f,
+        g_FovScale,
+        g_FovVerticalOverrideDegrees > 0.0f ? "overridden" : "from aspect");
+}
+
+CON_COMMAND(mirv_vr_fovfix, "cs2-vr-spectator: correct for Source computing its field of view against 4:3.")
+{
+    if (2 <= args->ArgC()) {
+        g_SourceAspectFix = 0 != atoi(args->ArgV(1));
+        advancedfx::Message("mirv_vr_fovfix: %s\n", g_SourceAspectFix ? "on" : "off");
+        return;
+    }
+
+    float wanted = 108.0f;
+    float asked = SourceFovForWanted(wanted);
+
+    advancedfx::Message(
+        "mirv_vr_fovfix 0|1 - ask Source for the angle that makes it render the frustum we\n"
+        "want, instead of assuming it renders the number it is given.\n"
+        "\n"
+        "Source treats fov as the horizontal angle at 4:3, derives the vertical from it, and\n"
+        "then recomputes the horizontal for the real aspect. This window is %ux%u - aspect\n"
+        "%.3f, portrait - so the gap is large: asking for %.1f degrees renders about %.1f.\n"
+        "\n"
+        "Claiming a frustum the image does not have corrupts the disparity in proportion to\n"
+        "the interpupillary distance. It hid for a long time because SteamVR reports 22 mm\n"
+        "here; Meta's runtime reports the true 61 mm and the eyes stop fusing.\n"
+        "\n"
+        "Currently %s. At this aspect, wanting %.1f means asking for %.1f.\n",
+        g_SwapchainWidth, g_SwapchainHeight, AspectOfImage(),
+        wanted, RenderedFovForAsked(wanted),
+        g_SourceAspectFix ? "on" : "off",
+        wanted, asked);
 }
