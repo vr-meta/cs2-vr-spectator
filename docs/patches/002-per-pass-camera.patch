@@ -70,7 +70,7 @@ index cea3626..ad2a751 100644
          }
      }
 diff --git a/AfxHookSource2/RenderSystemDX11Hooks.cpp b/AfxHookSource2/RenderSystemDX11Hooks.cpp
-index 73b7c00..3f77b3a 100644
+index 73b7c00..ce1c803 100644
 --- a/AfxHookSource2/RenderSystemDX11Hooks.cpp
 +++ b/AfxHookSource2/RenderSystemDX11Hooks.cpp
 @@ -8,6 +8,8 @@
@@ -110,7 +110,7 @@ index 73b7c00..3f77b3a 100644
              ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
              pDeviceContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
              if (pRenderTargetViews[0]) {
-@@ -2188,6 +2204,17 @@ void Before_Present() {
+@@ -2188,6 +2204,21 @@ void Before_Present() {
  
      if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
      {
@@ -122,13 +122,60 @@ index 73b7c00..3f77b3a 100644
 +        // work on it too. Which point an eye was actually captured at is reported by the
 +        // capture itself, below.
 +        if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
-+            advancedfx::Message("AFXVR: frame=%i pass=%i BeforePresent (render thread)\n",
-+                g_AfxVrFrameIndex, g_AfxVrPassIndex);
++            advancedfx::Message("AFXVR: frame=%i pass=%i BeforePresent (render thread) queue=%s beforeUiRT=%s swapChain=%s ctx=%s\n",
++                g_AfxVrFrameIndex, g_AfxVrPassIndex,
++                pRenderPassCommands->BeforePresent.Empty() ? "empty" : "has work",
++                g_BeforeUiRT ? "yes" : "NULL",
++                g_pSwapChain ? "yes" : "NULL",
++                g_RenderCommands.RenderThread_GetContext() ? "yes" : "NULL");
 +        }
          if(!pRenderPassCommands->BeforePresent.Empty()) {
              ID3D11Resource* pRenderTargetViewResource = nullptr;
              if(g_BeforeUiRT) {
-@@ -2986,6 +3013,13 @@ public:
+@@ -2203,6 +2234,42 @@ void Before_Present() {
+                     pRenderTargetViewResource->Release();
+                 }
+             }
++            // cs2-vr-spectator: no capture point, so use the swap chain itself.
++            //
++            // g_BeforeUiRT is only ever assigned by CAfxRenderCallbackBeforeUi, and that
++            // is queued in exactly one place: when the scene system announces the view
++            // "CSGOHud". At CS2's main menu the view is called CSGOMainMenu, the name
++            // test fails, nothing is captured, and this callback could never be reached -
++            // which is why a VR session started at the menu showed the runtime's loading
++            // placeholder and hung the game.
++            //
++            // Buffer 0 is the finished frame: Before_Present runs immediately before the
++            // real Present, and in D3D11 the back buffer is always index 0, flip model
++            // included. It also covers loading screens and anything else with neither
++            // view, so what the headset shows does not drop out between menu and map.
++            else if(g_pSwapChain) {
++                // OnBeforePresent silently DISCARDS the queue when it has no device
++                // context, and at the menu it may never have been given one:
++                // RenderThread_SetContext is called from New_ClearRenderTargetView when
++                // g_iDraw reaches 0, which is part of the in-game draw detection. The
++                // device's immediate context is the right one here - we are on the render
++                // thread at Present and the callback only does a CopyResource - and the
++                // in-game path overwrites it again on its next frame.
++                if(!g_RenderCommands.RenderThread_GetContext() && g_pDevice) {
++                    ID3D11DeviceContext * pImmediate = nullptr;
++                    g_pDevice->GetImmediateContext(&pImmediate);
++                    if(pImmediate) {
++                        g_RenderCommands.RenderThread_SetContext(pImmediate);
++                        pImmediate->Release();
++                    }
++                }
++
++                ID3D11Texture2D * pBackBuffer = nullptr;
++                if(SUCCEEDED(g_pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&pBackBuffer)) && pBackBuffer) {
++                    pRenderPassCommands->OnBeforePresent(pBackBuffer);
++                    pBackBuffer->Release();
++                }
++            }
+         }
+     }
+ }
+@@ -2986,6 +3053,13 @@ public:
      void EngineThread_Prepare() {
          m_RecordingExtraPassesIterator = m_RecordingExtraPasses.begin();
  
@@ -142,7 +189,7 @@ index 73b7c00..3f77b3a 100644
          if (m_Recording) {
              if (m_AutoForceFullReSmoke) {
                  if (!m_Restore_smoke_volume_lod_ratio_change) {
-@@ -3012,10 +3046,54 @@ public:
+@@ -3012,10 +3086,54 @@ public:
      }
  
      bool EngineThread_HasNextRenderPass() {
@@ -198,7 +245,7 @@ index 73b7c00..3f77b3a 100644
          auto it = m_RecordingExtraPassesIterator;
          while(it != m_RecordingExtraPasses.end()) {
              it->EngineThread_BeginFrame();
-@@ -3041,6 +3119,36 @@ public:
+@@ -3041,6 +3159,36 @@ public:
      }    
  
      void EngineThread_BeginMainRenderPass() {
@@ -235,7 +282,7 @@ index 73b7c00..3f77b3a 100644
          for(auto it = m_RecordingMainPass.begin(); it != m_RecordingMainPass.end(); it++) {
              it->EngineThread_BeginFrame();
          }
-@@ -3563,6 +3671,10 @@ private:
+@@ -3563,6 +3711,10 @@ private:
      std::multiset<CStream,RenderPassCompare> m_RecordingExtraPasses;
      std::multiset<CStream,RenderPassCompare>::iterator m_RecordingExtraPassesIterator;
  

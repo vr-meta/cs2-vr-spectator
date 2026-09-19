@@ -130,6 +130,20 @@ unsigned long long g_TicketMisses = 0;
 bool g_LowLatency = false;
 bool g_FrameWaited = false;
 
+// A session with no map under it shows the game's own window on one screen instead of
+// rendering a world into both eyes. See RenderThread_MenuFrame for why this exists and
+// what it fixes.
+//
+// The switch is "is a demo loaded", read from the same clock the autostart gate reads. A
+// PAUSED demo still has a tick, so pausing does not throw the viewer back to a flat
+// screen; quitting to the menu does.
+bool g_MenuMode = false;
+bool g_MenuPlaced = false;
+XrPosef g_MenuPose = {};
+float g_MenuWidthDegrees = 70.0f;
+float g_MenuDistanceMetres = 2.0f;
+
+
 // Whether g_ProjViews describes anything. False before the first successful locate, and
 // the frame is then ended with no layer rather than with a made-up one.
 bool g_ProjViewsValid = false;
@@ -2079,17 +2093,21 @@ bool MirvVrXr_WantsPanel() {
     // Deliberately not gated on a session. The callbacks it queues each gate themselves,
     // and the alpha probe - the one thing that answers whether a transparent panel can
     // work at all - has to run at a desk with no headset in the building.
-    return g_PanelEnabled;
+    // In menu mode the main pass IS the picture, whether or not the HUD panel is on.
+    return g_PanelEnabled || g_MenuMode;
 }
 
 bool MirvVrXr_WantsPasses() {
+
     // As soon as the session is running, not once it is visible. The runtime only
     // advances a session past READY when the application starts its frame loop, so
     // waiting for SYNCHRONIZED before running it means it never starts.
     //
     // Or when forced, with no session and no headset, so the pass machinery can be
     // watched at a desk. Nothing is submitted in that case - see SubmitEye.
-    return g_SessionRunning || 0 < g_ForcedPasses;
+    // Not in menu mode: with no map the view struct is not a camera, and there is nothing
+    // worth rendering twice. The main pass does the whole frame instead.
+    return (g_SessionRunning && !g_MenuMode) || 0 < g_ForcedPasses;
 }
 
 bool MirvVrXr_Start() {
@@ -2344,6 +2362,36 @@ void MirvVrXr_EngineThread_Frame() {
         }
     }
 
+    // Is there a world under this session? Decided here, once a frame, before anything
+    // depends on it - the pass loop asks MirvVrXr_WantsPasses immediately afterwards.
+    //
+    // NOT the demo tick, which was the first guess and was wrong: GetDemoFile() hands back
+    // an object at the main menu too, so the tick reads as available with nothing loaded,
+    // the session stayed in world mode with no world, and the game stalled exactly as
+    // before. IsPlayingDemo is the engine's own answer, and the level name catches the
+    // moment between "a demo is opening" and "there is a map".
+    {
+        bool haveWorld = false;
+        const char * level = "";
+        if (g_pEngineToClient) {
+            level = g_pEngineToClient->GetLevelNameShort();
+            if (!level) level = "";
+            haveWorld = g_pEngineToClient->IsPlayingDemo() && level[0];
+        }
+
+        bool menu = g_SessionRunning && !haveWorld;
+        if (menu != g_MenuMode) {
+            g_MenuMode = menu;
+            g_MenuPlaced = false;
+            // The inputs, not just the verdict. The first version of this test was wrong
+            // and said nothing about why, which cost a launch.
+            advancedfx::Message(menu
+                ? "AFXVR: no world (playing demo %i, level \"%s\") - the game's own window goes on one screen.\n"
+                : "AFXVR: world up (playing demo %i, level \"%s\") - both eyes render it.\n",
+                (g_pEngineToClient && g_pEngineToClient->IsPlayingDemo()) ? 1 : 0, level);
+        }
+    }
+
     // In low-latency mode this is where the frame's poses come from, located a few
     // microseconds ago rather than a whole frame ago.
     EngineThread_WaitAndLocate();
@@ -2470,7 +2518,11 @@ void MirvVrXr_EngineThread_Frame() {
         }
 
         AfxVr_SetRoomIpdScale(g_IpdScale);
-        AfxVr_SetHead(true, hPitch, hYaw, hRoll, EffectiveFovDegrees(views[0].fov), rx, ry, rz);
+        // Not in menu mode. There the picture is a flat screen in the room, and moving the
+        // menu background camera with the head would make it swim behind a screen that is
+        // not moving.
+        if (g_MenuMode) AfxVr_SetHead(false, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        else AfxVr_SetHead(true, hPitch, hYaw, hRoll, EffectiveFovDegrees(views[0].fov), rx, ry, rz);
     }
 
     // What the projection layer reports has to be what was rendered, so publish the
@@ -2519,7 +2571,8 @@ void MirvVrXr_ReleasePanelClearView() {
 }
 
 bool MirvVrXr_WantsPanelClear() {
-    return g_PanelEnabled && g_PanelTransparent;
+    // Never in menu mode: there the whole window is the point, world and all.
+    return g_PanelEnabled && g_PanelTransparent && !g_MenuMode;
 }
 
 void MirvVrXr_RenderThread_ClearForPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
@@ -2634,8 +2687,184 @@ static void ProbePanelAlpha(ID3D11DeviceContext * pContext, ID3D11Texture2D * pT
     pStaging->Release();
 }
 
+// A whole frame from the main pass alone, for a session with no map under it.
+//
+// The frame loop used to live entirely inside the eye passes: xrBeginFrame at the first
+// eye, xrEndFrame at the second. A session with no world therefore began no frames and
+// ended none, the runtime stopped scheduling xrWaitFrame, and the engine thread parked in
+// it forever - taking the console command queue with it. Measured, not guessed: started at
+// CS2's menu, the session reached "begun" and then the log went silent, a command sent down
+// the pipe forty seconds later was echoed by the pipe thread and never executed, and the
+// headset showed the runtime's own loading placeholder while the game went on burning a
+// core.
+//
+// So here the main pass does the whole thing: wait, begin, copy the window, end with one
+// quad and no projection layer. No extra passes are asked for at all - the view struct is
+// not a camera in the menu, and there is nothing worth rendering twice.
+//
+// The quad carries the WHOLE back buffer, 2528x2780, not the 2560x1600 of it that reaches
+// the monitor. What the desktop shows is cropped; what the headset gets is not.
+static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
+    // A frame may already be open, and that is exactly the case this has to handle rather
+    // than step around.
+    //
+    // The switch to menu mode happens on the engine thread, between one frame's passes and
+    // the next. If it lands after the first eye has begun a frame and before the second
+    // would have ended it, that frame is orphaned: begun, never ended, and every later
+    // frame is refused by the runtime. The first version of this function returned early
+    // on g_FrameBegun and did precisely that - the mode switched, the log said so, and the
+    // headset kept showing a loading screen because one frame from the old mode was still
+    // open. So: if a frame is open, finish it; only open a new one if there is none.
+    if (!g_FrameBegun) {
+        if (g_LowLatency) {
+            if (!g_FrameWaited) return;
+            g_FrameWaited = false;
+            std::lock_guard<std::mutex> lock(g_ViewMutex);
+            g_RtFrameState = g_FrameState;
+        } else {
+            g_FrameState = { XR_TYPE_FRAME_STATE };
+            XrFrameWaitInfo waitInfo = { XR_TYPE_FRAME_WAIT_INFO };
+            if (!Check(xrWaitFrame_(g_Session, &waitInfo, &g_FrameState), "xrWaitFrame (menu)")) return;
+            g_RtFrameState = g_FrameState;
+        }
+
+        XrFrameBeginInfo beginInfo = { XR_TYPE_FRAME_BEGIN_INFO };
+        if (!Check(xrBeginFrame_(g_Session, &beginInfo), "xrBeginFrame (menu)")) return;
+        g_FrameBegun = true;
+    }
+
+    // Once, because EnsureSwapchains takes the XR swapchains' size and format from the
+    // first texture it is handed, and in a menu-first launch that is now the swap chain's
+    // buffer 0 rather than the in-game render target. If the two ever differ, going from
+    // menu to demo would copy between mismatched textures and CopyResource would silently
+    // do nothing.
+    {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            D3D11_TEXTURE2D_DESC desc = {};
+            pTexture->GetDesc(&desc);
+            advancedfx::Message("AFXVR: menu frame source %ux%u format %i samples %u\n",
+                desc.Width, desc.Height, (int)desc.Format, desc.SampleDesc.Count);
+        }
+    }
+
+    g_EyesCopied = 0;
+
+
+    // The eye swapchains are made here too. They are not used in this mode, but making
+    // them now means going back to a demo does not cost a frame of nothing while they are
+    // created - and it keeps one place that knows how big the back buffer is.
+    bool haveSheet = EnsureSwapchains(pTexture)
+        && XR_NULL_HANDLE != g_Swapchain[kPanelSwapchain]
+        && g_SwapchainWidth > 0 && g_SwapchainHeight > 0;
+
+    if (haveSheet) {
+        uint32_t imageIndex = 0;
+        XrSwapchainImageAcquireInfo acquire = { XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+        if (Check(xrAcquireSwapchainImage_(g_Swapchain[kPanelSwapchain], &acquire, &imageIndex),
+                  "xrAcquireSwapchainImage (menu)")) {
+            XrSwapchainImageWaitInfo wait = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+            wait.timeout = XR_INFINITE_DURATION;
+            if (Check(xrWaitSwapchainImage_(g_Swapchain[kPanelSwapchain], &wait),
+                      "xrWaitSwapchainImage (menu)")) {
+                pContext->CopyResource(g_SwapchainImages[kPanelSwapchain][imageIndex], pTexture);
+            } else {
+                haveSheet = false;
+            }
+            XrSwapchainImageReleaseInfo release = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+            xrReleaseSwapchainImage_(g_Swapchain[kPanelSwapchain], &release);
+        } else {
+            haveSheet = false;
+        }
+    }
+
+    // Placed once, where the viewer was looking when the menu came up, and then left
+    // alone. A screen that follows the eyes cannot be looked away from, and a menu is
+    // exactly the thing somebody wants to glance away from and back to.
+    if (haveSheet && !g_MenuPlaced) {
+        XrPosef mid = {};
+        bool haveViews = false;
+        {
+            std::lock_guard<std::mutex> lock(g_ViewMutex);
+            if (g_ViewsValid) {
+                mid = g_Views[0].pose;
+                mid.position.x = 0.5f * (g_Views[0].pose.position.x + g_Views[1].pose.position.x);
+                mid.position.y = 0.5f * (g_Views[0].pose.position.y + g_Views[1].pose.position.y);
+                mid.position.z = 0.5f * (g_Views[0].pose.position.z + g_Views[1].pose.position.z);
+                haveViews = true;
+            }
+        }
+        if (haveViews) {
+            const XrQuaternionf & q = mid.orientation;
+            double yaw = atan2(2.0 * (q.w * q.y + q.z * q.x), 1.0 - 2.0 * (q.x * q.x + q.y * q.y));
+
+            g_MenuPose.position.x = mid.position.x - (float)sin(yaw) * g_MenuDistanceMetres;
+            g_MenuPose.position.y = mid.position.y;
+            g_MenuPose.position.z = mid.position.z - (float)cos(yaw) * g_MenuDistanceMetres;
+            g_MenuPose.orientation.x = 0.0f;
+            g_MenuPose.orientation.y = (float)sin(yaw * 0.5);
+            g_MenuPose.orientation.z = 0.0f;
+            g_MenuPose.orientation.w = (float)cos(yaw * 0.5);
+            g_MenuPlaced = true;
+
+            advancedfx::Message("AFXVR: menu screen placed, %.0f degrees wide at %.1f m.\n",
+                g_MenuWidthDegrees, g_MenuDistanceMetres);
+        }
+    }
+
+    XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+    quad.layerFlags = 0;   // opaque: this IS the picture, there is nothing behind it
+    quad.space = g_Space;
+    quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    quad.pose = g_MenuPose;
+    quad.subImage.swapchain = g_Swapchain[kPanelSwapchain];
+    quad.subImage.imageRect.offset = { 0, 0 };
+    quad.subImage.imageRect.extent = { (int32_t)g_SwapchainWidth, (int32_t)g_SwapchainHeight };
+    quad.subImage.imageArrayIndex = 0;
+
+    float halfWidth = tanf(0.5f * g_MenuWidthDegrees * (float)(M_PI / 180.0));
+    quad.size.width = 2.0f * g_MenuDistanceMetres * halfWidth;
+    // The source aspect, whatever it is. The window is the eye size, so the sheet is
+    // taller than it is wide; stretching text to a friendlier shape is worse than an odd
+    // one.
+    quad.size.height = quad.size.width * (float)g_SwapchainHeight / (float)g_SwapchainWidth;
+
+    const XrCompositionLayerBaseHeader * layers[1];
+    int layerCount = 0;
+    if (haveSheet && g_MenuPlaced) layers[layerCount++] = (XrCompositionLayerBaseHeader*)&quad;
+
+    XrFrameEndInfo endInfo = { XR_TYPE_FRAME_END_INFO };
+    endInfo.displayTime = g_RtFrameState.predictedDisplayTime;
+    endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    endInfo.layerCount = (uint32_t)layerCount;
+    endInfo.layers = layerCount ? layers : nullptr;
+
+    // An empty frame is submitted deliberately when the sheet is not ready yet. Ending
+    // every frame that was begun is the whole point of this function: the alternative is
+    // the silence it exists to fix.
+    Check(xrEndFrame_(g_Session, &endInfo), "xrEndFrame (menu)");
+    g_FrameBegun = false;
+
+    ULONGLONG now = GetTickCount64();
+    if (0 == g_FpsWindowStart) g_FpsWindowStart = now;
+    g_FpsFrames++;
+    if (now - g_FpsWindowStart >= 2000) {
+        g_SubmitFps = 1000.0f * g_FpsFrames / (float)(now - g_FpsWindowStart);
+        g_FpsWindowStart = now;
+        g_FpsFrames = 0;
+        if (g_LogFps) {
+            advancedfx::Message("AFXVR: menu screen, %.1f frames/s at %ux%u%s%s\n",
+                g_SubmitFps, g_SwapchainWidth, g_SwapchainHeight,
+                (XR_SESSION_STATE_FOCUSED == g_State) ? "" : "  session ",
+                (XR_SESSION_STATE_FOCUSED == g_State) ? "" : SessionStateName(g_State));
+        }
+    }
+}
+
 void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Texture2D * pTexture) {
-    if (!g_PanelEnabled || !pContext || !pTexture) return;
+    if (!pContext || !pTexture) return;
+    if (!g_PanelEnabled && !g_MenuMode) return;
 
     // Before the session gate: the whole value of the probe is that it answers the
     // question without a headset.
@@ -2645,6 +2874,23 @@ void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Tex
     }
 
     if (!g_SessionRunning) return;
+
+    // No map: the whole frame happens here, because nothing else will.
+    //
+    // Reaching this at all needed a change in HLAE (patch 002). This callback is invoked
+    // through g_BeforeUiRT, which is captured by CAfxRenderCallbackBeforeUi - and that is
+    // queued only when the scene system announces "CSGOHud". At the menu the view is
+    // called CSGOMainMenu, the name test fails, and nothing is captured. The patch falls
+    // back to the swap chain's own buffer 0 when there is no capture, which is the
+    // finished frame and is what this wants.
+    if (g_MenuMode) {
+        RenderThread_MenuFrame(pContext, pTexture);
+        return;
+    }
+
+
+
+
     if (XR_NULL_HANDLE == g_Swapchain[kPanelSwapchain]) return; // first frame, not made yet
 
     // This runs during the main pass, which comes before the eyes and therefore before
@@ -3206,7 +3452,54 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
 // "this feels wrong" and an answer, when the only instrument is a person wearing the
 // headset and the only way to test is to change it and look again.
 
+CON_COMMAND(mirv_vr_menu, "cs2-vr-spectator: the game's own window on one screen, when there is no demo to show.")
+{
+    int argc = args->ArgC();
+    if (2 <= argc) {
+        const char * arg1 = args->ArgV(1);
+        if (!_stricmp(arg1, "place")) {
+            g_MenuPlaced = false;
+            advancedfx::Message("mirv_vr_menu: it will be put in front of wherever you are looking now.\n");
+            return;
+        }
+        if (!_stricmp(arg1, "width") && 3 <= argc) {
+            g_MenuWidthDegrees = (float)atof(args->ArgV(2));
+            if (g_MenuWidthDegrees < 20.0f)  g_MenuWidthDegrees = 20.0f;
+            if (g_MenuWidthDegrees > 120.0f) g_MenuWidthDegrees = 120.0f;
+            advancedfx::Message("mirv_vr_menu: %.0f degrees wide.\n", g_MenuWidthDegrees);
+            return;
+        }
+        if (!_stricmp(arg1, "distance") && 3 <= argc) {
+            g_MenuDistanceMetres = (float)atof(args->ArgV(2));
+            if (g_MenuDistanceMetres < 0.5f) g_MenuDistanceMetres = 0.5f;
+            if (g_MenuDistanceMetres > 8.0f) g_MenuDistanceMetres = 8.0f;
+            g_MenuPlaced = false;
+            advancedfx::Message("mirv_vr_menu: %.1f m away; putting it there now.\n", g_MenuDistanceMetres);
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "mirv_vr_menu width <deg>    - how wide the screen looks. Now %.0f.\n"
+        "mirv_vr_menu distance <m>   - how far away. Now %.1f.\n"
+        "mirv_vr_menu place          - put it in front of where you are looking now.\n"
+        "\n"
+        "There is nothing to switch on. With a session running and no demo loaded, the\n"
+        "game's own window goes on one screen in front of you; load a demo and both eyes\n"
+        "go back to rendering the world. A PAUSED demo is still a demo.\n"
+        "\n"
+        "The screen carries the WHOLE window - %ux%u - not the part of it that fits on the\n"
+        "monitor. The desktop shows the top-left corner of the back buffer and nothing\n"
+        "else; the headset is not cropped.\n"
+        "\n"
+        "Currently: %s\n",
+        g_MenuWidthDegrees, g_MenuDistanceMetres,
+        g_SwapchainWidth, g_SwapchainHeight,
+        g_MenuMode ? "showing the menu screen" : "not in menu mode");
+}
+
 CON_COMMAND(mirv_vr_pipe, "cs2-vr-spectator: a console for a launch that has none.")
+
 {
     if (2 <= args->ArgC()) {
         int wanted = (0 != atoi(args->ArgV(1))) ? 1 : 0;
