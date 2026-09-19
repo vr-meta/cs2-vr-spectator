@@ -545,6 +545,22 @@ bool g_PanelCutUp = true;
 // measured rather than hoped for, and measured at a desk with no headset.
 int g_PanelAlphaProbe = 0;
 
+// Frames to wait before placing the panel, counted down after the session becomes FOCUSED.
+//
+// Placing it on the first pose available was wrong in a way only a worn session shows:
+// scripts/start-vr.ps1 presses F9 itself, so the first pose is the headset lying on the
+// desk or halfway to a face. The panel was then nailed to that yaw and that height, and
+// the groups - at +16, -18 and -32 degrees around it - ended up behind or under the
+// viewer. The user's report was simply "I did not see the HUD".
+//
+// FOCUSED is the right moment, because the Oculus runtime only grants it with the
+// proximity sensor covered: it means "on a face". Every transition into it, not just the
+// first, since taking the headset off and putting it back on is how a session is paused.
+// The delay is for the swing of putting it on to settle.
+int g_PanelPlaceCountdown = 0;
+const int kPanelPlaceDelayFrames = 20;
+
+
 PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
 
 #define AFXVR_XR_FUNCS(X) \
@@ -1463,6 +1479,9 @@ void PollEvents() {
                     g_SessionRunning = true;
                     advancedfx::Message("AFXVR: session begun.\n");
                 }
+            } else if (XR_SESSION_STATE_FOCUSED == g_State) {
+                // On a face. Put the panel where the viewer is actually looking.
+                g_PanelPlaceCountdown = kPanelPlaceDelayFrames;
             } else if ((XR_SESSION_STATE_STOPPING == g_State) && g_SessionRunning) {
                 g_SessionRunning = false;
                 xrEndSession_(g_Session);
@@ -1819,14 +1838,21 @@ void MirvVrXr_EngineThread_Frame() {
 
     // The panel needs a head pose to be placed in front of, and there is none until the
     // session is up - so "mirv_vr_panel on" in a startup config could never place it, and
-    // the panel silently did not appear. Place it the first time a pose exists.
-    if (g_PanelEnabled && !g_PanelPlaced) {
-        XrPosef mid = views[0].pose;
-        mid.position.x = 0.5f * (views[0].pose.position.x + views[1].pose.position.x);
-        mid.position.y = 0.5f * (views[0].pose.position.y + views[1].pose.position.y);
-        mid.position.z = 0.5f * (views[0].pose.position.z + views[1].pose.position.z);
-        PlacePanelFrom(mid);
-        advancedfx::Message("AFXVR: panel placed in front of where you were looking.\n");
+    // the panel silently did not appear.
+    //
+    // Placed a moment after the session becomes FOCUSED, which is the runtime's way of
+    // saying the headset is on a face, and again every time it comes back. See the note on
+    // g_PanelPlaceCountdown.
+    if (g_PanelPlaceCountdown > 0) {
+        g_PanelPlaceCountdown--;
+        if (0 == g_PanelPlaceCountdown && g_PanelEnabled) {
+            XrPosef mid = views[0].pose;
+            mid.position.x = 0.5f * (views[0].pose.position.x + views[1].pose.position.x);
+            mid.position.y = 0.5f * (views[0].pose.position.y + views[1].pose.position.y);
+            mid.position.z = 0.5f * (views[0].pose.position.z + views[1].pose.position.z);
+            PlacePanelFrom(mid);
+            advancedfx::Message("AFXVR: panel placed in front of where you are looking.\n");
+        }
     }
 
     // And the head itself, once, for everything that reads the camera once a frame
