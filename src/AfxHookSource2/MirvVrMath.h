@@ -189,6 +189,51 @@ inline float NormalizeDegrees(float degrees) {
 }
 
 // ---------------------------------------------------------------------------------
+// Whose camera is in the view struct?
+// ---------------------------------------------------------------------------------
+
+// The eye poses are written into a persistent object between render passes, and the
+// engine reads that same object again at the top of the next frame - so whatever the last
+// pass left there would be read back as the game's own camera and accumulated. The cure
+// was to put the base camera back before that read.
+//
+// Which is right only while the engine is not computing a camera of its own. On a PAUSED
+// demo it does not, the struct still holds our last write, and restoring is exactly
+// correct. On a PLAYING demo it writes a fresh camera every frame - and the restore threw
+// it away, so the base froze at whatever it was on the first frame an eye was enabled and
+// never moved again. The viewer stayed at the point where the session started while the
+// world went on without them, and every "next player" landed back in the same place.
+//
+// That went unnoticed for a long time because experiments 03 to 07 were all run paused,
+// where the two behaviours are indistinguishable, and because free look takes the
+// orientation from the head, which hides everything except the position.
+//
+// The test is simply whether anyone else has touched it: if the struct still holds,
+// exactly, the last thing this module wrote, the engine has not been here.
+struct ViewTriple {
+    float origin[3];
+    float angles[3];
+    float fov;
+};
+
+inline bool SameView(const ViewTriple & a, const ViewTriple & b) {
+    for (int i = 0; i < 3; i++) {
+        if (a.origin[i] != b.origin[i]) return false;
+        if (a.angles[i] != b.angles[i]) return false;
+    }
+    return a.fov == b.fov;
+}
+
+// Exact equality, deliberately. These are floats copied verbatim, never arithmetic
+// results, so anything other than bit equality means a different value was written.
+inline bool ShouldRestoreBaseView(bool dirty, bool haveLastWritten,
+                                  const ViewTriple & lastWritten, const ViewTriple & structNow) {
+    if (!dirty) return false;
+    if (!haveLastWritten) return false;
+    return SameView(lastWritten, structNow);
+}
+
+// ---------------------------------------------------------------------------------
 // Stick shaping
 // ---------------------------------------------------------------------------------
 

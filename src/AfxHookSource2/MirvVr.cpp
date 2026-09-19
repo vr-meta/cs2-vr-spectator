@@ -58,6 +58,23 @@ float g_BaseAngles[3] = { 0.0f, 0.0f, 0.0f };
 float g_BaseFov = 90.0f;
 bool g_Dirty = false;
 
+// The last thing this module wrote into the view struct, whatever wrote it. Compared with
+// what is in there at the top of the next frame to tell "nobody has touched it since"
+// from "the engine has computed a new camera" - see ShouldRestoreBaseView in MirvVrMath.h,
+// and the frozen camera it exists to prevent.
+AfxVrMath::ViewTriple g_LastWritten = {};
+bool g_HaveLastWritten = false;
+
+void RememberWritten(const float origin[3], const float angles[3], float fov) {
+    for (int i = 0; i < 3; i++) {
+        g_LastWritten.origin[i] = origin[i];
+        g_LastWritten.angles[i] = angles[i];
+    }
+    g_LastWritten.fov = fov;
+    g_HaveLastWritten = true;
+}
+
+
 // The head: one orientation, no eye offset, delivered once a frame. See AfxVr_SetHead.
 struct Head {
     bool enabled = false;
@@ -258,9 +275,19 @@ void AfxVr_BeforeViewSetupRead(void * pViewStruct) {
     float * pAngles = (float*)((unsigned char*)pViewStruct + AFXVR_OFS_ANGLES);
     float * pFov    = (float*)((unsigned char*)pViewStruct + AFXVR_OFS_FOV);
 
-    pOrigin[0] = g_BaseOrigin[0]; pOrigin[1] = g_BaseOrigin[1]; pOrigin[2] = g_BaseOrigin[2];
-    pAngles[0] = g_BaseAngles[0]; pAngles[1] = g_BaseAngles[1]; pAngles[2] = g_BaseAngles[2];
-    *pFov = g_BaseFov;
+    AfxVrMath::ViewTriple now;
+    for (int i = 0; i < 3; i++) { now.origin[i] = pOrigin[i]; now.angles[i] = pAngles[i]; }
+    now.fov = *pFov;
+
+    // Only if nobody else has been here since. On a playing demo the engine writes a fresh
+    // camera into this struct every frame, and putting the base back over it froze the
+    // viewer at the point the session started - for the whole session.
+    if (AfxVrMath::ShouldRestoreBaseView(g_Dirty, g_HaveLastWritten, g_LastWritten, now)) {
+        pOrigin[0] = g_BaseOrigin[0]; pOrigin[1] = g_BaseOrigin[1]; pOrigin[2] = g_BaseOrigin[2];
+        pAngles[0] = g_BaseAngles[0]; pAngles[1] = g_BaseAngles[1]; pAngles[2] = g_BaseAngles[2];
+        *pFov = g_BaseFov;
+        RememberWritten(g_BaseOrigin, g_BaseAngles, g_BaseFov);
+    }
 
     g_Dirty = false;
 }
@@ -321,6 +348,14 @@ bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz
     g_Dirty = true;
     g_LastHeadYaw = g_Head.dYaw;
     g_LastViewYaw = angles[1];
+
+    // The trampoline writes these back into the struct on our behalf, so they are what
+    // will be in there - record them as ours.
+    {
+        const float origin[3] = { tx, ty, tz };
+        const float written[3] = { rx, ry, rz };
+        RememberWritten(origin, written, fov);
+    }
     return true;
 }
 
@@ -361,6 +396,7 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
         pOrigin[0] = g_BaseOrigin[0]; pOrigin[1] = g_BaseOrigin[1]; pOrigin[2] = g_BaseOrigin[2];
         pAngles[0] = g_BaseAngles[0]; pAngles[1] = g_BaseAngles[1]; pAngles[2] = g_BaseAngles[2];
         *pFov = g_BaseFov;
+        RememberWritten(g_BaseOrigin, g_BaseAngles, g_BaseFov);
         return;
     }
 
@@ -397,6 +433,7 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     }
     g_AppliedFov[passIndex] = *pFov;
     g_Applied[passIndex] = true;
+    RememberWritten(pOrigin, pAngles, *pFov);
 
     // The pose is in place; now let the client rebuild what it derives from it, so the
     // HUD drawn during this pass is placed for this eye.

@@ -3247,7 +3247,7 @@ CON_COMMAND(mirv_vr_reset, "cs2-vr-spectator: put every stereo setting back to i
     g_Calibrating = false;
 
     advancedfx::Message(
-        "mirv_vr_reset: separation x1, stereo, eyes in runtime order, frustum centring on,\n"
+        "mirv_vr_reset: separation x1, stereo, eyes in runtime order, frustum centring OFF,\n"
         "  roll as reported, no field-of-view overrides, calibration off.\n"
         "  Everything is now at its default, which is the only state worth comparing from.\n");
 }

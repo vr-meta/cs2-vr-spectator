@@ -75,6 +75,43 @@ foreach ($file in $Path) {
     }
 }
 
+# Reserved keys: the ones the operator reaches for without looking. A diagnostics layout is
+# allowed to change nearly everything - that is the point of it - but not these.
+#
+# PgDn swaps the layout, not the operator's fingers. The day this was written, RIGHTARROW
+# was "next player" in the everyday layout and "field of view 150" in the diagnostics, and
+# the operator pressed it four times, in a headset, switching players into a broken frustum
+# with no visible clue that anything else had happened.
+$reserved = @('LEFTARROW', 'RIGHTARROW', 'UPARROW', 'DOWNARROW', 'F4')
+
+$layouts = @{}
+foreach ($file in $Path) {
+    $name = Split-Path -Leaf $file
+    if ($name -notin @('vr_keys.cfg', 'vr_diag.cfg')) { continue }
+    $layouts[$name] = @{}
+    foreach ($line in (Get-Content -LiteralPath $file)) {
+        $t = $line.Trim()
+        if ($t -match '^//') { continue }
+        if ($t -match '^bind\s+"([^"]+)"\s+"(.*)"\s*$') { $layouts[$name][$matches[1].ToUpper()] = $matches[2] }
+    }
+}
+
+if ($layouts.Count -eq 2) {
+    $before = $problems
+    foreach ($key in $reserved) {
+        $a = $layouts['vr_keys.cfg'][$key]
+        $b = $layouts['vr_diag.cfg'][$key]
+        if ($null -eq $a -and $null -eq $b) { continue }
+        if ($a -ne $b) {
+            Write-Host "reserved key $key means '$a' in vr_keys.cfg and '$b' in vr_diag.cfg" -ForegroundColor Red
+            $problems++
+        }
+    }
+    if ($problems -eq $before) {
+        Write-Host 'Reserved keys mean the same in both layouts.' -ForegroundColor Green
+    }
+}
+
 if ($problems -gt 0) {
     Write-Host "$problems problem(s)." -ForegroundColor Red
     exit 1

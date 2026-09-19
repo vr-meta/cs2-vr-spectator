@@ -397,6 +397,7 @@ static void TestSteamInfPath() {
 
 static void TestQuatToSourceAngles(); // defined below, after the helpers it needs
 static void TestComposeSourceAngles();
+static void TestShouldRestoreBaseView();
 
 static void RunTests() {
     TestAngleVectors();
@@ -411,6 +412,7 @@ static void RunTests() {
     TestSteamInfPath();
     TestQuatToSourceAngles();
     TestComposeSourceAngles();
+    TestShouldRestoreBaseView();
 }
 
 CHECK_MAIN()
@@ -681,5 +683,73 @@ static void TestComposeSourceAngles() {
             SourceAnglesToRotation(out, m2);
             for (int k = 0; k < 9; k++) CHECK_NEAR(m2[k], m[k], 2e-4);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------
+
+static AfxVrMath::ViewTriple MakeView(float x, float y, float z,
+                                      float p, float yw, float r, float fov) {
+    AfxVrMath::ViewTriple v;
+    v.origin[0] = x; v.origin[1] = y; v.origin[2] = z;
+    v.angles[0] = p; v.angles[1] = yw; v.angles[2] = r;
+    v.fov = fov;
+    return v;
+}
+
+static void TestShouldRestoreBaseView() {
+    check::Case("the base camera is put back only when nobody else has written one");
+
+    const AfxVrMath::ViewTriple written = MakeView(-99.73f, 6.63f, 52.64f, 3.0f, -120.0f, 0.0f, 108.0f);
+
+    // Paused: the engine does not recompute the view, so the struct still holds the last
+    // thing the pass loop wrote. Putting the base back is what stops the eye offset being
+    // read as the game's camera and accumulating - the reason this exists at all.
+    CHECK(true == AfxVrMath::ShouldRestoreBaseView(true, true, written, written));
+
+    // Playing: the engine has written a fresh camera. Restoring over it is what froze the
+    // viewer at the point the session started, for the whole session, while the world went
+    // on without them. One changed component is enough to know.
+    {
+        AfxVrMath::ViewTriple moved = written;
+        moved.origin[0] += 0.01f;
+        CHECK(false == AfxVrMath::ShouldRestoreBaseView(true, true, written, moved));
+    }
+    {
+        AfxVrMath::ViewTriple turned = written;
+        turned.angles[1] += 0.01f;
+        CHECK(false == AfxVrMath::ShouldRestoreBaseView(true, true, written, turned));
+    }
+    {
+        AfxVrMath::ViewTriple zoomed = written;
+        zoomed.fov += 0.5f;
+        CHECK(false == AfxVrMath::ShouldRestoreBaseView(true, true, written, zoomed));
+    }
+
+    // Every component, one at a time, so a comparison that quietly skips one is caught.
+    for (int i = 0; i < 3; i++) {
+        AfxVrMath::ViewTriple v = written;
+        v.origin[i] = written.origin[i] + 1.0f;
+        CHECK(false == AfxVrMath::ShouldRestoreBaseView(true, true, written, v));
+
+        v = written;
+        v.angles[i] = written.angles[i] + 1.0f;
+        CHECK(false == AfxVrMath::ShouldRestoreBaseView(true, true, written, v));
+    }
+
+    // Nothing was written this frame, so there is nothing to undo.
+    CHECK(false == AfxVrMath::ShouldRestoreBaseView(false, true, written, written));
+
+    // Nothing has ever been written - the first frame of a session. Restoring then would
+    // put a base that has not been read yet over whatever the engine has just computed.
+    CHECK(false == AfxVrMath::ShouldRestoreBaseView(true, false, written, written));
+
+    // Exact equality is the point: these are floats copied verbatim, never arithmetic, so
+    // the smallest representable difference means somebody else wrote it.
+    {
+        AfxVrMath::ViewTriple nudged = written;
+        nudged.origin[2] = nextafterf(written.origin[2], 1e9f);
+        CHECK(nudged.origin[2] != written.origin[2]);
+        CHECK(false == AfxVrMath::ShouldRestoreBaseView(true, true, written, nudged));
     }
 }
