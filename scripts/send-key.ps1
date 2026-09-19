@@ -91,7 +91,7 @@ $vk = @{ F1 = 0x70; F2 = 0x71; F3 = 0x72; F4 = 0x73; F5 = 0x74
          HOME = 0x24; END = 0x23; INS = 0x2D; DEL = 0x2E
          PGUP = 0x21; PGDN = 0x22
          LEFTARROW = 0x25; UPARROW = 0x26; RIGHTARROW = 0x27; DOWNARROW = 0x28
-         'KP_PLUS' = 0x6B; 'KP_MINUS' = 0x6D }[$Key.ToUpper()]
+         'KP_PLUS' = 0x6B; 'KP_MINUS' = 0x6D; 'KP_MULTIPLY' = 0x6A; 'KP_DIVIDE' = 0x6F }[$Key.ToUpper()]
 
 if (-not $vk) { throw "Unsupported key: $Key" }
 

@@ -600,7 +600,7 @@ struct PanelRegion {
 PanelRegion g_PanelRegions[] = {
     // Up high and wide, because it is what is being read at a glance. Both teams, the
     // score, the round timer, health and money.
-    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  58.0f, 40.0f, 1.2f, true  },
+    { "score",   0.26f, 0.00f, 0.74f, 0.18f,    0.0f,  44.0f, 40.0f, 1.2f, true  },
     // Low and to the left, where a spectator's eyes go when they want the map.
     { "radar",   0.00f, 0.00f, 0.21f, 0.28f,   78.0f, -36.0f, 20.0f, 1.0f, true  },
     // Low and central, like a dashboard. It is also what a controller ray will click one
@@ -612,7 +612,7 @@ PanelRegion g_PanelRegions[] = {
     // freeze with no spectated target, so the strip did not exist to be measured. Without
     // it the viewer cannot see who they are watching, which is exactly what was needed to
     // tell whether the switch-player button had done anything.
-    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -66.0f, 50.0f, 0.75f, true },
+    { "bar",     0.00f, 0.82f, 1.00f, 1.00f,    0.0f, -66.0f, 50.0f, 0.55f, true },
     // Off, and NOT measured: there were no kills on screen when the sheet was captured, so
     // this rect is a guess at where the feed appears. Turn it on with mirv_vr_panel region
     // killfeed on and correct it with mirv_vr_panel rect.
@@ -657,7 +657,17 @@ bool g_PanelShown = true;
 // "look down and the bar is in my lap" holds while sitting, standing or leaning. The
 // orientation stays world-locked, because a panel that follows the eyes cannot be looked
 // away from and looking away from the HUD is most of what a viewer does.
+// Where the head was when the viewer last recentred. Everything they do with their body
+// afterwards is measured from here.
+XrVector3f g_RoomRefPos = {};
+bool g_RoomRefValid = false;
+
+// A tracking glitch must not throw the camera across the map. Three metres is more room
+// than anybody has in front of a desk.
+const float kRoomOffsetLimitMetres = 3.0f;
+
 bool g_PanelFollow = true;
+
 XrVector3f g_PanelFollowPos = {};
 bool g_PanelFollowValid = false;
 
@@ -1441,6 +1451,7 @@ void ProcessInput() {
         ULONGLONG held = GetTickCount64() - g_RecenterPressedAt;
         if (held >= 500) {
             AfxVr_Recenter();
+            g_RoomRefValid = false;   // and this is where you are standing now
             advancedfx::Message("AFXVR: recentred.\n");
         } else {
             g_PanelShown = !g_PanelShown;
@@ -2141,7 +2152,23 @@ void MirvVrXr_EngineThread_Frame() {
         XrQuatToSourceAngles(base.orientation, hPitch, hYaw, hRoll);
         if (0 == g_RollMode) hRoll = 0.0f;
         else if (g_RollMode < 0) hRoll = -hRoll;
-        AfxVr_SetHead(true, hPitch, hYaw, hRoll, EffectiveFovDegrees(views[0].fov));
+
+        // Where the body has got to since the last recentre. The first frame sets the
+        // reference, so a session never starts with the viewer displaced.
+        if (!g_RoomRefValid) { g_RoomRefPos = base.position; g_RoomRefValid = true; }
+
+        float rx = base.position.x - g_RoomRefPos.x;
+        float ry = base.position.y - g_RoomRefPos.y;
+        float rz = base.position.z - g_RoomRefPos.z;
+
+        float distance = sqrtf(rx * rx + ry * ry + rz * rz);
+        if (distance > kRoomOffsetLimitMetres) {
+            float k = kRoomOffsetLimitMetres / distance;
+            rx *= k; ry *= k; rz *= k;
+        }
+
+        AfxVr_SetRoomIpdScale(g_IpdScale);
+        AfxVr_SetHead(true, hPitch, hYaw, hRoll, EffectiveFovDegrees(views[0].fov), rx, ry, rz);
     }
 
     // What the projection layer reports has to be what was rendered, so publish the
@@ -2761,7 +2788,7 @@ CON_COMMAND(mirv_vr_xr, "cs2-vr-spectator: connect to the OpenXR runtime and sub
         const char * arg1 = args->ArgV(1);
         if (!_stricmp(arg1, "info"))    { MirvVrXr_Start(); return; }
         if (!_stricmp(arg1, "start"))   { MirvVrXr_SessionStart(); return; }
-        if (!_stricmp(arg1, "stop"))    { MirvVrXr_SessionStop(); AfxVr_SetEye(1,false,0,0,0,0,0,0,0); AfxVr_SetEye(2,false,0,0,0,0,0,0,0); AfxVr_SetHead(false,0,0,0,0); advancedfx::Message("AFXVR: session stopped.\n"); return; }
+        if (!_stricmp(arg1, "stop"))    { MirvVrXr_SessionStop(); AfxVr_SetEye(1,false,0,0,0,0,0,0,0); AfxVr_SetEye(2,false,0,0,0,0,0,0,0); AfxVr_SetHead(false,0,0,0,0,0,0,0); g_RoomRefValid = false; advancedfx::Message("AFXVR: session stopped.\n"); return; }
         if (!_stricmp(arg1, "quit"))    { MirvVrXr_Stop(); advancedfx::Message("AFXVR: disconnected.\n"); return; }
         if (!_stricmp(arg1, "mono")) {
             g_Monoscopic = (3 <= args->ArgC()) ? (0 != atoi(args->ArgV(2))) : !g_Monoscopic;

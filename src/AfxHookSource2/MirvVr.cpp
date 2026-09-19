@@ -80,8 +80,13 @@ struct Head {
     bool enabled = false;
     float dPitch = 0.0f, dYaw = 0.0f, dRoll = 0.0f;
     float fov = 0.0f;
+    // Where the head is in the room, relative to where it was at the last recentre, in
+    // OpenXR metres.
+    float roomX = 0.0f, roomY = 0.0f, roomZ = 0.0f;
 };
 Head g_Head;
+
+bool g_RoomScale = true;
 
 // Passes still owed a report of what was in the fov field when they began, from
 // mirv_vr_fovraw.
@@ -131,6 +136,9 @@ float g_PassEntryFov = 0.0f;
 
 bool g_HavePassEntryFov = false;
 
+
+// Mirrors mirv_vr_ipd's scale, so a lean has the same world scale as the eye separation.
+float g_IpdScaleForRoom = 1.0f;
 
 bool g_FreeLook = false;
 
@@ -302,6 +310,27 @@ void ComposeViewAngles(float dPitch, float dYaw, float dRoll, float out[3]) {
     AfxVrMath::ComposeSourceAngles(base, head, out);
 }
 
+// Which world direction "forward in the room" points, which is the view yaw with the
+// head's own yaw taken back out. Read from the same place ComposeViewAngles reads it, so
+// leaning and turning cannot end up disagreeing about where forward is.
+float RoomYawDegrees() {
+    return (g_FreeLook ? 0.0f : g_BaseAngles[1]) + g_YawOffset;
+}
+
+// The head's position in the room, as an offset in the map.
+//
+// Scaled by the same factor as the eye separation: world scale is one number, and eyes
+// that are scaled while the head is not give a lean the wrong parallax for the stereo the
+// viewer is being shown.
+void RoomOffsetWorld(float out[3]) {
+    out[0] = out[1] = out[2] = 0.0f;
+    if (!g_RoomScale || !g_Head.enabled) return;
+
+    AfxVrMath::RoomOffsetToWorld(RoomYawDegrees(),
+        g_Head.roomX * g_IpdScaleForRoom, g_Head.roomY * g_IpdScaleForRoom,
+        g_Head.roomZ * g_IpdScaleForRoom, out);
+}
+
 } // namespace
 
 void AfxVr_BeforeViewSetupRead(void * pViewStruct) {
@@ -328,13 +357,22 @@ void AfxVr_BeforeViewSetupRead(void * pViewStruct) {
     g_Dirty = false;
 }
 
-void AfxVr_SetHead(bool enabled, float dPitch, float dYaw, float dRoll, float fov) {
+void AfxVr_SetHead(bool enabled, float dPitch, float dYaw, float dRoll, float fov,
+                   float roomX, float roomY, float roomZ) {
     g_Head.enabled = enabled;
     g_Head.dPitch = dPitch;
     g_Head.dYaw = dYaw;
     g_Head.dRoll = dRoll;
     g_Head.fov = fov;
+    g_Head.roomX = roomX;
+    g_Head.roomY = roomY;
+    g_Head.roomZ = roomZ;
 }
+
+void AfxVr_SetRoomScale(bool enabled) { g_RoomScale = enabled; }
+bool AfxVr_GetRoomScale() { return g_RoomScale; }
+
+void AfxVr_SetRoomIpdScale(float scale) { g_IpdScaleForRoom = scale; }
 
 bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz,
                           float & rx, float & ry, float & rz, float & fov) {
@@ -362,9 +400,12 @@ bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz
 
     // The stick offset is already in world space; the head adds no offset of its own,
     // which is the difference between this and an eye.
-    tx = g_BaseOrigin[0] + g_MoveOffset[0];
-    ty = g_BaseOrigin[1] + g_MoveOffset[1];
-    tz = g_BaseOrigin[2] + g_MoveOffset[2];
+    float room[3];
+    RoomOffsetWorld(room);
+
+    tx = g_BaseOrigin[0] + g_MoveOffset[0] + room[0];
+    ty = g_BaseOrigin[1] + g_MoveOffset[1] + room[1];
+    tz = g_BaseOrigin[2] + g_MoveOffset[2] + room[2];
 
     rx = angles[0];
     ry = angles[1];
@@ -466,9 +507,13 @@ void AfxVr_OnBeginRenderPass(int passIndex) {
     float forward[3], right[3], up[3];
     AfxVrMath::AngleVectors(angles, forward, right, up);
 
+    float room[3];
+    RoomOffsetWorld(room);
+
     for (int i = 0; i < 3; i++) {
         pOrigin[i] = g_BaseOrigin[i]
             + g_MoveOffset[i]
+            + room[i]
             + eye.right   * right[i]
             + eye.forward * forward[i]
             + eye.up      * up[i];
@@ -533,7 +578,15 @@ void AfxVr_AddMove(float right, float forward, float up) {
 }
 
 void AfxVr_AddYaw(float degrees) {
+    // Turning pivots about the VIEWER, not about the point the demo put the camera at.
+    // With the head a metre to one side of that point, changing the yaw would swing them a
+    // metre sideways through the map on every snap - a teleport per press, proportional to
+    // how far they have leaned. Compensate by however much the room offset moves.
+    float before[3], after[3];
+    RoomOffsetWorld(before);
     g_YawOffset = AfxVrMath::NormalizeDegrees(g_YawOffset + degrees);
+    RoomOffsetWorld(after);
+    for (int i = 0; i < 3; i++) g_MoveOffset[i] += before[i] - after[i];
 }
 
 void AfxVr_ResetMove() {
@@ -596,6 +649,23 @@ CON_COMMAND(mirv_vr_fovraw, "cs2-vr-spectator: what is in the fov field when a p
     if (n > 30) n = 30;
     g_RawFovProbe = n;
     advancedfx::Message("mirv_vr_fovraw: reporting the next %i main pass(es).\n", n);
+}
+
+CON_COMMAND(mirv_vr_roomscale, "cs2-vr-spectator: does a step in the room move you in the map?")
+{
+    if (2 <= args->ArgC()) AfxVr_SetRoomScale(0 != atoi(args->ArgV(1)));
+
+    advancedfx::Message(
+        "mirv_vr_roomscale 0|1 - whether leaning, crouching and stepping move the camera.\n"
+        "\n"
+        "On, the world stops being glued to your face: lean round a corner and the corner\n"
+        "stays put, crouch and the floor comes up. It is also the honest thing to do, since\n"
+        "the projection layer reports your real eye positions to the runtime either way -\n"
+        "with this off it was describing a translation that had not been rendered.\n"
+        "\n"
+        "Measured from wherever you were when you last recentred.\n"
+        "Current value: %s\n",
+        AfxVr_GetRoomScale() ? "1" : "0");
 }
 
 CON_COMMAND(mirv_vr_horizon, "cs2-vr-spectator: how much of the demo camera's own tilt the headset inherits.")

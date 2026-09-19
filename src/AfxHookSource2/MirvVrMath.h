@@ -202,6 +202,34 @@ inline void YawThenPitchQuat(float yawRadians, float pitchRadians,
     z = (float)(-sy * sp);
 }
 
+// One inch per Source unit, which is what makes a metre of room 39.37 units of map.
+const float kUnitsPerMetre = 39.3700787f;
+
+// Where a step, a lean or a crouch in the room lands in the map.
+//
+// Only the head's ORIENTATION used to reach the game; its position was thrown away, so the
+// world was glued to the face and leaning did nothing. Which is also a lie told to the
+// compositor, since the projection layer reports the real eye poses: it was being told
+// about a translation that had not been rendered.
+//
+// The offset arrives in OpenXR's axes and metres - x right, y up, z back - and Source's
+// world is x forward, y LEFT, z up. So the viewer's own frame is (-dz, -dx, +dy) in units,
+// and that is then turned by the yaw that maps "forward in the room" onto the map. That
+// yaw is the one the view angles use MINUS the head's own yaw, and it has to be taken from
+// the same place, or leaning and turning end up disagreeing about where forward is.
+inline void RoomOffsetToWorld(float yawDegrees, float dx, float dy, float dz, float out[3]) {
+    const double d2r = 3.14159265358979323846 / 180.0;
+    double forward = -(double)dz * kUnitsPerMetre;
+    double left    = -(double)dx * kUnitsPerMetre;
+    double up      =  (double)dy * kUnitsPerMetre;
+
+    double sy = sin(yawDegrees * d2r), cy = cos(yawDegrees * d2r);
+
+    out[0] = (float)(forward * cy - left * sy);
+    out[1] = (float)(forward * sy + left * cy);
+    out[2] = (float)up;
+}
+
 // Fold an angle into (-180, 180].
 inline float NormalizeDegrees(float degrees) {
     while (degrees > 180.0f) degrees -= 360.0f;

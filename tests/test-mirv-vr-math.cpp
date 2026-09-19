@@ -399,6 +399,7 @@ static void TestQuatToSourceAngles(); // defined below, after the helpers it nee
 static void TestComposeSourceAngles();
 static void TestShouldRestoreBaseView();
 static void TestYawThenPitchQuat();
+static void TestRoomOffsetToWorld();
 
 static void RunTests() {
     TestAngleVectors();
@@ -415,6 +416,7 @@ static void RunTests() {
     TestComposeSourceAngles();
     TestShouldRestoreBaseView();
     TestYawThenPitchQuat();
+    TestRoomOffsetToWorld();
 }
 
 CHECK_MAIN()
@@ -805,5 +807,76 @@ static void TestYawThenPitchQuat() {
         QuatRotate(qx, qy, -qz, qw, 1.0f, 0.0f, 0.0f, rx, ry, rz);
         (void)rx; (void)rz;
         CHECK_NEAR(ry, 0.5, 1e-3);   // half the panel width of tilt, at this yaw and pitch
+    }
+}
+
+// ---------------------------------------------------------------------------------
+
+static void TestRoomOffsetToWorld() {
+    check::Case("a step in the room is a step in the map, in the direction you face");
+
+    float out[3];
+
+    // Facing along the map's +X. OpenXR is x right, y up, z back, so a metre forward is
+    // dz = -1.
+    RoomOffsetToWorld(0.0f, 0.0f, 0.0f, -1.0f, out);
+    CHECK_NEAR(out[0], 39.3700787, 1e-3);
+    CHECK_NEAR(out[1], 0.0, 1e-3);
+    CHECK_NEAR(out[2], 0.0, 1e-3);
+
+    // A metre to the right. Source's Y is LEFT, so right is negative Y.
+    RoomOffsetToWorld(0.0f, 1.0f, 0.0f, 0.0f, out);
+    CHECK_NEAR(out[0], 0.0, 1e-3);
+    CHECK_NEAR(out[1], -39.3700787, 1e-3);
+    CHECK_NEAR(out[2], 0.0, 1e-3);
+
+    // Standing up out of a crouch.
+    RoomOffsetToWorld(0.0f, 0.0f, 1.0f, 0.0f, out);
+    CHECK_NEAR(out[0], 0.0, 1e-3);
+    CHECK_NEAR(out[1], 0.0, 1e-3);
+    CHECK_NEAR(out[2], 39.3700787, 1e-3);
+
+    // Turned ninety degrees left: forward in the room is now the map's +Y.
+    RoomOffsetToWorld(90.0f, 0.0f, 0.0f, -1.0f, out);
+    CHECK_NEAR(out[0], 0.0, 1e-3);
+    CHECK_NEAR(out[1], 39.3700787, 1e-3);
+    CHECK_NEAR(out[2], 0.0, 1e-3);
+
+    // ... and right in the room is then the map's +X.
+    RoomOffsetToWorld(90.0f, 1.0f, 0.0f, 0.0f, out);
+    CHECK_NEAR(out[0], 39.3700787, 1e-3);
+    CHECK_NEAR(out[1], 0.0, 1e-3);
+    CHECK_NEAR(out[2], 0.0, 1e-3);
+
+    // Height never turns with the yaw, and the horizontal length never changes with it:
+    // the yaw rotates the step, it does not stretch it.
+    for (int yawDeg = -180; yawDeg <= 180; yawDeg += 45) {
+        RoomOffsetToWorld((float)yawDeg, 0.37f, 0.11f, -0.62f, out);
+        double horizontal = sqrt((double)out[0] * out[0] + (double)out[1] * out[1]);
+        double expected = sqrt(0.37 * 0.37 + 0.62 * 0.62) * 39.3700787;
+        CHECK_NEAR(horizontal, expected, 1e-2);
+        CHECK_NEAR(out[2], 0.11 * 39.3700787, 1e-3);
+    }
+
+    // The property snap turning depends on: turning must pivot about the viewer. The
+    // compensation is the difference between the offset before and after the turn, so
+    // whatever it is, applying it has to put the head back where it was.
+    {
+        const float o[3] = { 0.8f, 0.2f, -0.35f };   // a metre or so of lean, in the room
+        float before[3], after[3];
+        RoomOffsetToWorld(20.0f, o[0], o[1], o[2], before);
+        RoomOffsetToWorld(50.0f, o[0], o[1], o[2], after);
+
+        // Without compensation the viewer is thrown this far sideways by a 30 degree snap.
+        double thrown = sqrt(
+            (double)(after[0] - before[0]) * (after[0] - before[0]) +
+            (double)(after[1] - before[1]) * (after[1] - before[1]));
+        CHECK(thrown > 10.0);   // over 25 cm of map, per press
+
+        // With it, nothing moves.
+        for (int i = 0; i < 3; i++) {
+            float compensated = after[i] + (before[i] - after[i]);
+            CHECK_NEAR(compensated, before[i], 1e-4);
+        }
     }
 }

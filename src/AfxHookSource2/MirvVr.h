@@ -46,7 +46,23 @@ bool AfxVr_AfterViewSetup(void * pViewStruct, float & tx, float & ty, float & tz
 
 // The head pose, as opposed to either eye: the same orientation both eyes render with,
 // and no interpupillary offset. Driven from xrLocateViews alongside AfxVr_SetEye.
-void AfxVr_SetHead(bool enabled, float dPitch, float dYaw, float dRoll, float fov);
+// `room` is how far the head has moved in the room since the viewer was last recentred,
+// in OpenXR's axes and metres. Until this existed only the head's ORIENTATION reached the
+// game: leaning, crouching and stepping did nothing, the world was glued to the face, and
+// the pose reported to the compositor described a translation that had never been
+// rendered.
+void AfxVr_SetHead(bool enabled, float dPitch, float dYaw, float dRoll, float fov,
+                   float roomX, float roomY, float roomZ);
+
+// Whether a step in the room is a step in the map. On by default.
+void AfxVr_SetRoomScale(bool enabled);
+bool AfxVr_GetRoomScale();
+
+// The same factor mirv_vr_ipd applies to the eye separation. A lean has to be scaled with
+// it: world scale is one number, and eyes scaled while the head is not give the wrong
+// parallax for the stereo the viewer is actually shown.
+void AfxVr_SetRoomIpdScale(float scale);
+
 
 // Called from the render pass loop, before the given pass renders.
 void AfxVr_OnBeginRenderPass(int passIndex);
