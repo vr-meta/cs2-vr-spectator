@@ -83,6 +83,12 @@ Building the hook itself: `docs/install.md` and `docs/patches/README.md`. CI
 - **Report what was measured, and say when something was not.** Several confident
   explanations in this project's history were wrong; the experiments directory is the
   record of finding out.
+- **A problem that is not fixed now becomes a GitHub issue, not a sentence in chat.** A
+  message evaporates at the next compaction and a TODO reaches nobody; an issue survives
+  both and is the only way a stranger can pick the work up — which is what the README's
+  invitation is for. Write what was measured, what is still unknown, and which experiment
+  note it belongs with. This applies to something noticed in passing just as much as to
+  something asked for: if it is worth saying twice, it is worth an issue.
 - **A parser's fixtures are copied from a file somebody actually has**, and the test says
   which file. Every one of the control server's first four faults was a grammar written from
   an example instead of an artefact — including the timestamp that every real log line

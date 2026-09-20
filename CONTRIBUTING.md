@@ -37,6 +37,10 @@ MIT) with two things added, and they are kept apart on purpose:
 - `docs\patches\*.patch` — the only edits to advancedfx's own files. A 900-line source file
   is not reviewable as a diff, so ours are files and only the edits to theirs are patches.
 - `tools\launcher\` — `cs2vr.exe`. Its decisions are in `LauncherLogic.h`, tested the same way.
+- `tools\server\` — a control server on loopback: `/state`, `/log`, `/command`, for a browser
+  page and for an agent. Rust, no dependencies, and it attaches to a running session rather
+  than starting one. It reads `console.log` and writes the hook's pipe, so it is the one part
+  that can be developed against a recorded log instead of a headset.
 - `scripts\` — development launch, measurement and check scripts. `scripts\cs2\vr*.cfg` are
   the configs a release ships; `exp*.cfg` are records of experiments.
 - `docs\experiments\` — one note per question asked of the engine, with the answer and how
@@ -97,6 +101,7 @@ cmake --build build\tests --config Release
 ctest --test-dir build\tests -C Release --output-on-failure
 scripts\check-cfg.ps1          # every key bound once, every bind announced, every exec resolves
 scripts\check-patches.ps1      # the patches apply, in order
+cargo test --manifest-path tools\server\Cargo.toml
 ```
 
 The `--config` and `-C` matter. CMake's default generator on Windows is multi-config, so
@@ -108,6 +113,12 @@ Anything that can be expressed as arithmetic or string handling goes into `MirvV
 `LauncherLogic.h` **with a test**. It is the only part of this project that can be verified
 without a headset, and most of the bugs that cost an evening were in code that could have
 been there.
+
+**If a test parses something, its fixture is copied from a real file and the test says which
+one.** The control server's first four faults were all one mistake: a grammar written from a
+tidied example rather than from an artefact, which is how a parser came to match only the
+lines that happen to have no timestamp. A fixture that reads the way the parser wants proves
+nothing about the file it will meet.
 
 ## Two kinds of launch
 

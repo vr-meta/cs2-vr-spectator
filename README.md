@@ -155,6 +155,13 @@ when the picker comes up — all without taking the headset off. That menu is a 
 this project rather than a fallback, and it is the same screen the **Menu** button brings up
 over a running game, so settings and the buy menu are reachable too.
 
+Over a running game that button is the **only** thing that raises it, and pressing it again
+puts it away. Team select and the buy menu do not bring the screen up by themselves: press
+**Menu** when you want them. It used to appear on its own whenever Windows was showing a
+mouse cursor anywhere, which meant it arrived uninvited in the middle of a demo, replaced the
+three HUD panels with one window, and took the sticks away — and, because the cursor outvoted
+the button, there was then no way to dismiss it.
+
 Bots are not a limitation of either route. They are the point: the input path is too slow
 for anyone who shoots back properly.
 
@@ -199,8 +206,19 @@ not suspected:
   follows your head rather than your hands. `r_drawviewmodel 0` in the console turns the gun
   off, which is how it has mostly been played so far.
 
-Everything above is reachable without a console through the pipe — `scripts/send-command.ps1`
-writes to it, and `cs2vr.exe` leaves it open. The thinking behind the layout is in
+Everything above is adjustable without a console. The hook opens a named pipe and takes one
+command per line; there are three ways to reach it, and a release has the first two:
+
+- **`cs2vr.exe` does not exit when the game starts** — its window becomes a remote control.
+  `r` puts the picture back in the headset if you came out of it, `s` stops the session, `c`
+  sends a console command, `q` closes the window and leaves the game running.
+- **The control server**, if you build it: `tools/server` serves a small page on `127.0.0.1`
+  with the current state, a log view and a command box, so whoever is helping you can use a
+  browser instead of a terminal.
+- **`scripts/send-command.ps1`**, from a clone of this repository. A release zip does not
+  contain it.
+
+The thinking behind the layout is in
 [`docs/07-release-plan.md`](docs/07-release-plan.md).
 
 ## What to expect
@@ -211,6 +229,12 @@ writes to it, and `cs2vr.exe` leaves it open. The thinking behind the layout is 
   and moving through the map is not as smooth as looking around it. Most of a frame is not
   the game rendering, so lowering the graphics settings does not help
   ([where the frame goes](docs/experiments/13-where-the-frame-goes.md)).
+- **Anti-aliasing is worth turning on, and turning it up will punish you.** What decides
+  picture quality here, and the measured numbers behind it, are in
+  [`docs/settings.md`](docs/settings.md). The short version: the binding constraint is free
+  VRAM rather than how good the card is, and too much of it does not fail — it looks correct
+  for ten minutes and then decays into judder while you are wearing it, which is much harder
+  to recognise from inside than a setting that is simply too low.
 - **The game window is the size of one eye** (2528×2780 by default) and taller than most
   monitors. Windows clips it; that is expected. It also means there is no usable console on
   the monitor — use the menu in the headset, a key, or a config.
