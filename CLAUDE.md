@@ -138,7 +138,11 @@ Building the hook itself: `docs/install.md` and `docs/patches/README.md`. CI
   belongs to the same problem and the same file**: at `1` the back buffer drops out of full
   size on any focus loss, which rebuilds the swapchains and moves the panel's geometry under
   the operator mid-session. At `0`, `back buffer is now` appeared zero times in a whole
-  session against three before.
+  session against three before. **A desk measurement that is not about the render size should
+  be launched at the desktop's own resolution**, so the snap has nothing to snap to and moves
+  nothing — cheaper than either working round it or paying for `fullscreen 0`. That condition
+  is load-bearing: every stereo, crop and fov experiment *is* about the render size and still
+  needs a stated one (experiment 24).
 - `CreateProcessW` needs `bInheritHandles = TRUE`, or `SteamAPI_Init` cannot build its IPC
   pipe and CS2 prints "Steam is probably not running" with Steam plainly running, then
   closes. HLAE passes TRUE; every other flag already matched.
