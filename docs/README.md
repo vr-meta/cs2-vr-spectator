@@ -4,6 +4,12 @@ Everything that was found out, in the order it makes sense to read it. The root
 [README](../README.md) is for using this; [CONTRIBUTING](../CONTRIBUTING.md) is for building
 and changing it; this page is the map of how it works and how each thing was established.
 
+There are also two skills for coding agents, in `.claude/skills/` — one to
+[install it](../.claude/skills/install-cs2-vr/SKILL.md) and one to
+[run and adjust it](../.claude/skills/run-cs2-vr/SKILL.md). They are procedures rather than
+documentation, but they carry the operating rules in a form something else can follow, and
+the second one is the practical answer to "there is no console in a worn session".
+
 The experiments are the core. Each is one question put to the engine or the runtime, the
 method, and the answer - including the confident explanations that turned out wrong. Read
 the relevant ones before changing what they settled.

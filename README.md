@@ -77,9 +77,17 @@ my own CS2 demo files. Tell me what you are about to run before you run it, and 
 check fails instead of working around it.
 ```
 
-The skill is [`.claude/skills/install-cs2-vr/SKILL.md`](.claude/skills/install-cs2-vr/SKILL.md)
-— it is short, and worth reading yourself if you would rather know what is happening than
-watch it happen.
+There is a second skill for **running** it —
+[`/run-cs2-vr`](.claude/skills/run-cs2-vr/SKILL.md) — which starts either mode and then
+makes the agent useful in the part that is genuinely awkward: you are wearing a headset,
+there is no reachable console, and something needs moving. Tell it "the ammo counter is
+missing" and it knows which command adjusts it and how to read the answer back out of the
+log.
+
+Both skills are short, and worth reading yourself if you would rather know what is happening
+than watch it happen:
+[install](.claude/skills/install-cs2-vr/SKILL.md),
+[run](.claude/skills/run-cs2-vr/SKILL.md).
 
 ### Or do it yourself
 
