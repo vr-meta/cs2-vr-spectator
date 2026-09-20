@@ -615,10 +615,11 @@ struct ModeInputs {
     bool sessionRunning;
     bool mapLoaded;
     bool demoPlaying;
-    // Panorama shows the system cursor exactly when it wants something pointed at: the
-    // main menu, team select, the buy menu, pause, settings, the scoreboard, the console.
-    // It hides it when the game owns the mouse. One cheap call, no offsets to go stale,
-    // and it is self-evidently the thing we mean by "there is something to click".
+    // DIAGNOSTIC ONLY: recorded and logged, but it decides nothing. It was believed to mean
+    // "Panorama wants something pointed at", and it does not - GetCursorInfo reports the
+    // whole desktop's cursor, so it is true whenever any pointer is visible anywhere. See
+    // the comment in DecideMode for what that did to a worn session. Kept because the mode
+    // line prints it and a wrong signal is worth being able to see.
     bool cursorShowing;
     bool manualSheet;   // the menu button, held over whatever is loaded
 };
@@ -662,12 +663,60 @@ inline ModeResult DecideMode(const ModeInputs & in) {
     // the UI, so the team picker or the buy menu floats over the world instead of
     // replacing it. Keeping the world visible under a menu is both nicer and the only way
     // the player stays oriented.
-    if (in.cursorShowing || in.manualSheet) {
+    //
+    // And over a live world it is raised and lowered by the menu button, by nothing else.
+    //
+    // It used to come up by itself whenever `cursorShowing` was true, on the theory that a
+    // visible cursor means something wants pointing at. The signal is GetCursorInfo, which
+    // reports the cursor state of the whole DESKTOP and says nothing about this game - so
+    // anything showing a pointer anywhere raised the sheet. Worn, mid-demo, that replaced the
+    // three HUD panels with one window the operator had not asked for and handed the triggers
+    // to the pointer, which `ModeTakesGameInput` then takes away from the game: the camera
+    // stopped flying and the sticks did the wrong things. Worse, `manualSheet` was OR-ed in,
+    // so the button could only ever RAISE the sheet - while the cursor was up there was no
+    // way to put it down again, which is the thing the operator actually asked for.
+    //
+    // `cursorShowing` is deliberately NOT read here. It acts one level up, in
+    // NextSheetOverride, where its EDGE moves `manualSheet` itself - so CS2's modal screens
+    // raise and lower the sheet once each while the operator's button keeps the final say.
+    // Below, only the switch matters, whoever last moved it.
+    if (in.manualSheet) {
         out.sheet = true;
         out.sheetOpaque = false;
         out.pointer = true;
     }
     return out;
+}
+
+// Whether the sheet's own switch should be moved for the operator this frame.
+//
+// The cursor is an EDGE, not a level, and that distinction is the whole of this function.
+//
+// Read as a LEVEL - `sheet = cursorShowing || manualSheet`, which is what this used to be -
+// the sheet latches up for as long as any pointer is visible anywhere on the desktop, and the
+// menu button cannot put it down because the level keeps voting. Worn, mid-demo, that was a
+// window the operator had not asked for that could not be dismissed.
+//
+// Ignored entirely - which is what replaced it - and CS2's own modal screens never bring the
+// sheet up. Team select and the buy menu are then drawn through the HUD-group path, which cuts
+// the frame into rectangles a full-screen Panorama layout does not fit: the operator reported
+// team select "зарезан" and unclickable, and could not join a team at all. `BuildSheetQuad`'s
+// own comment had warned that cutting team select into the groups drops its middle.
+//
+// As an EDGE, both work. A modal opening shows the cursor, which raises the sheet once; the
+// modal closing hides it, which puts the sheet away once; and in between the button is free,
+// because an edge does not keep voting. So it comes up by itself, goes away by itself, and can
+// still be overridden by hand - which is exactly what the operator asked for.
+//
+// Only over a live game. A demo has no buy menu and no team picker, so there is nothing for the
+// cursor to mean there - and measured, it flaps: `cursor 1` at 12:14:34, `0` at 12:17:46, `1`
+// again at 12:18:21, all within one demo. That flapping is what made the level-read intolerable
+// and it is no reason to raise anything.
+inline bool NextSheetOverride(bool current, bool cursorNow, bool cursorWas, int mode) {
+    if (kVrModePlay != mode) return current;
+    if (cursorNow && !cursorWas) return true;    // a modal just opened
+    if (!cursorNow && cursorWas) return false;   // and now it has gone
+    return current;                              // between the edges, the operator decides
 }
 
 // While the pointer is driving the mouse, the game must not also be driven by sticks and

@@ -443,6 +443,7 @@ static void TestRoomOffsetToWorld();
 static void TestRegionPlacementRoundTrip();
 static void TestRayQuadHit();
 static void TestDecideMode();
+static void TestNextSheetOverride();
 static void TestBodyTurnStep();
 static void TestTakeWholeUnits();
 static void TestStickToGameFrame();
@@ -471,6 +472,7 @@ static void RunTests() {
     TestRegionPlacementRoundTrip();
     TestRayQuadHit();
     TestDecideMode();
+    TestNextSheetOverride();
     TestBodyTurnStep();
     TestTakeWholeUnits();
     TestStickToGameFrame();
@@ -1117,8 +1119,62 @@ static ModeInputs Inputs(bool session, bool map, bool demo, bool cursor, bool ma
     return in;
 }
 
+static void TestNextSheetOverride() {
+    check::Case("CS2's own modal screens raise and lower the sheet once, and the button still wins");
+
+    // The whole point: an EDGE, not a level. Both faults this replaces came from reading the
+    // cursor as a level (the sheet latched up and the button could not lower it) or from
+    // ignoring it (team select and the buy menu were cut into HUD rectangles and unusable -
+    // the operator could not join a team at all).
+    const int PLAY = kVrModePlay, WATCH = kVrModeWatch, MENU = kVrModeMenu, IDLE = kVrModeIdle;
+
+    // A modal opens: the cursor appears, and the switch goes up. Once.
+    CHECK(NextSheetOverride(false, true, false, PLAY));
+    // It closes: the switch goes down. Once.
+    CHECK(!NextSheetOverride(true, false, true, PLAY));
+
+    // BETWEEN the edges the operator decides, and this is what the level-read got wrong.
+    // Cursor still showing, no edge: whatever the button last said stands, both ways.
+    CHECK(!NextSheetOverride(false, true, true, PLAY));   // put away by hand, stays away
+    CHECK(NextSheetOverride(true, true, true, PLAY));     // raised, stays raised
+    // And with no cursor at all, likewise - the button may raise the sheet over a quiet game.
+    CHECK(NextSheetOverride(true, false, false, PLAY));
+    CHECK(!NextSheetOverride(false, false, false, PLAY));
+
+    // Not over a demo, in any combination. A demo has no buy menu and no team picker, and the
+    // cursor measurably flaps there: cursor 1 at 12:14:34, 0 at 12:17:46, 1 again at 12:18:21,
+    // inside one demo. Every one of those would have been an uninvited window.
+    for (int cur = 0; cur < 2; cur++) {
+        for (int was = 0; was < 2; was++) {
+            for (int cr = 0; cr < 2; cr++) {
+                CHECK(NextSheetOverride(0 != cr, 0 != cur, 0 != was, WATCH) == (0 != cr));
+                CHECK(NextSheetOverride(0 != cr, 0 != cur, 0 != was, MENU)  == (0 != cr));
+                CHECK(NextSheetOverride(0 != cr, 0 != cur, 0 != was, IDLE)  == (0 != cr));
+            }
+        }
+    }
+
+    // A full round trip through a buy menu, as it actually happens frame by frame: quiet game,
+    // the menu opens and stays open for several frames, the operator dismisses it by hand
+    // mid-way, and it must not spring back while the cursor is still up.
+    {
+        bool sheet = false;
+        bool was = false;
+        const bool cursor[8] = { false, true, true, true, true, true, false, false };
+        const bool press[8]  = { false, false, false, true,  false, false, false, false };
+        const bool want[8]   = { false, true,  true,  false, false, false, false, false };
+
+        for (int i = 0; i < 8; i++) {
+            sheet = NextSheetOverride(sheet, cursor[i], was, PLAY);
+            if (press[i]) sheet = !sheet;          // the menu button flips the same switch
+            CHECK(sheet == want[i]);
+            was = cursor[i];
+        }
+    }
+}
+
 static void TestDecideMode() {
-    check::Case("what the headset shows is a function of five facts, and only those");
+    check::Case("what the headset shows is a function of four facts, and the cursor is not one");
 
     // No session: nothing at all, whatever else is true. The hook runs with no headset
     // in the building far more often than with one.
@@ -1160,38 +1216,64 @@ static void TestDecideMode() {
         CHECK(ModeTakesGameInput(r));
     }
 
-    // The cursor appearing is the signal that something wants pointing at - team select,
-    // the buy menu, pause, the scoreboard. Over a live world the sheet is TRANSPARENT, so
-    // the player keeps the world under the menu and stays oriented.
+    // The cursor does NOT raise the sheet over a live world, and this is the case that
+    // matters most. GetCursorInfo reports the whole DESKTOP's cursor, not this game's, so it
+    // is true whenever any pointer is visible anywhere. Worn, mid-demo, it put a window in
+    // front of the operator that they had not asked for, replaced the three HUD panels with
+    // it, and handed the triggers to the pointer - so the camera stopped flying and the
+    // sticks did the wrong things. Over a live world the sheet belongs to the menu button.
     {
         ModeResult r = DecideMode(Inputs(true, true, false, true, false));
         CHECK(kVrModePlay == r.mode);
         CHECK(r.worldInEyes);
-        CHECK(r.sheet);
-        CHECK(!r.sheetOpaque);
-        CHECK(r.pointer);
-        // And while it is up, the sticks must not also be walking and firing: an absolute
-        // pointer and a relative aim servo on one mouse fight, and the servo wins.
-        CHECK(!ModeTakesGameInput(r));
+        CHECK(!r.sheet);
+        CHECK(!r.pointer);
+        CHECK(ModeTakesGameInput(r));   // the sticks still walk and fire
     }
 
-    // The menu button does the same thing by hand, for anything the cursor does not cover.
+    // The menu button raises it, over a live world, transparently.
     {
         ModeResult r = DecideMode(Inputs(true, true, false, false, true));
         CHECK(r.sheet);
         CHECK(!r.sheetOpaque);
         CHECK(r.pointer);
+        // While it is up the sticks must not also walk and fire: an absolute pointer and a
+        // relative aim servo on one mouse fight, and the servo wins.
         CHECK(!ModeTakesGameInput(r));
     }
 
-    // Same over a demo: point at the pause menu without leaving the recording.
+    // Over a demo, both ways round: the cursor is not a reason, the button is.
     {
         ModeResult r = DecideMode(Inputs(true, true, true, true, false));
+        CHECK(kVrModeWatch == r.mode);
+        CHECK(r.worldInEyes);
+        CHECK(!r.sheet);
+        CHECK(!r.pointer);
+    }
+    {
+        ModeResult r = DecideMode(Inputs(true, true, true, false, true));
         CHECK(kVrModeWatch == r.mode);
         CHECK(r.worldInEyes);
         CHECK(r.sheet);
         CHECK(!r.sheetOpaque);
         CHECK(r.pointer);
+    }
+
+    // Over a live world, cursorShowing changes NOTHING, for either value of the button.
+    // Stated as a sweep rather than a case because the old behaviour - manualSheet OR-ed
+    // with cursorShowing - passed every single test above that did not vary the cursor while
+    // the button was down, and the fault the operator hit was exactly that combination: the
+    // button could raise the sheet and then not put it down while a cursor was visible.
+    for (int demo = 0; demo < 2; demo++) {
+        for (int manual = 0; manual < 2; manual++) {
+            ModeResult off = DecideMode(Inputs(true, true, 0 != demo, false, 0 != manual));
+            ModeResult on  = DecideMode(Inputs(true, true, 0 != demo, true,  0 != manual));
+            CHECK(off.mode        == on.mode);
+            CHECK(off.worldInEyes == on.worldInEyes);
+            CHECK(off.sheet       == on.sheet);
+            CHECK(off.sheetOpaque == on.sheetOpaque);
+            CHECK(off.pointer     == on.pointer);
+        }
     }
 
     // With no map the sheet is opaque whatever the cursor or the button say - there is

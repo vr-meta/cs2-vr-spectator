@@ -229,7 +229,33 @@ bool g_CursorShowing = false;
 ULONGLONG g_CursorChangedAt = 0;
 const ULONGLONG kCursorDebounceMs = 150;
 
+// Is this process the one the desktop is listening to? The synthetic-input path has always
+// asked this before touching the real cursor; pulled out here because the cursor SIGNAL needs
+// the same question and did not ask it.
+bool GameHasFocus() {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid == GetCurrentProcessId();
+}
+
+// Whether CS2 is asking for something to be pointed at.
+//
+// `GetCursorInfo` reports the cursor of the whole DESKTOP, and on its own that is not the
+// question. Measured, live, while the operator was wearing the headset: the foreground window
+// was a PowerShell console belonging to the tooling driving the session, and its presence alone
+// made this true. Twelve sheet movements in twenty-four seconds were traced to that and not to
+// anything CS2 did - the tool watching the session was moving the panel in front of the person
+// wearing it. It also explains the cursor flapping through a demo that started this whole
+// thread, which was read at the time as Panorama being erratic.
+//
+// Qualified on focus, it means what it was always meant to mean: the game is in front, and the
+// game is showing a pointer, so the game wants one. Anything else in front is somebody else's
+// cursor and none of the headset's business. Note that this does NOT gate the pointer itself -
+// `mirv_vr_pointer post` deliberately works without focus, which is why the ray kept working
+// throughout and hid the fault.
 bool SystemCursorShowing() {
+    if (!GameHasFocus()) return false;
+
     CURSORINFO info = {};
     info.cbSize = sizeof(info);
     if (!GetCursorInfo(&info)) return false;
@@ -1710,7 +1736,10 @@ void PrintControls() {
         "  aim               %s\n"
         "\n"
         "EITHER WAY\n"
-        "    left menu        short: CS2's own window on a screen.  long: Escape\n"
+        "    left menu        short: CS2's own window on a screen, and again to put it away\n"
+        "                     long: Escape\n"
+        "                     It is the ONLY thing that raises it. Team select and the buy\n"
+        "                     menu no longer bring it up by themselves - press this for them.\n"
         "\n"
         "What the triggers do while watching is mirv_vr_triggers: players, seek or fov.\n"
         "Aiming is mirv_vr_aim hand|stick|off; vr.cfg asks for hand.\n"
@@ -1885,9 +1914,7 @@ void MoveMouseToSheet(float u, float v, bool clickDown, bool clickUp) {
     // The system cursor. Guarded on the game being in front, exactly like the synthetic
     // keys: moving another application's pointer because a hand drifted across a panel is
     // the kind of thing nobody forgives.
-    DWORD pid = 0;
-    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-    if (pid != GetCurrentProcessId()) return;
+    if (!GameHasFocus()) return;
 
     POINT point;
     point.x = x;
@@ -3769,6 +3796,32 @@ void MirvVrXr_EngineThread_Frame() {
             g_CursorChangedAt = 0;
         }
         in.cursorShowing = g_CursorShowing;
+
+        // CS2's own modal screens raise and lower the sheet for the operator, once each.
+        //
+        // The mode has to be decided twice for this: which mode it is does not depend on the
+        // sheet, but whether the cursor may move the sheet's switch depends on the mode - a
+        // demo has no buy menu and its cursor flaps. So: decide the mode, let the cursor's
+        // EDGE move the switch in PLAY only, then decide again with the switch as it now is.
+        //
+        // Moving the switch rather than overriding the verdict is the point. The operator's
+        // button flips the same variable, so a screen that came up by itself can still be put
+        // away by hand, and one put away by hand does not spring back while the cursor is still
+        // showing. NextSheetOverride carries the reasoning and the measurements.
+        {
+            AfxVrMath::ModeResult probe = AfxVrMath::DecideMode(in);
+            static bool cursorWas = false;
+            bool wanted = AfxVrMath::NextSheetOverride(g_MenuOverride, in.cursorShowing,
+                                                       cursorWas, probe.mode);
+            if (wanted != g_MenuOverride) {
+                g_MenuOverride = wanted;
+                in.manualSheet = wanted;
+                advancedfx::Message(wanted
+                    ? "AFXVR: CS2 wants something pointed at - the window is up.\n"
+                    : "AFXVR: CS2 is done with the pointer - the window is away.\n");
+            }
+            cursorWas = in.cursorShowing;
+        }
 
         AfxVrMath::ModeResult next = AfxVrMath::DecideMode(in);
 

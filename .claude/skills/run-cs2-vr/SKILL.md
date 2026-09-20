@@ -87,7 +87,7 @@ Offline casual, `sv_lan 1`, nothing on the internet. They can also just run `cs2
 drive CS2's own menu from inside the headset with the controller pointer — mode, map, start,
 team — which is a real route and often the nicer one.
 
-**Say these three things before they put the headset on**, because discovering them mid-round
+**Say these four things before they put the headset on**, because discovering them mid-round
 is worse:
 
 - **A real match is not possible and that is not a bug.** Between a synthetic mouse, a servo
@@ -99,6 +99,13 @@ is worse:
 - **Health and ammo may be in the wrong place or missing.** Those two HUD rectangles are
   estimates, not measurements — see step 6, where fixing them is a two-minute job if they are
   willing.
+- **The left Menu button is the only thing that brings CS2's own screen up, and it puts it
+  away again.** Team select and the buy menu do not raise it by themselves any more, so when
+  they need to pick a team or buy, that is the button. It used to appear on its own whenever
+  Windows was showing a cursor anywhere — which meant it arrived uninvited mid-demo, replaced
+  the three HUD panels with one window and took the sticks away, and could not be dismissed
+  because the cursor outvoted the button. Tell them it is a button now, or they will wait for
+  the buy menu to appear and it will not.
 
 If the weapon model looks oversized, swims against the world, or follows their head instead
 of their hands, that is the known viewmodel bug: send `r_drawviewmodel 0`. Most sessions so
