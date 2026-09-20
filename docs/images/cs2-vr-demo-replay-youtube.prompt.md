@@ -1,7 +1,7 @@
 # YouTube demo replay thumbnail
 
 Asset: `cs2-vr-demo-replay-youtube.jpg`, 1280×720, JPEG quality 92.
-Generated with built-in `image_gen`, referencing `cs2-vr-banner.png`.
+Generated with built-in `image_gen`, referencing `cs2-vr-banner.jpg` (then still a PNG; see its own prompt note).
 
 ## Prompt
 

@@ -1,6 +1,9 @@
 # README banner
 
-Asset: `cs2-vr-banner.png`.
+Asset: `cs2-vr-banner.jpg` — 1800x600, JPEG q88, 234 KB. The generated original was a 2172x724 PNG of
+2.4 MB, which is ten times the size for no visible gain: the artwork has no transparency and
+is photographic, so PNG was the wrong container for it. The original is in git history at
+75ceef1 if it is ever needed as an edit reference again.
 Generated with the built-in `image_gen` tool. Promotional illustration, not a gameplay capture.
 
 ## Prompt

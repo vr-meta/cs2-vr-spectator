@@ -1,7 +1,7 @@
 # Social preview
 
 Asset: `cs2-vr-social-preview.jpg`, exported at 1280×640, JPEG quality 92.
-Created with built-in `image_gen`, using `cs2-vr-banner.png` as the edit reference.
+Created with built-in `image_gen`, using `cs2-vr-banner.jpg` (then still a PNG; see its own prompt note) as the edit reference.
 
 ## Prompt
 
