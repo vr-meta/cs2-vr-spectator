@@ -144,6 +144,20 @@ $w.Flush(); $w.Dispose()
 One line, one command, queued and dispatched on the engine thread in order. **There is no
 reply on the pipe** — the answer appears in `console.log`, so read it back from there.
 
+**Connect, write, disconnect — every time.** The hook creates the pipe with
+`nMaxInstances = 1`: one client at a time, and it re-creates it after each disconnect. A
+handle held open between commands works perfectly for whoever is holding it and silently
+takes the pipe away from everyone else — `send-command.ps1`, the operator, another agent —
+with no message anywhere saying why. So do not keep the handle, and if a connect fails
+once, retry briefly: there is a real window during the re-create in which nothing is wrong.
+
+If `tools/server/` is built (`cargo run --manifest-path tools/server/Cargo.toml`), prefer
+it to either route above: `POST /command` with `X-Cs2Vr: 1` writes the line and returns the
+log lines that followed, so a command and its answer are one request instead of a write
+plus a hunt through `console.log`. `GET /state` gives the mode, map, frame rate and
+per-eye size without parsing anything. It attaches to a running session and never starts
+one.
+
 What is worth sending, and when:
 
 | They say | Send |

@@ -1,0 +1,25 @@
+# The control server: one API, two clients - a person on a web page and an agent over HTTP.
+#
+# No dependencies, and that is a decision rather than an omission. This process writes
+# arbitrary console commands into a running game through a pipe that is ACL'd to one user;
+# every crate in its tree would be inside that boundary. What it actually needs is a socket,
+# a file and about sixty lines of JSON, all of which std has. It also keeps the release zip
+# (4.5 MB today) from growing a vendored dependency tree and a Cargo.lock to audit.
+#
+#   cargo test  --manifest-path tools/server/Cargo.toml     # the pure modules, any OS
+#   cargo build --manifest-path tools/server/Cargo.toml --release
+
+[package]
+name = "cs2vr-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+publish = false
+
+[[bin]]
+name = "cs2vr-server"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+strip = true

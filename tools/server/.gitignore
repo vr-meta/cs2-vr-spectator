@@ -1,0 +1,3 @@
+# cargo's build tree. Cargo.lock is NOT ignored: this is a binary, and with no
+# dependencies at all it is four lines that pin the compiler's idea of this crate.
+/target/

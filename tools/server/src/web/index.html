@@ -1,0 +1,359 @@
+<!--
+  The page. One file, served by the binary, no network fetches: this runs next to a game
+  that is fighting a VR compositor for the GPU, and a stylesheet from a CDN would be one
+  more thing to fail while somebody is wearing a headset.
+
+  Every request carries X-Cs2Vr: 1. That header is not authentication - it is there to
+  force a preflight, so a page from somewhere else in the operator's browser cannot post a
+  console command into their game. See http::guard.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cs2-vr-spectator</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2b2f39; --ink: #e6e8ee;
+    --dim: #9aa2b1; --accent: #6ea8fe; --good: #5fd08a; --bad: #f2777a;
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f5f7; --panel: #ffffff; --line: #dcdfe5; --ink: #1a1d23;
+      --dim: #5d6472; --accent: #2563eb; --good: #128a4c; --bad: #c0392b;
+      color-scheme: light;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--ink);
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--dim); margin: 0 0 10px; font-weight: 600; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline;
+           margin-bottom: 14px; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--dim);
+           font-size: 13px; margin-left: auto; }
+  .facts b { color: var(--ink); font-weight: 600; }
+  .layout { display: grid; grid-template-columns: minmax(300px, 400px) 1fr; gap: 14px;
+            align-items: start; }
+  @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+            padding: 14px; margin-bottom: 14px; }
+  button {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 11px; font: inherit; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 9px; flex-wrap: wrap; }
+  .row > label { width: 92px; color: var(--dim); flex: none; }
+  .row input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+  .row output { width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=text], input[type=number] {
+    background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 9px; font: inherit; min-width: 0;
+  }
+  input[type=number] { width: 72px; }
+  .maps { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+  #console {
+    height: 60vh; min-height: 320px; overflow-y: auto; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+    font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  #console div.sent { color: var(--accent); }
+  #console div.note { color: var(--dim); }
+  #line { flex: 1; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad);
+         display: inline-block; }
+  .dot.up { background: var(--good); }
+  .trouble { color: var(--bad); margin-top: 8px; font-size: 13px; }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>cs2-vr-spectator</h1>
+  <div class="facts" id="facts"></div>
+</header>
+
+<div class="layout">
+  <div>
+    <section>
+      <h2>View</h2>
+      <div class="row">
+        <label for="fov">fov</label>
+        <input type="range" id="fov" min="70" max="130" step="1" value="100">
+        <output id="fovOut">100°</output>
+      </div>
+      <div class="row">
+        <button data-cmd="mirv_vr_fov auto">auto fov</button>
+        <button data-cmd="mirv_vr_recenter">recentre</button>
+        <button data-cmd="mirv_vr_views">views</button>
+        <button data-cmd="mirv_vr_selftest">selftest</button>
+      </div>
+      <div class="row">
+        <label>aim</label>
+        <button data-cmd="mirv_vr_aim hand">hand</button>
+        <button data-cmd="mirv_vr_aim stick">stick</button>
+        <button data-cmd="mirv_vr_aim off">off</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>HUD panel</h2>
+      <div class="row">
+        <label for="spread">spread</label>
+        <input type="range" id="spread" min="0.2" max="2.5" step="0.05" value="1">
+        <output id="spreadOut">1.00</output>
+      </div>
+      <div class="row">
+        <label for="size">size m</label>
+        <input type="range" id="size" min="0.5" max="4" step="0.1" value="2">
+        <output id="sizeOut">2.0</output>
+      </div>
+      <div class="row">
+        <label for="distance">distance</label>
+        <input type="range" id="distance" min="0.5" max="5" step="0.1" value="2">
+        <output id="distanceOut">2.0</output>
+      </div>
+      <div class="row">
+        <button data-cmd="mirv_vr_panel place">place</button>
+        <button data-cmd="mirv_vr_panel show">show</button>
+        <button data-cmd="mirv_vr_panel hide">hide</button>
+        <button data-cmd="mirv_vr_panel layout">layout</button>
+      </div>
+      <div class="row">
+        <input type="text" id="group" placeholder="group" style="width:88px">
+        <input type="number" id="az" step="1" placeholder="az">
+        <input type="number" id="el" step="1" placeholder="el">
+        <input type="number" id="deg" step="1" placeholder="deg">
+        <button id="region">region</button>
+      </div>
+      <div class="row">
+        <input type="number" id="u0" step="0.01" placeholder="u0">
+        <input type="number" id="v0" step="0.01" placeholder="v0">
+        <input type="number" id="u1" step="0.01" placeholder="u1">
+        <input type="number" id="v1" step="0.01" placeholder="v1">
+        <button id="rect">rect</button>
+      </div>
+      <p class="hint">`layout` prints the group names into the console below.</p>
+    </section>
+
+    <section>
+      <h2>Map</h2>
+      <div class="maps" id="maps"></div>
+      <div class="row" style="margin-top:10px">
+        <label for="bots">bots</label>
+        <input type="number" id="bots" min="0" max="20" value="6">
+        <button id="change">change map now</button>
+        <button id="match">start a bot match</button>
+      </div>
+      <!-- Clicking a map only selects it; loading it takes a second button. `map` drops
+           whoever is wearing the headset out of the world they are in, and a mis-click on
+           a grid of eight is not a good enough reason for that to happen. -->
+      <p class="hint">Clicking a map only chooses it — loading it takes one of the two
+        buttons, because `map` drops whoever is wearing the headset out of the world they
+        are in. A match is sent as one console line each, in the order cs2vr.exe passes
+        them on the command line.</p>
+    </section>
+  </div>
+
+  <section>
+    <h2>Console</h2>
+    <div id="console"></div>
+    <div class="row" style="margin: 10px 0 0">
+      <input type="text" id="line" placeholder="mirv_vr_panel spread 1.2" autocomplete="off">
+      <button id="send">send</button>
+    </div>
+    <div class="trouble" id="trouble" hidden></div>
+  </section>
+</div>
+
+<script>
+const MAPS = ["de_inferno", "de_mirage", "de_nuke", "de_ancient",
+              "de_anubis", "de_dust2", "de_train", "de_overpass"];
+
+const pane = document.getElementById("console");
+let cursor = 0;
+let following = true;
+
+function api(path, options = {}) {
+  options.headers = Object.assign({ "X-Cs2Vr": "1" }, options.headers || {});
+  return fetch(path, options);
+}
+
+function write(text, kind) {
+  const div = document.createElement("div");
+  if (kind) div.className = kind;
+  div.textContent = text;
+  pane.appendChild(div);
+  // Only follow the tail when the reader is already at it: scrolling back to read
+  // something while a session is talking should not keep yanking them away from it.
+  if (following) pane.scrollTop = pane.scrollHeight;
+}
+
+pane.addEventListener("scroll", () => {
+  following = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40;
+});
+
+async function send(line) {
+  write("> " + line, "sent");
+  try {
+    const answer = await api("/command", { method: "POST", body: line });
+    const result = await answer.json();
+    if (result.error) { write(result.error, "note"); return; }
+    for (const entry of result.lines || []) {
+      if (entry.cursor > cursor) cursor = entry.cursor;
+      write(entry.text);
+    }
+    if (!result.echoed) write("(the hook did not echo it back)", "note");
+  } catch (error) {
+    write(String(error), "note");
+  }
+}
+
+async function poll() {
+  try {
+    const answer = await api("/log?since=" + cursor);
+    const result = await answer.json();
+    if (result.missed > 0) write("... " + result.missed + " lines scrolled past ...", "note");
+    for (const entry of result.lines || []) {
+      cursor = entry.cursor;
+      write(entry.text);
+    }
+  } catch (error) { /* the next tick will say so through /state */ }
+}
+
+function size(pair) { return pair ? pair[0] + "x" + pair[1] : "-"; }
+
+async function refresh() {
+  const dot = document.getElementById("dot");
+  const facts = document.getElementById("facts");
+  const trouble = document.getElementById("trouble");
+  try {
+    const state = await (await api("/state")).json();
+    dot.classList.toggle("up", state.cs2_running);
+
+    // Built as nodes rather than as markup. A map name is whatever the engine handed
+    // back, and this page can post console commands - it is not the place to hand text
+    // from the game to an HTML parser.
+    facts.textContent = "";
+    const fact = (label, value) => {
+      const span = document.createElement("span");
+      if (label) span.append(label + " ");
+      const strong = document.createElement("b");
+      strong.textContent = value;
+      span.append(strong);
+      facts.append(span);
+    };
+    fact("", state.mode || (state.cs2_running ? "starting" : "no game"));
+    if (state.map) fact("map", state.map);
+    fact("fps", state.fps === null ? "-" : String(state.fps));
+    fact("eye", size(state.per_eye || state.back_buffer));
+    if (state.session_state) fact("session", state.session_state);
+    if (state.hook_version) fact("hook", state.hook_version);
+    if (state.cs2_build_installed) {
+      fact("CS2", state.cs2_build_installed +
+           (state.cs2_build_tested === state.cs2_build_installed
+             ? "" : " (hook made for " + state.cs2_build_tested + ")"));
+    }
+
+    const say = state.trouble || (state.fps === null ? state.fps_note : null);
+    trouble.hidden = !say;
+    trouble.textContent = say || "";
+  } catch (error) {
+    dot.classList.remove("up");
+    trouble.hidden = false;
+    trouble.textContent = "the server stopped answering: " + error;
+  }
+}
+
+function slider(id, format, command) {
+  const input = document.getElementById(id);
+  const out = document.getElementById(id + "Out");
+  const show = () => { out.textContent = format(input.value); };
+  input.addEventListener("input", show);
+  // On release, not on drag. Every step would be a console command dispatched on the
+  // engine thread, and the engine thread is rendering three passes a frame.
+  input.addEventListener("change", () => send(command(input.value)));
+  show();
+}
+
+slider("fov", v => v + "°", v => "mirv_vr_fov " + v);
+slider("spread", v => Number(v).toFixed(2), v => "mirv_vr_panel spread " + v);
+slider("size", v => Number(v).toFixed(1), v => "mirv_vr_panel size " + v);
+slider("distance", v => Number(v).toFixed(1), v => "mirv_vr_panel distance " + v);
+
+for (const button of document.querySelectorAll("button[data-cmd]")) {
+  button.addEventListener("click", () => send(button.dataset.cmd));
+}
+
+const value = id => document.getElementById(id).value.trim();
+
+document.getElementById("region").addEventListener("click", () => {
+  if (!value("group")) return write("region needs a group name; press `layout`.", "note");
+  send(["mirv_vr_panel region", value("group"), value("az") || 0,
+        value("el") || 0, value("deg") || 30].join(" "));
+});
+
+document.getElementById("rect").addEventListener("click", () => {
+  if (!value("group")) return write("rect needs a group name; press `layout`.", "note");
+  send(["mirv_vr_panel rect", value("group"), value("u0") || 0, value("v0") || 0,
+        value("u1") || 1, value("v1") || 1].join(" "));
+});
+
+const maps = document.getElementById("maps");
+for (const map of MAPS) {
+  const button = document.createElement("button");
+  button.textContent = map.replace("de_", "");
+  button.title = map;
+  maps.appendChild(button);
+}
+maps.firstChild.classList.add("on");
+
+// Choosing a map does not load it. `map` drops whoever is wearing the headset out of the
+// world they are in, and a mis-click is not a reason for that to happen.
+maps.addEventListener("click", event => {
+  if ("BUTTON" !== event.target.tagName) return;
+  for (const button of maps.children) button.classList.remove("on");
+  event.target.classList.add("on");
+});
+
+const chosenMap = () => {
+  const chosen = maps.querySelector("button.on");
+  return chosen ? chosen.title : MAPS[0];
+};
+
+document.getElementById("change").addEventListener("click", () => send("map " + chosenMap()));
+
+document.getElementById("match").addEventListener("click", async () => {
+  const bots = Math.max(0, Math.min(20, Number(value("bots")) || 0));
+  for (const line of ["game_type 0", "game_mode 0", "sv_lan 1",
+                      "bot_quota " + bots, "map " + chosenMap()]) {
+    await send(line);
+  }
+});
+
+const line = document.getElementById("line");
+document.getElementById("send").addEventListener("click", () => {
+  if (line.value.trim()) { send(line.value.trim()); line.value = ""; }
+});
+line.addEventListener("keydown", event => {
+  if ("Enter" === event.key && line.value.trim()) { send(line.value.trim()); line.value = ""; }
+});
+
+refresh();
+poll();
+setInterval(refresh, 1000);
+setInterval(poll, 700);
+</script>
+</body>
+</html>

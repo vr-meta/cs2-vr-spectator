@@ -14,6 +14,7 @@ on:
       - 'tests/**'
       - 'docs/patches/**'
       - 'scripts/**'
+      - 'tools/**'
       - '.github/workflows/build-hook.yml'
   pull_request:
     paths:
@@ -21,6 +22,7 @@ on:
       - 'tests/**'
       - 'docs/patches/**'
       - 'scripts/**'
+      - 'tools/**'
       - '.github/workflows/build-hook.yml'
   schedule:
     # Weekly, so upstream moving out from under the patches is noticed by itself rather
@@ -65,6 +67,13 @@ jobs:
       - name: Key bindings are unambiguous
         shell: pwsh
         run: ./scripts/check-cfg.ps1
+
+      # The control server reads the hook's own log lines and decides who may drive the
+      # game. Both are kept free of Windows for exactly this: the parser, the state fold
+      # and the access rules are tested here, and only the named pipe and the process
+      # lookup need the machine the game is on. Rust is preinstalled on this image.
+      - name: Control server
+        run: cargo test --manifest-path tools/server/Cargo.toml
 
   # Two minutes and no toolchain. The patches stopped applying in sequence once already —
   # 002 had been generated from a tree that already had 001 in it, so it carried 001's hunk
