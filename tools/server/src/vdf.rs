@@ -107,28 +107,45 @@ pub fn inf_value(text: &str, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    // Copied from the shape of the real files on the machine this was written on, extra
+    // keys and all, rather than reduced to what the parser happens to need. Every fault
+    // this server had in its first hour came from a grammar written against a tidied
+    // example instead of an artefact.
     const LIBRARY_FOLDERS: &str = "\"libraryfolders\"\n\
 {\n\
 \t\"0\"\n\
 \t{\n\
 \t\t\"path\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\"\n\
 \t\t\"label\"\t\t\"\"\n\
+\t\t\"contentid\"\t\t\"7579819882609721812\"\n\
+\t\t\"totalsize\"\t\t\"0\"\n\
+\t\t\"time_last_update_verified\"\t\t\"1785685779\"\n\
 \t\t\"apps\"\n\
 \t\t{\n\
-\t\t\t\"730\"\t\t\"38654705664\"\n\
+\t\t\t\"228980\"\t\t\"171517476\"\n\
 \t\t}\n\
 \t}\n\
 \t\"1\"\n\
 \t{\n\
 \t\t\"path\"\t\t\"D:\\\\SteamLibrary\"\n\
 \t\t\"label\"\t\t\"\"\n\
+\t\t\"contentid\"\t\t\"8667450627827624047\"\n\
+\t\t\"apps\"\n\
+\t\t{\n\
+\t\t\t\"730\"\t\t\"71589381210\"\n\
+\t\t\t\"250820\"\t\t\"5820607244\"\n\
+\t\t}\n\
 \t}\n\
 }\n";
 
     const APP_MANIFEST: &str = "\"AppState\"\n\
 {\n\
 \t\"appid\"\t\t\"730\"\n\
+\t\"universe\"\t\t\"1\"\n\
+\t\"LauncherPath\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\\\\steam.exe\"\n\
+\t\"name\"\t\t\"Counter-Strike 2\"\n\
 \t\"installdir\"\t\t\"Counter-Strike Global Offensive\"\n\
+\t\"buildid\"\t\t\"25218825\"\n\
 \t\"UserConfig\"\n\
 \t{\n\
 \t\t\"language\"\t\t\"english\"\n\

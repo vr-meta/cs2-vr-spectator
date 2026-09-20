@@ -605,6 +605,34 @@ mod tests {
     }
 
     #[test]
+    fn the_eye_size_changes_within_one_session_and_is_not_cached() {
+        // The menu submits one quad built from the back buffer and a loaded map submits
+        // two eyes, and the two sizes are legitimately different in the same session - the
+        // back buffer changes on map load. Nothing may hold the first size it saw, and a
+        // size change is not a relaunch: only a console.log shorter than our cursor is.
+        let mut state = State::default();
+
+        for (line, at) in [
+            ("09/20 12:14:34 AFXVR: menu screen, 72.0 frames/s at 2560x1600", 1_000u64),
+            ("09/20 12:15:01 AFXVR: back buffer is now 2528x2780, was 2560x1600 - rebuilding the swapchains.", 2_000),
+            ("09/20 12:15:02 AFXVR: swapchains 2528x2780, back buffer format 27 -> swapchain 29, 3 images each (two eyes and a panel).", 2_000),
+            ("09/20 12:15:04 AFXVR: 71.8 frames/s submitted at 2528x2780 per eye (13.93 ms)", 2_000),
+        ] {
+            state.apply(&parse_line(line).unwrap(), at);
+        }
+        assert_eq!(Some((2528, 2780)), state.per_eye(2_000));
+        assert_eq!(Some((2528, 2780)), state.back_buffer);
+
+        // And back out to the menu, where there are no eyes to report at all.
+        state.apply(
+            &parse_line("09/20 12:20:00 AFXVR: menu screen, 72.0 frames/s at 2560x1600").unwrap(),
+            3_000,
+        );
+        assert_eq!(None, state.per_eye(3_000));
+        assert_eq!(Some((2560, 1600)), state.back_buffer);
+    }
+
+    #[test]
     fn an_old_frame_rate_is_not_a_frame_rate() {
         let mut state = State::default();
         state.apply(
