@@ -1476,8 +1476,10 @@ bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
     D3D11_TEXTURE2D_DESC desc = {};
     pTexture->GetDesc(&desc);
 
-    // The swapchain must match the back buffer exactly, because submission is a
-    // CopyResource. A mismatch would need a shader blit instead.
+    // The swapchain must match the back buffer's SIZE exactly, because submission is a copy.
+    // The sample count need not match any more - CopyOrResolve resolves a multisampled source,
+    // which is what makes CS2's msaa_samples usable. A format outside the same family would
+    // still need a shader blit.
     uint32_t formatCount = 0;
     if (!Check(xrEnumerateSwapchainFormats_(g_Session, 0, &formatCount, nullptr), "xrEnumerateSwapchainFormats")) return false;
     std::vector<int64_t> formats(formatCount);
@@ -1554,6 +1556,17 @@ bool EnsureSwapchains(ID3D11Texture2D * pTexture) {
 
     advancedfx::Message("AFXVR: swapchains %ux%u, back buffer format %i -> swapchain %i, %u images each (two eyes and a panel).\n",
         desc.Width, desc.Height, (int)desc.Format, (int)chosen, (unsigned)g_SwapchainImages[0].size());
+
+    // Said separately and only when it applies, rather than appended to the line above: that
+    // line's text is now parsed by the control server in another process, and renaming a
+    // string somebody else reads breaks their dashboard silently. Additive is the rule.
+    //
+    // It is worth saying at all because its absence cost a worn session - a multisampled
+    // source into a single-sample swapchain was a black headset with nothing in the log.
+    if (desc.SampleDesc.Count > 1) {
+        advancedfx::Message("AFXVR: the game renders %u MSAA samples; they will be resolved on the way in.\n",
+            desc.SampleDesc.Count);
+    }
     return true;
 }
 
@@ -1569,6 +1582,76 @@ void DestroySwapchains() {
         g_SwapchainImages[eye].clear();
     }
     g_SwapchainWidth = g_SwapchainHeight = 0;
+}
+
+// Get the game's picture into a swapchain image, whatever the game is rendering it as.
+//
+// This exists because of the most expensive hour this project has spent. `CopyResource`
+// requires IDENTICAL sample counts. Turn CS2's `msaa_samples` up and the captured render
+// target becomes multisampled, while an XR swapchain image is always single-sample - and then
+// CopyResource does nothing at all. It returns void, sets no error, writes no warning. The
+// operator got a black headset with the session in FOCUSED, frames submitting at 33/s, audio
+// playing, and `copy x2` in the log every two seconds saying the copy had been *called*. There
+// was no way to tell from the outside that MSAA was the cause; it took closing a worn session
+// and changing one setting back.
+//
+// `ResolveSubresource` is the D3D11 call for multisample -> single-sample, and resolving IS the
+// anti-aliasing: it averages the samples. So MSAA now works, and it buys smooth edges far more
+// cheaply than the equivalent supersampling would - measured, the eyes are submitted at
+// 2035x2199 against a runtime asking 2064x2272, so there is no downsampling to hide a jagged
+// edge and nothing else was smoothing them.
+//
+// The typeless source is fine: Resolve takes the concrete format to interpret both ends with,
+// and `g_SwapchainFormat` is the member of the same family EnsureSwapchains already chose.
+//
+// Anything this still cannot do is said out loud, once. A black headset must never again be
+// the way this project reports a texture mismatch.
+void CopyOrResolve(ID3D11DeviceContext * pContext, ID3D11Texture2D * pDst, ID3D11Texture2D * pSrc,
+                   const char * what) {
+    if (!pContext || !pDst || !pSrc) return;
+
+    D3D11_TEXTURE2D_DESC src = {}, dst = {};
+    pSrc->GetDesc(&src);
+    pDst->GetDesc(&dst);
+
+    if (src.Width != dst.Width || src.Height != dst.Height) {
+        static bool sizeReported = false;
+        if (!sizeReported) {
+            sizeReported = true;
+            advancedfx::Warning(
+                "AFXVR: %s: source %ux%u into destination %ux%u. Neither a copy nor a resolve\n"
+                "AFXVR: can do that, so the headset would be black. Nothing was submitted.\n",
+                what, src.Width, src.Height, dst.Width, dst.Height);
+        }
+        return;
+    }
+
+    if (src.SampleDesc.Count == dst.SampleDesc.Count) {
+        pContext->CopyResource(pDst, pSrc);
+        return;
+    }
+
+    if (src.SampleDesc.Count > 1 && 1 == dst.SampleDesc.Count) {
+        static bool resolveAnnounced = false;
+        if (!resolveAnnounced) {
+            resolveAnnounced = true;
+            advancedfx::Message(
+                "AFXVR: %s: the game renders %u MSAA samples; resolving them into the\n"
+                "AFXVR: swapchain. This is where anti-aliasing comes from.\n",
+                what, src.SampleDesc.Count);
+        }
+        pContext->ResolveSubresource(pDst, 0, pSrc, 0, g_SwapchainFormat);
+        return;
+    }
+
+    static bool refused = false;
+    if (!refused) {
+        refused = true;
+        advancedfx::Warning(
+            "AFXVR: %s: %u samples into %u - a resolve only goes the other way. Nothing was\n"
+            "AFXVR: submitted, so this is a black headset rather than a wrong picture.\n",
+            what, src.SampleDesc.Count, dst.SampleDesc.Count);
+    }
 }
 
 XrPath Path(const char * s) {
@@ -4175,8 +4258,23 @@ void MirvVrXr_RenderThread_ClearForPanel(ID3D11DeviceContext * pContext, ID3D11T
 
         D3D11_RENDER_TARGET_VIEW_DESC rtv = {};
         rtv.Format = TypedFormatFor(desc.Format);
-        rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-        rtv.Texture2D.MipSlice = 0;
+
+        // The view dimension has to follow the sample count, and getting this wrong is not a
+        // wrong picture but no picture at all where transparency should be.
+        //
+        // With MSAA on, CS2's captured target is multisampled, and TEXTURE2D on a multisampled
+        // texture is E_INVALIDARG. CreateRenderTargetView then failed, g_PanelClearRtv stayed
+        // null, and the clear below never ran - so every pixel the HUD does not touch kept
+        // whatever the buffer already held instead of transparent black. Worn, that is the HUD
+        // panels showing solid rectangles around themselves: the operator's words were that the
+        // transparency did not come back. The warning underneath printed faithfully and is the
+        // only reason this took minutes rather than another session.
+        if (desc.SampleDesc.Count > 1) {
+            rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+        } else {
+            rtv.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            rtv.Texture2D.MipSlice = 0;
+        }
 
         HRESULT hr = pDevice->CreateRenderTargetView(pTexture, &rtv, &g_PanelClearRtv);
         pDevice->Release();
@@ -4185,8 +4283,9 @@ void MirvVrXr_RenderThread_ClearForPanel(ID3D11DeviceContext * pContext, ID3D11T
             static bool reported = false;
             if (!reported) {
                 reported = true;
-                advancedfx::Warning("AFXVR: CreateRenderTargetView for the panel failed (0x%08x).\n",
-                    (unsigned)hr);
+                advancedfx::Warning("AFXVR: CreateRenderTargetView for the panel failed (0x%08x), "
+                    "format %i, %u samples. The panel cannot be made transparent.\n",
+                    (unsigned)hr, (int)desc.Format, desc.SampleDesc.Count);
             }
             g_PanelClearRtv = nullptr;
             return;
@@ -4218,16 +4317,48 @@ static void ProbePanelAlpha(ID3D11DeviceContext * pContext, ID3D11Texture2D * pT
     staging.BindFlags = 0;
     staging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     staging.MiscFlags = 0;
+    // A staging texture is never multisampled, and it may not be the destination of a resolve
+    // either - so a multisampled source has to go through a default-usage texture first.
+    staging.SampleDesc.Count = 1;
+    staging.SampleDesc.Quality = 0;
 
     ID3D11Texture2D * pStaging = nullptr;
     HRESULT hr = pDevice->CreateTexture2D(&staging, nullptr, &pStaging);
-    pDevice->Release();
     if (FAILED(hr) || !pStaging) {
+        pDevice->Release();
         advancedfx::Warning("mirv_vr_panel alpha: CreateTexture2D failed (0x%08x).\n", (unsigned)hr);
         return;
     }
 
-    pContext->CopyResource(pStaging, pTexture);
+    // This probe exists to answer questions about the alpha channel, so it must not be the
+    // thing that is wrong. Under MSAA the old `CopyResource(pStaging, pTexture)` silently did
+    // nothing - sample counts differ - and the probe then counted whatever uninitialised memory
+    // the staging texture happened to hold and reported it as Panorama's alpha. A diagnostic
+    // that lies confidently is worse than none, and MSAA is now a configuration we recommend.
+    ID3D11Texture2D * pResolved = nullptr;
+    if (desc.SampleDesc.Count > 1) {
+        D3D11_TEXTURE2D_DESC single = desc;
+        single.Usage = D3D11_USAGE_DEFAULT;
+        single.BindFlags = 0;
+        single.CPUAccessFlags = 0;
+        single.MiscFlags = 0;
+        single.SampleDesc.Count = 1;
+        single.SampleDesc.Quality = 0;
+
+        hr = pDevice->CreateTexture2D(&single, nullptr, &pResolved);
+        if (FAILED(hr) || !pResolved) {
+            pDevice->Release();
+            pStaging->Release();
+            advancedfx::Warning("mirv_vr_panel alpha: a resolve target could not be made (0x%08x); "
+                "the %u-sample source cannot be read back.\n", (unsigned)hr, desc.SampleDesc.Count);
+            return;
+        }
+        pContext->ResolveSubresource(pResolved, 0, pTexture, 0, TypedFormatFor(desc.Format));
+        pContext->CopyResource(pStaging, pResolved);
+    } else {
+        pContext->CopyResource(pStaging, pTexture);
+    }
+    pDevice->Release();
 
     D3D11_MAPPED_SUBRESOURCE map = {};
     if (SUCCEEDED(pContext->Map(pStaging, 0, D3D11_MAP_READ, 0, &map))) {
@@ -4261,6 +4392,7 @@ static void ProbePanelAlpha(ID3D11DeviceContext * pContext, ID3D11Texture2D * pT
     }
 
     pStaging->Release();
+    if (pResolved) pResolved->Release();
 }
 
 // A whole frame from the main pass alone, for a session with no map under it.
@@ -4552,7 +4684,8 @@ static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture
             wait.timeout = XR_INFINITE_DURATION;
             if (Check(xrWaitSwapchainImage_(g_Swapchain[kPanelSwapchain], &wait),
                       "xrWaitSwapchainImage (menu)")) {
-                pContext->CopyResource(g_SwapchainImages[kPanelSwapchain][imageIndex], pTexture);
+                CopyOrResolve(pContext, g_SwapchainImages[kPanelSwapchain][imageIndex], pTexture,
+                              "menu panel");
             } else {
                 haveSheet = false;
             }
@@ -4667,7 +4800,7 @@ void MirvVrXr_RenderThread_SubmitPanel(ID3D11DeviceContext * pContext, ID3D11Tex
     wait.timeout = XR_INFINITE_DURATION;
     bool copied = false;
     if (Check(xrWaitSwapchainImage_(g_Swapchain[kPanelSwapchain], &wait), "xrWaitSwapchainImage (panel)")) {
-        pContext->CopyResource(g_SwapchainImages[kPanelSwapchain][imageIndex], pTexture);
+        CopyOrResolve(pContext, g_SwapchainImages[kPanelSwapchain][imageIndex], pTexture, "panel");
         copied = true;
     }
 
@@ -4928,7 +5061,7 @@ void MirvVrXr_RenderThread_SubmitEye(int eyeIndex, ID3D11DeviceContext * pContex
             XrSwapchainImageWaitInfo wait = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
             wait.timeout = XR_INFINITE_DURATION;
             if (Check(xrWaitSwapchainImage_(g_Swapchain[eyeIndex], &wait), "xrWaitSwapchainImage")) {
-                pContext->CopyResource(g_SwapchainImages[eyeIndex][imageIndex], pTexture);
+                CopyOrResolve(pContext, g_SwapchainImages[eyeIndex][imageIndex], pTexture, "eye");
                 g_EyesCopied++;
             }
             XrSwapchainImageReleaseInfo release = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
