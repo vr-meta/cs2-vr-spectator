@@ -107,6 +107,16 @@ $cfgs = Get-ChildItem (Join-Path $repo 'scripts\cs2') -Filter 'vr*.cfg'
 if (-not $cfgs) { throw 'No vr*.cfg in scripts\cs2.' }
 $cfgs | ForEach-Object { Copy-Item $_.FullName (Join-Path $stage 'cfg') -Force }
 
+# The controller diagrams the README points at. Without them the copy of the README inside
+# the zip has two broken images, exactly where somebody is trying to learn the buttons
+# before putting a headset on - which is the one moment they are most wanted and the one
+# moment there may be no browser open. 220 KB for both.
+$images = Join-Path $repo 'docs\images'
+if (Test-Path $images) {
+    New-Item -ItemType Directory -Force (Join-Path $stage 'docs\images') | Out-Null
+    Copy-Item (Join-Path $images '*') (Join-Path $stage 'docs\images') -Force
+}
+
 # NOTICE is not optional decoration: Apache 2.0 section 4(d) requires it to travel with
 # every distribution, and a zip is a distribution.
 foreach ($doc in @('README.md', 'LICENSE', 'NOTICE', 'THIRD-PARTY.md')) {

@@ -616,7 +616,7 @@ int wmain(int argc, wchar_t ** argv) {
 
     // Its own process group and no share in this console: otherwise Ctrl+C pressed here, to
     // stop following the log, goes to the game as well and takes it down mid-session.
-    if (!CreateProcessW(Widen(cs2.exe).c_str(), mutableCommandLine.data(), nullptr, nullptr, FALSE,
+    if (!CreateProcessW(Widen(cs2.exe).c_str(), mutableCommandLine.data(), nullptr, nullptr, TRUE,
                         CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
                         environment.data(), Widen(cs2.workingDir).c_str(), &startup, &child)) {
         Say("STOP  ", "Could not start cs2.exe: " + LastErrorText(GetLastError()));

@@ -1817,6 +1817,40 @@ enum PointerInput { kPointerPost = 0, kPointerSend = 1 };
 // says otherwise.
 int g_PointerInput = kPointerSend;
 
+// One wheel notch at the point the ray is on, by the same route the click took.
+//
+// It has to follow mirv_vr_pointer, and until today it did not: the click was posted to
+// the window while the wheel went out as global input, which needs the game in front and
+// is normalised against the desktop. Half the pointer immune to a display-mode change and
+// half of it not is worse than either, because the half that breaks breaks silently.
+//
+// WM_MOUSEWHEEL is the odd one out among the mouse messages: its lParam is in SCREEN
+// coordinates, not client ones. Getting that wrong scrolls whatever is under the corner of
+// the window instead of what is being pointed at.
+void PostWheelToSheet(float u, float v, int notches) {
+    HWND hwnd = SwapChainWindow();
+    if (!hwnd || 0 == notches) return;
+
+    RECT client = {};
+    if (!GetClientRect(hwnd, &client)) return;
+    int width = client.right - client.left;
+    int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) return;
+
+    POINT point;
+    point.x = (int)(u * (float)width);
+    point.y = (int)(v * (float)height);
+    if (point.x < 0) point.x = 0;
+    if (point.y < 0) point.y = 0;
+    if (point.x >= width)  point.x = width - 1;
+    if (point.y >= height) point.y = height - 1;
+    if (!ClientToScreen(hwnd, &point)) return;
+
+    PostMessageW(hwnd, WM_MOUSEWHEEL,
+                 MAKEWPARAM(0, (short)(notches * WHEEL_DELTA)),
+                 MAKELPARAM(point.x, point.y));
+}
+
 void MoveMouseToSheet(float u, float v, bool clickDown, bool clickUp) {
     HWND hwnd = SwapChainWindow();
     if (!hwnd) return;
@@ -1928,6 +1962,13 @@ void PublishCursor(const CursorSnapshot & cursor) {
 // Runs on the engine thread, with the aim poses located this frame and the screen's pose
 // already decided, so the ray and the thing it points at are from one instant. The render
 // thread only draws the answer.
+// Defined below, with the rest of the synthetic input. Wanted here so the pointer can
+// scroll the page it is pointing at.
+void QueueMouseWheel(int notches);
+
+// When the last wheel notch went out, so a stick held over is a scroll rather than a fling.
+ULONGLONG g_LastScrollMs = 0;
+
 void EngineThread_PointAtMenu() {
     bool wasHit;
     {
@@ -2028,6 +2069,36 @@ void EngineThread_PointAtMenu() {
     g_CursorPressed = pressed;
 
     MoveMouseToSheet(bestU, bestV, pressEdge, releaseEdge);
+
+    // Scrolling, on the stick of whichever hand is pointing.
+    //
+    // Found by trying to start a bot match from inside the headset and being unable to.
+    // The menu is not cropped - CS2 lays the whole of it out inside the window - but the
+    // PLAY page's map grid is simply LONGER than any window, with a second row of maps and
+    // the button that starts the game below it. On a monitor you turn the wheel without
+    // thinking about it; in here there was no wheel at all, so the bottom of a page was
+    // unreachable and a mode that works perfectly looked broken.
+    //
+    // The wheel has to arrive while the pointer is over the thing being scrolled, which it
+    // is: MoveMouseToSheet has just put the cursor there. One notch per step and a rate
+    // limit, because Panorama animates each notch and a stream of them at the frame rate
+    // flings the page past whatever was being read.
+    if (bestHand >= 0) {
+        float sx = 0.0f, sy = 0.0f;
+        if (GetVec2(1 == bestHand ? g_TurnAction : g_MoveAction, sx, sy)) {
+            float amount = AfxVrMath::ApplyDeadzone(sy, g_StickDeadzone);
+            ULONGLONG now = GetTickCount64();
+            // Full deflection is about eight notches a second, a gentle push about three.
+            ULONGLONG gap = (ULONGLONG)(120.0f + 220.0f * (1.0f - fabsf(amount)));
+            if (0.0f != amount && now - g_LastScrollMs >= gap) {
+                g_LastScrollMs = now;
+                int notches = amount > 0.0f ? 1 : -1;
+                // By whichever route the click went, so the two cannot disagree.
+                if (kPointerPost == g_PointerInput) PostWheelToSheet(bestU, bestV, notches);
+                else                                QueueMouseWheel(notches);
+            }
+        }
+    }
 
     if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
         advancedfx::Message("AFXVR: pointer hand=%s t=%.2f m u=%.3f v=%.3f trigger=%i\n",
@@ -3190,6 +3261,21 @@ bool g_AutoStartDone = false;
 int g_AutoStartLastTick = -1;
 int g_AutoStartFrames = 0;
 
+// It used to fire exactly once and then give up for good, on the reasoning that a session
+// which refuses to start will refuse again sixty times a second and the person it is
+// refusing for is wearing a headset. The reasoning was right and the conclusion was wrong,
+// as the first launch through cs2vr.exe showed: the game reached its menu two seconds in,
+// autostart fired, the runtime answered XR_ERROR_FORM_FACTOR_UNAVAILABLE because the
+// headset was not awake yet, and that was that. Nobody puts a headset on in two seconds,
+// and the advertised recovery - press F9 - is exactly what a worn launch cannot do.
+//
+// So: keep trying, slowly and for a bounded time. Half a minute is longer than it takes to
+// pick a headset up, and the log says one line per attempt rather than sixty a second.
+int g_AutoStartAttempts = 0;
+ULONGLONG g_AutoStartLastAttempt = 0;
+const int kAutoStartMaxAttempts = 15;
+const ULONGLONG kAutoStartRetryMs = 2000;
+
 // About four seconds at a menu's frame rate. Long enough for the D3D11 device and the swap
 // chain to exist - SessionStart refuses without a device and would waste its one attempt -
 // and long enough for a demo that is going to load to have started ticking. Short enough
@@ -3236,20 +3322,43 @@ void EngineThread_AutoStart() {
         if (g_AutoStartFrames < kAutoStartMenuFrames) return;
     }
 
-    // Once, whatever happens next: a session that refuses to start will refuse again sixty
-    // times a second, and the person it is refusing for is wearing the headset.
+    // Slowly, so a failure reports once every two seconds rather than sixty times a second.
+    ULONGLONG now = GetTickCount64();
+    if (0 != g_AutoStartLastAttempt && now - g_AutoStartLastAttempt < kAutoStartRetryMs) return;
+    g_AutoStartLastAttempt = now;
+    g_AutoStartAttempts++;
+
+    if (1 == g_AutoStartAttempts) {
+        // The clock is what moved, and at CS2's own menu it moves without a demo being
+        // loaded - so this does not claim one is.
+        if (haveDemo) {
+            advancedfx::Message("AFXVR: autostart: the game is running (tick %i); starting the session.\n", tick);
+        } else {
+            advancedfx::Message(
+                "AFXVR: autostart: no demo after %i frames; starting the session so the menu can be\n"
+                "AFXVR: used from inside the headset.\n", g_AutoStartFrames);
+        }
+    }
+
+    if (MirvVrXr_SessionStart()) {
+        g_AutoStartDone = true;
+        return;
+    }
+
+    if (g_AutoStartAttempts < kAutoStartMaxAttempts) {
+        advancedfx::Warning(
+            "AFXVR: autostart: not yet (attempt %i of %i). If the headset is not awake, put it\n"
+            "AFXVR: on now - this keeps trying for about %i more seconds.\n",
+            g_AutoStartAttempts, kAutoStartMaxAttempts,
+            (int)((kAutoStartMaxAttempts - g_AutoStartAttempts) * kAutoStartRetryMs / 1000));
+        return;
+    }
+
     g_AutoStartDone = true;
-    if (haveDemo) {
-        advancedfx::Message(
-            "AFXVR: autostart: the demo is running at tick %i; starting the session.\n", tick);
-    } else {
-        advancedfx::Message(
-            "AFXVR: autostart: no demo after %i frames; starting the session so the menu can be\n"
-            "AFXVR: used from inside the headset.\n", g_AutoStartFrames);
-    }
-    if (!MirvVrXr_SessionStart()) {
-        advancedfx::Warning("AFXVR: autostart: it would not start. F9 tries again.\n");
-    }
+    advancedfx::Warning(
+        "AFXVR: autostart: gave up after %i attempts. The headset was never available.\n"
+        "AFXVR: F9 tries again, and so does mirv_vr_xr start - which a launcher can send down\n"
+        "AFXVR: the pipe without anybody reaching the keyboard.\n", g_AutoStartAttempts);
 }
 } // namespace
 

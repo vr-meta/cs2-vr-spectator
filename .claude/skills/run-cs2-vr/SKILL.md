@@ -111,6 +111,18 @@ Anything else: read `<CS2>\game\csgo\console.log` and quote the last `AFXVR:` li
 **verbatim**. They are written to be read by a person; your summary of them is worth less
 than the lines.
 
+**If they say it froze, check whether the game window is minimised before anything else.**
+A minimised window gets no present events, CS2's swap chain spins on
+`QueuePresentAndWait looped ... without a present event`, and the headset falls to about
+two frames a second. It is indistinguishable from a hang from inside the headset, it has
+happened during a real session, and restoring the window fixes it immediately:
+
+```powershell
+$h = (Get-Process cs2).MainWindowHandle
+Add-Type 'using System;using System.Runtime.InteropServices;public class U{[DllImport("user32.dll")]public static extern bool ShowWindow(IntPtr h,int c);}'
+[U]::ShowWindow($h, 9)   # SW_RESTORE
+```
+
 ## 6. Being their hands: the console pipe
 
 There is **no usable console in a worn session** — the window is taller than the display,

@@ -125,7 +125,7 @@ brings up CS2's own menu on a screen either way.
 
 ### Watching a demo
 
-![Controller layout for watching a demo: left stick flies, left grip toggles free look, X and Y seek ten seconds, left menu shows CS2's own window and a long press sends Escape; right stick snap-turns and rises, its click shows or hides the HUD and a long click recentres, the triggers change player, right grip returns to the player, A pauses and B is slow motion](docs/images/controls-watching.png)
+![Controller layout for watching a demo: left stick flies, left grip toggles free look, X and Y seek ten seconds, left menu shows CS2's own window and a long press sends Escape; right stick snap-turns and rises, its click shows or hides the HUD and a long click recentres, the triggers change player, right grip returns to the player, A pauses and B is slow motion](docs/images/controls-watching.webp)
 
 The same thing as text:
 
@@ -161,7 +161,7 @@ for anyone who shoots back properly.
 The controls change with the mode, because the same twelve buttons cannot mean the same
 things in both:
 
-![Controller layout for playing against bots: left stick walks relative to your body and its click toggles slow walk, left trigger is use, left grip is crouch, X and Y pick a team; right stick turns your body and its click reloads, right trigger fires, right grip jumps, A is next weapon and B is alternative fire. Aim by pointing the right controller while looking around independently](docs/images/controls-playing.png)
+![Controller layout for playing against bots: left stick walks relative to your body and its click toggles slow walk, left trigger is use, left grip is crouch, X and Y pick a team; right stick turns your body and its click reloads, right trigger fires, right grip jumps, A is next weapon and B is alternative fire. Aim by pointing the right controller while looking around independently](docs/images/controls-playing.webp)
 
 The same thing as text:
 
@@ -214,6 +214,11 @@ writes to it, and `cs2vr.exe` leaves it open. The thinking behind the layout is 
 - **The game window is the size of one eye** (2528×2780 by default) and taller than most
   monitors. Windows clips it; that is expected. It also means there is no usable console on
   the monitor — use the menu in the headset, a key, or a config.
+- **Do not minimise the game window.** A minimised window gets no present events, CS2's
+  swap chain spins waiting for one (`QueuePresentAndWait looped ... without a present
+  event`), and the headset drops to a couple of frames a second. It comes straight back
+  when the window is restored, but from inside the headset it looks like a freeze with no
+  cause. Leave it behind the headset, or on another monitor.
 - **Player name tags are off.** CS2 lays them out once per frame for a flat screen; they
   cannot be right in two eyes ([why](docs/experiments/15-hud-per-eye.md)). The x-ray
   outlines are drawn in the world and work.
