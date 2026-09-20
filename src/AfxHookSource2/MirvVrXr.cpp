@@ -938,6 +938,12 @@ bool g_PanelShown = true;
 XrVector3f g_RoomRefPos = {};
 bool g_RoomRefValid = false;
 
+// Set when the viewer needs putting back inside their player: entering a game, and every
+// camera jump after it. Done at the first frame that HAS a player rather than at the frame
+// the need was noticed, because the two are not the same moment - the mode turns to PLAY
+// when the map name is set, a second before the map starts loading.
+bool g_AlignToPlayerPending = false;
+
 // A tracking glitch must not throw the camera across the map. Three metres is more room
 // than anybody has in front of a desk.
 const float kRoomOffsetLimitMetres = 3.0f;
@@ -3715,6 +3721,12 @@ void MirvVrXr_EngineThread_Frame() {
             // frame, and far short of the distances a spawn or a camera change moves.
             if (dx * dx + dy * dy + dz * dz > 200.0f * 200.0f) {
                 g_RoomRefValid = false;
+                // And face the way the new body faces. This half was missing: a respawn put
+                // the eyes back inside the player and left them looking wherever the room
+                // happened to point, so every round began facing a wall. The alignment is
+                // deferred rather than done here because on the frame a camera jumps it may
+                // not be a camera yet - a spawn and a map load look the same from here.
+                g_AlignToPlayerPending = true;
                 if (g_AfxVrFrameIndex < g_AfxVrLogUntilFrame) {
                     advancedfx::Message("AFXVR: the camera jumped; standing where you stand now.\n");
                 }
@@ -3811,11 +3823,24 @@ void MirvVrXr_EngineThread_Frame() {
             // whole point of this mode is that the world does not rotate unless the viewer
             // asks, and following the player's yaw continuously would put every mouse
             // movement back into the picture.
+            //
+            // "On the way in" used to mean the frame the mode changed, and that frame is
+            // too early. The log of the first bot match says so plainly:
+            //
+            //   11:32:25  mode PLAY (map "de_inferno")
+            //   11:32:26  Host activate: Loading (de_inferno)
+            //
+            // The mode turns to PLAY when the map NAME is set, a second before the map
+            // begins to load and long before anybody is standing in it - so the alignment
+            // was taken against whatever camera existed during loading, and then never
+            // repeated. Reported from the headset as "in the game I was looking at my own
+            // player from the side".
+            //
+            // Arm it here and perform it at the first frame that actually has a camera,
+            // below. The jump detector arms it again on every respawn and camera change,
+            // which is what a round change looks like from in here.
             if (AfxVrMath::kVrModePlay == next.mode && AfxVrMath::kVrModePlay != g_Mode.mode) {
-                float base[3];
-                AfxVr_GetBaseAngles(base);
-                float turn = AfxVrMath::NormalizeDegrees(base[1] - BodyForwardWorldDegrees());
-                if (0.0f != turn) AfxVr_AddYaw(turn);
+                g_AlignToPlayerPending = true;
 
                 // And stand where the player stands.
                 //
@@ -3831,6 +3856,33 @@ void MirvVrXr_EngineThread_Frame() {
                 g_RoomRefValid = false;
             }
 
+            // The alignment itself, at the first frame that has a camera worth aligning to.
+            //
+            // Two conditions, and both are needed. The view has to read like a camera - the
+            // same plausibility check that gates every write into the game's memory, so a
+            // loading screen's leftovers cannot be mistaken for a player. And the origin has
+            // to be somewhere: a map loads with the camera at the world origin, which is
+            // inside a wall on every competitive map and is never where anybody spawns.
+            if (g_AlignToPlayerPending && AfxVrMath::kVrModePlay == next.mode
+                && 0 != AfxVr_PlausibleViewCount()) {
+                float origin[3];
+                AfxVr_GetBaseOrigin(origin);
+                bool somewhere = (origin[0] * origin[0] + origin[1] * origin[1]
+                                + origin[2] * origin[2]) > 1.0f;
+                if (somewhere) {
+                    g_AlignToPlayerPending = false;
+
+                    float base[3];
+                    AfxVr_GetBaseAngles(base);
+                    float turn = AfxVrMath::NormalizeDegrees(base[1] - BodyForwardWorldDegrees());
+                    if (0.0f != turn) AfxVr_AddYaw(turn);
+
+                    // And stand in the body rather than beside it.
+                    g_RoomRefValid = false;
+
+                    advancedfx::Message("AFXVR: standing in your player, facing the way they face.\n");
+                }
+            }
 
             if (AfxVrMath::kVrModePlay == next.mode) {
 
