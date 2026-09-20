@@ -150,7 +150,11 @@ Building the hook itself: `docs/install.md` and `docs/patches/README.md`. CI
 ## Style
 
 Match the surrounding code: comments explain *why* and what went wrong before, not what
-the line does. Commit subjects are plain sentences (`fix: the camera was frozen wherever
+the line does. **A comment that scopes a file to one question must also name what would have
+to change if the answer gets used.** The GSI probe config was accurate about being a probe and
+silent about needing authentication the moment it stopped being one — which is how a probe
+becomes the shipped thing. Same shape as a fixture that is honest about being an example and
+silent about never having met a real file. Commit subjects are plain sentences (`fix: the camera was frozen wherever
 the session started`). Docs and code are English — **British** spelling (`licence`, `centre`,
 `metres`, `behaviour`, `colour`), with `Apache License 2.0`, `licensed` and `licensor`
 keeping the `s`, as a proper name and as verb forms.
