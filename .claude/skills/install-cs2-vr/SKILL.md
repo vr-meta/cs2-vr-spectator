@@ -19,12 +19,14 @@ gh release list --repo vr-meta/cs2-vr-spectator --limit 5
 ```
 
 - **A release exists** → continue with step 2.
-- **No releases** (true until Phase 2 of the release plan ships) → say so. Do not improvise
-  a download. The only working install is from source: follow `docs/install.md` exactly
-  (toolchain via `scripts/check-toolchain.ps1` / `install-toolchain.ps1`, clone advancedfx,
-  copy `src/AfxHookSource2`, apply `docs/patches/*.patch` without touching line endings,
-  build, drop the DLL into a copy of HLAE), then start with `scripts\start-vr.ps1`. Stop
-  here and offer that instead.
+- **No releases** (still true as of 2026-09-20) → say so plainly. **Do not improvise a
+  download**; there is nowhere else to get this from, and anything that looks like it is not
+  this project. Building from source is the only install, it needs a C++ toolchain and about
+  an hour, and it is described in `CONTRIBUTING.md`: the toolchain, the advancedfx clone,
+  `src/AfxHookSource2` copied in, `docs/patches/*.patch` applied **without touching line
+  endings**, then `cmake -S tools/launcher` for `cs2vr.exe`. A source tree can also be
+  started with `scripts\start-vr.ps1`, which is what the developers use. Offer that, and
+  stop here if they do not want it.
 
 ## 2. Download and verify
 
@@ -75,6 +77,17 @@ See `docs/experiments/21-what-the-zip-has-to-contain.md`.
 
 ## 4. Check what a session needs, and report each as a line
 
+**`cs2vr.exe check` from the unpacked folder does all of this and starts nothing.** Run it
+first and show the person its output; it is the same list, from the program that will act on
+it, so it cannot drift out of date the way this table can. Exit code 0 means go. Use the
+table below to explain whatever it reports, and to check by hand only if the launcher is
+missing or refuses to run at all.
+
+`cs2vr.exe selftest` is worth running once on a machine you have not seen before: it proves,
+against Windows' own `cmd.exe` and without touching CS2, that a DLL and its neighbouring
+dependencies can actually be loaded into a freshly created process here. If that fails,
+nothing else will work and the reason will be antivirus or policy, not this project.
+
 | Check | How | If it fails |
 | --- | --- | --- |
 | Link is up | `OVRServer_x64` running and a `Reality Labs Composite XRSP Interface` device present | Start Link in the headset first |
@@ -85,11 +98,24 @@ See `docs/experiments/21-what-the-zip-has-to-contain.md`.
 
 ## 5. First run
 
-Run `cs2vr.exe` from the unpacked folder (or `cs2vr.exe watch <demo>` when only the command
-line exists). Do not press keys for the person and do not leave a game running that they
-have not been told about. Then read `<CS2>\game\csgo\console.log` for the `AFXVR:` lines and
-report the last few. A good start ends with `submitting frames to the headset`; a session
-that stays `IDLE` means the headset is not on a face or another VR app is in front.
+Run `cs2vr.exe` from the unpacked folder — with no arguments it stops at CS2's own menu,
+shown in the headset with a controller pointer, which is the friendliest first thing to see.
+`cs2vr.exe watch <demo>` goes straight into a demo, `cs2vr.exe play <map>` into a game
+against bots. The launcher follows `console.log` itself and prints the `AFXVR:` lines as
+they appear, so usually there is nothing to read separately.
+
+**Do not press keys for the person, and never leave a game running they have not been told
+about.** They are the one who has to put the headset on.
+
+Two lines mean it worked, and which one you get depends on how it was started:
+
+- `AFXVR: submitting frames to the headset.` — a demo or a map is being rendered in stereo.
+- `AFXVR: showing the menu in the headset. Point a controller at it.` — no demo; CS2's own
+  menu is on a screen in front of them. This is the normal ending for a bare `cs2vr.exe`.
+
+Anything else, read `<CS2>\game\csgo\console.log` and report the last few `AFXVR:` lines
+verbatim rather than summarising them. A session that stays `IDLE` means the headset is not
+on a face, or another VR application is in front of it.
 
 ## 6. Say what was done
 

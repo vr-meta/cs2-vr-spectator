@@ -53,6 +53,36 @@ start:
 
 ## Install and run
 
+### Let an AI do it
+
+It is 2026: you do not have to read an install guide. This repository ships a **skill** for
+coding agents — Claude Code, Codex, anything that can fetch a file and run PowerShell — that
+does the whole thing: finds the right release for the CS2 build you actually have, checks
+the SHA-256, unpacks it somewhere sensible, unblocks it, verifies the folder layout the hook
+depends on, checks that Link is up and SteamVR is not, and starts it. It also knows when to
+stop and say so, which is the part that matters.
+
+If you have cloned this repository, your agent already has it — just ask:
+
+```
+/install-cs2-vr
+```
+
+If you have not, hand it the skill by link. Paste this and nothing else:
+
+```
+Read https://raw.githubusercontent.com/vr-meta/cs2-vr-spectator/main/.claude/skills/install-cs2-vr/SKILL.md
+and follow it to install cs2-vr-spectator on this machine. I have a Meta Quest 3 on Link and
+my own CS2 demo files. Tell me what you are about to run before you run it, and stop if a
+check fails instead of working around it.
+```
+
+The skill is [`.claude/skills/install-cs2-vr/SKILL.md`](.claude/skills/install-cs2-vr/SKILL.md)
+— it is short, and worth reading yourself if you would rather know what is happening than
+watch it happen.
+
+### Or do it yourself
+
 1. Download `cs2-vr-spectator-<version>-cs2-<build>.zip` from
    [Releases](https://github.com/vr-meta/cs2-vr-spectator/releases) and unpack it anywhere
    — but not inside OneDrive, Documents or the Steam library, and keep its folders as they
@@ -103,9 +133,18 @@ the headset session, and the arrow keys switch players and camera.
 
 ### Playing against bots
 
-`cs2vr.exe play de_inferno` — an offline casual game, `sv_lan 1`, six bots, nothing on the
-internet. Bots are not a limitation of the launcher, they are the point: the input path is
-too slow for anyone who shoots back properly.
+Two ways in, and both work.
+
+`cs2vr.exe play de_inferno` sets a game up for you — offline casual, `sv_lan 1`, six bots,
+nothing on the internet. Or just run `cs2vr.exe` and **use CS2's own menu from inside the
+headset**: it hangs on a screen in front of you, a ray comes out of your controller with a
+dot on the end, and the trigger clicks. Pick a mode, pick a map, start it, choose your team
+when the picker comes up — all without taking the headset off. That menu is a real part of
+this project rather than a fallback, and it is the same screen the **Menu** button brings up
+over a running game, so settings and the buy menu are reachable too.
+
+Bots are not a limitation of either route. They are the point: the input path is too slow
+for anyone who shoots back properly.
 
 The controls change with the mode, because the same twelve buttons cannot mean the same
 things in both:
