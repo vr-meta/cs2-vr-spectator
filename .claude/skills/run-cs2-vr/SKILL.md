@@ -39,6 +39,12 @@ precisely because remembering them at a prompt went wrong: a size typed once at 
 written into CS2's own video settings, and the next worn session ran at a quarter of the
 pixels before anybody noticed.
 
+**Warn them that a launch can change the desktop resolution**, and that it is CS2 doing it,
+not this project. With `setting.fullscreen 1` in CS2's own `cs2_video.txt` the game ignores
+`-windowed` and takes the display: a per-eye size no monitor offers snaps to the driver's
+nearest legal mode and everything on the desktop moves. It comes back when CS2 closes. If
+they have windows arranged for work, that is worth knowing before rather than after.
+
 ## 2. Before starting
 
 Run `cs2vr.exe check`. It starts nothing and reports every precondition as a line. Show
@@ -115,7 +121,12 @@ than the lines.
 A minimised window gets no present events, CS2's swap chain spins on
 `QueuePresentAndWait looped ... without a present event`, and the headset falls to about
 two frames a second. It is indistinguishable from a hang from inside the headset, it has
-happened during a real session, and restoring the window fixes it immediately:
+happened during a real session, and restoring the window fixes it immediately.
+
+**Say you are about to restore it, and why, before you do.** It is very often minimised
+because *they* minimised it — to type to you, which is the one thing they can do without
+taking the headset off — and a window that comes back by itself while they are describing a
+problem is you reaching into their machine unannounced. Tell them, then restore:
 
 ```powershell
 $h = (Get-Process cs2).MainWindowHandle
@@ -128,6 +139,13 @@ Add-Type 'using System;using System.Runtime.InteropServices;public class U{[DllI
 There is **no usable console in a worn session** — the window is taller than the display,
 Windows clamps it, and Panorama puts the input line off the bottom of the screen. The hook
 opens a named pipe instead, and this is the whole reason you are useful once the game is up.
+
+**`cs2vr.exe` does not exit when the game starts — its window becomes the remote control**,
+and if somebody is sitting at the keyboard that is the route to reach for first: `r` puts the
+picture back in the headset, `s` stops the session and leaves the game running, `c` sends a
+console command, `q` closes the window and leaves the game alone. Anything else typed at the
+prompt goes through as a console command. It exists because both of those were needed, by
+hand, on the day this was first worn, and nobody who downloaded a zip could have done either.
 
 From a source tree: `scripts\send-command.ps1 "mirv_vr_panel spread 1.2"` (pass `-Log` with
 their CS2 path; the default in that script is one developer's disk). From an unpacked

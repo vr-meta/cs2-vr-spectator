@@ -15,13 +15,23 @@ redistribute Valve's binaries, maps or assets. Nothing here may make starting wi
 
 - `src/AfxHookSource2/` — everything this project wrote. It is **copied into** a clone of
   advancedfx (`D:\Dev\cs2-vr-tools\advancedfx`) to build. `MirvVr*` is the per-pass camera,
-  `MirvVrXr*` is OpenXR, `MirvVrMath.h` is pure logic with no engine, Windows or OpenXR.
+  `MirvVrXr*` is OpenXR, `MirvVrMath.h` is pure logic with no engine, Windows or OpenXR,
+  and `MirvVrVersion.h` is the single place a release stamps itself.
 - `docs/patches/` — the only edits to advancedfx's own files (`main.cpp`, render hooks).
   The advancedfx tree is CRLF: never run `sed -i` or anything that rewrites line endings
   over it, and regenerate a patch from a tree that has the earlier patches applied.
-- `tests/` — builds `MirvVrMath.h` alone. `scripts/` — launch, measurement and check
-  scripts. `docs/experiments/` — one note per question asked of the engine, with the answer.
+- `tools/launcher/` — `cs2vr.exe`, the only thing a stranger runs: it finds CS2, stages the
+  demo, writes the configs, starts the game with the hook and then follows `console.log`.
+  `tools/server/` — a zero-dependency Rust control server on loopback, for a browser page
+  *and* for an agent. It attaches to a running session and never starts one.
+- `tests/` — builds `MirvVrMath.h` and the launcher's pure logic. `scripts/` — launch,
+  measurement and check scripts. `docs/experiments/` — one note per question asked of the
+  engine, with the answer.
+- `.claude/skills/` — how an agent installs and runs this **for somebody else**. They are
+  user-facing documentation and go stale exactly like the rest of it.
 - `docs/07-release-plan.md` — where this is going: a launcher exe and GitHub releases.
+- Apache 2.0. `NOTICE` carries the attribution and the Valve boundary, and travels with
+  anything distributed.
 
 ## Commands
 
@@ -45,16 +55,24 @@ Building the hook itself: `docs/install.md` and `docs/patches/README.md`. CI
 
 ## Rules that were each paid for
 
-- **A worn session starts only with `scripts\start-vr.ps1`.** Meta runtime for that process,
-  frame cap, explicit 2528x2780. Desk measurements use `launch-cs2-experiment.ps1` with an
-  `exp*.cfg`, never `vr.cfg` (it can start a session), and the operator is told in chat
-  before a desk launch — from outside the two look identical.
+- **A worn session starts only with `scripts\start-vr.ps1` or `cs2vr.exe`.** Meta runtime for
+  that process, frame cap, explicit per-eye size. Desk measurements use
+  `launch-cs2-experiment.ps1` with an `exp*.cfg`, never `vr.cfg` (it can start a session),
+  and the operator is told in chat before a desk launch — from outside the two look
+  identical. **That script loads upstream HLAE's hook unless you pass `-SelfBuilt`**, and
+  upstream holds none of this code, so a working injection then produces zero `AFXVR:` lines
+  and is indistinguishable from a failed one. Grep the build banner, not `AFXVR`.
 - **SteamVR must not be running next to a Meta-runtime session.** It holds the headset and
   our session is never scheduled. Shut down in order: session, CS2, then any runtime.
 - **There is no console in a worn launch.** The window is taller than the display, Windows
-  clamps it, and the console's input line is off-screen. Anything the operator adjusts goes
-  on a key, a controller gesture or a config. `vr_layout.cfg` is re-read live with PgDn
-  then PgUp (`scripts/send-key.ps1` can press them).
+  clamps it, and the console's input line is off-screen. The hook opens the named pipe
+  `\\.\pipe\cs2vr` instead: one line per command, **no reply on the pipe** — the answer
+  appears in `console.log`, and the hook echoes `AFXVR: pipe: <line>` *before* running it, so
+  that echo is a correlation token rather than a blind sleep. **Connect, write, disconnect,
+  every time:** `nMaxInstances = 1`, so a handle held between commands works perfectly for
+  whoever holds it and silently takes the pipe away from `send-command.ps1`, from the
+  operator and from any other agent, with nothing anywhere saying why. `vr_layout.cfg` is
+  also re-read live with PgDn then PgUp (`scripts/send-key.ps1` can press them).
 - **`vr_keys.cfg` and `vr_diag.cfg` have a bind checker** with reserved keys. Run
   `check-cfg.ps1` after touching any cfg; do not hand-edit around it.
 - **Pure logic goes in `MirvVrMath.h` with a test.** It is the only part that can be
@@ -65,6 +83,10 @@ Building the hook itself: `docs/install.md` and `docs/patches/README.md`. CI
 - **Report what was measured, and say when something was not.** Several confident
   explanations in this project's history were wrong; the experiments directory is the
   record of finding out.
+- **A parser's fixtures are copied from a file somebody actually has**, and the test says
+  which file. Every one of the control server's first four faults was a grammar written from
+  an example instead of an artefact — including the timestamp that every real log line
+  carries and the tidied fixture did not.
 
 ## Facts about the engine and runtime (do not re-derive)
 
@@ -91,9 +113,23 @@ Building the hook itself: `docs/install.md` and `docs/patches/README.md`. CI
   room-fixed direction.
 - Name tags are laid out once per frame by Panorama; calling the engine's matrix builder
   mid-pass restores the base camera (experiment 15).
+- **`setting.fullscreen 1` in CS2's own `cs2_video.txt` beats `-windowed`** and forces a
+  display-mode change; an impossible size snaps to the driver's nearest legal mode and the
+  desktop goes with it, while the engine carries on rendering the size it was asked for.
+  With it off, Windows clamps the window to the display and the engine renders the clamped
+  size — which costs vertical field of view, because Source renders the *horizontal* angle
+  and the vertical follows from the image's shape. Neither value is free; experiment 22 has
+  the measurements. **CS2 rewrites `cs2_video.txt` on exit**, so nothing may be built on
+  restoring it at exit: restore at *launch* if a backup exists, then take a fresh one. That
+  makes a crash, a kill and a clean exit one case.
+- `CreateProcessW` needs `bInheritHandles = TRUE`, or `SteamAPI_Init` cannot build its IPC
+  pipe and CS2 prints "Steam is probably not running" with Steam plainly running, then
+  closes. HLAE passes TRUE; every other flag already matched.
 
 ## Style
 
 Match the surrounding code: comments explain *why* and what went wrong before, not what
 the line does. Commit subjects are plain sentences (`fix: the camera was frozen wherever
-the session started`). Docs and code are English.
+the session started`). Docs and code are English — **British** spelling (`licence`, `centre`,
+`metres`, `behaviour`, `colour`), with `Apache License 2.0`, `licensed` and `licensor`
+keeping the `s`, as a proper name and as verb forms.

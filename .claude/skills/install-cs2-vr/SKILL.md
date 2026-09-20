@@ -120,8 +120,11 @@ on a face, or another VR application is in front of it.
 ## 6. Say what was done
 
 Where it was unpacked, which release and CS2 build, which checks passed, and how to remove
-it: delete the folder, and delete `<CS2>\game\csgo\cfg\cs2vr\` — that directory is the only
-thing the launcher writes outside its own folder.
+it: delete the folder, and delete the **two** directories the launcher made inside the game —
+`<CS2>\game\csgo\cfg\cs2vr\`, the configs, and `<CS2>\game\csgo\cs2vr_demos\`, where a demo
+given by absolute path is staged because `playdemo` only reliably looks inside the game's own
+tree. Those two are everything it writes outside its own folder, and forgetting the second
+leaves copies of the person's demos sitting in Valve's directory.
 
 ## Updating
 

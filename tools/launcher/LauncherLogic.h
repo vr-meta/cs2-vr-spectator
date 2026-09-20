@@ -108,7 +108,10 @@ struct Cs2Paths {
     std::string workingDir;  // ...\game\bin\win64
     std::string csgo;        // ...\game\csgo
     std::string steamInf;    // ...\game\csgo\steam.inf
-    std::string cfgDir;      // ...\game\csgo\cfg\cs2vr   <- the only place we write
+    std::string cfgDir;      // ...\game\csgo\cfg\cs2vr   <- we write here, and into
+                             //    ...\game\csgo\cs2vr_demos when a demo has to be staged.
+                             //    Those two and nothing else in Valve's tree; the uninstall
+                             //    note in the install skill has to keep naming both.
     std::string consoleLog;  // ...\game\csgo\console.log
 };
 
