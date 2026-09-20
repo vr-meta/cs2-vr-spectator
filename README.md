@@ -1,13 +1,24 @@
 # CS2 VR Spectator
 
-Watch Counter-Strike 2 demos from inside the map, in a VR headset — stand next to a
-bombsite, look around, lean round a corner, fly above the round while it plays. CS2 itself
-still loads the map, plays the demo and renders the world; this project gives it two eyes
-and a head.
+Counter-Strike 2 in a VR headset. **Watch** a demo from inside the map — stand next to a
+bombsite, look around, lean round a corner, fly above the round while it plays. Or
+**play**, offline against bots, on your feet: walk where your body faces, aim with the
+controller, look wherever you like while you do it. CS2 itself still loads the map, runs
+the game and renders the world; this project gives it two eyes, a head and a pair of hands.
 
-**Alpha.** It works and is comfortable enough to watch a match in, on the one setup it was
-built and worn on: a Meta Quest 3 over Link, Windows 11, an RTX 4070 laptop. Expect rough
-edges, and expect a CS2 update to break it until a new release is made.
+**Alpha**, on the one setup it was built and worn on: a Meta Quest 3 over Link, Windows 11,
+an RTX 4070 laptop. Expect a CS2 update to break it until a new release is made.
+
+The two halves are not equally finished, and the difference is worth knowing before you
+start:
+
+- **Watching works and is comfortable.** Stereo, head tracking, leaning, sound that follows
+  your head, the HUD on panels around you. This is what the project was built for and what
+  has had the most hours in a headset.
+- **Playing works, with bugs.** You can walk, shoot, reload, crouch, jump, defuse and
+  finish a round against bots. But **shooting is not yet steady and the in-game HUD is not
+  yet right** — see [Playing](#playing-against-bots) for exactly what is wrong. It is
+  playable, and it is not yet good.
 
 > **Read this first.** This starts CS2 with `-insecure` and loads a DLL into it. That is
 > fine for watching **your own demo files** and playing **offline with bots**, and for
@@ -22,8 +33,8 @@ edges, and expect a CS2 update to break it until a new release is made.
    are (the hook finds its files from its own location).
 2. Put the headset on **Link**. **Close SteamVR** if it is running.
 3. Run `cs2vr.exe`. CS2 starts and its own menu appears on a screen in the headset; point a
-   controller at it and pull the trigger to click. Open a demo from the *Watch* tab, or skip
-   the menu: `cs2vr.exe watch C:\path\to\match.dem`.
+   controller at it and pull the trigger to click. Or skip the menu and say what you want:
+   `cs2vr.exe watch C:\path\to\match.dem`, or `cs2vr.exe play de_inferno`.
 
 That is the whole install. To remove it, delete the folder, and delete
 `game\csgo\cfg\cs2vr\` and `game\csgo\cs2vr_demos\` inside your CS2 installation — the only
@@ -44,7 +55,11 @@ sentence each, what is in the way:
 
 ## Controls
 
-Watching a demo (the hook prints the live table with **PgUp**, into `console.log`):
+Two layouts. The hook picks between them from what the game is doing — a demo, a live map,
+a menu — and prints the live one with **PgUp**, into `console.log`. The **Menu** button
+brings up CS2's own menu on a screen either way.
+
+### Watching a demo
 
 | Left controller | | Right controller | |
 | --- | --- | --- | --- |
@@ -60,11 +75,49 @@ score, radar, timeline — hangs around you as panels that follow your position 
 their direction. Keyboard equivalents are in `cfg\vr_keys.cfg`; **F9 / F5** start and stop
 the headset session, and the arrow keys switch players and camera.
 
-Playing offline against bots works too, and is rougher: `cs2vr.exe play de_inferno`. The
-left stick walks where you look, the right controller aims like a pistol — a crosshair
-shows where the shot will really go, which trails your hand by a frame or two — the right
-trigger fires, the right stick snap-turns. Treat it as an experiment; the thinking behind
-it is in [`docs/07-release-plan.md`](docs/07-release-plan.md).
+### Playing against bots
+
+`cs2vr.exe play de_inferno` — an offline casual game, `sv_lan 1`, six bots, nothing on the
+internet. The controls change with it, because the same twelve buttons cannot mean the same
+things in both:
+
+| Left controller | | Right controller | |
+| --- | --- | --- | --- |
+| stick | walk, relative to your body | stick | turn your body |
+| stick click | slow walk on / off | stick click | reload |
+| trigger | use: defuse, plant, open, pick up a gun | trigger | fire |
+| grip | crouch (held) | grip | jump (held) |
+| X / Y | pick a team, while the picker is up | A / B | next weapon / alternative fire |
+
+**Your head and your aim are separate.** The right controller points where you shoot, your
+head looks wherever you want, and your body turns with the right stick or follows where you
+look. Aiming is limited to a window of about 22° around your gaze — the game has one mouse
+and one crosshair, and letting the hand drag the view a long way off where you are looking
+is what made earlier versions unpleasant.
+
+**What is wrong with it today.** These are the two things to fix next, and they are known,
+not suspected:
+
+- **Shooting is not steady.** The game is driven by a synthetic mouse, and the hook has to
+  *learn* what one mouse count is worth by watching the game's own aim respond — sensitivity
+  is a convar nobody can read from in here. Until that estimate settles, the crosshair
+  trails your hand, and it can drift or overshoot after a respawn, a spectator camera or a
+  teleport. The crosshair shows where the shot will really go, not where your hand points;
+  when the two disagree, believe the crosshair.
+- **The in-game HUD is not placed right.** Health and ammo are cut out of the game's own
+  frame and hung beside you, and **those two rectangles are estimates rather than
+  measurements** — the rest of the HUD was measured off a screen capture, and these two live
+  in a part of the frame the display clips away, where no capture can reach them. So they
+  may show the wrong crop, or nothing. `mirv_vr_panel rect ammo <l> <t> <r> <b>` moves them
+  while you wear it.
+- **The weapon model is drawn with its own field of view**, which the engine keeps in a
+  separate field from the world's. It comes out oversized, at the wrong depth, and it
+  follows your head rather than your hands. `r_drawviewmodel 0` in the console turns the gun
+  off, which is how it has mostly been played so far.
+
+Everything above is reachable without a console through the pipe — `scripts/send-command.ps1`
+writes to it, and `cs2vr.exe` leaves it open. The thinking behind the layout is in
+[`docs/07-release-plan.md`](docs/07-release-plan.md).
 
 ## What to expect
 
