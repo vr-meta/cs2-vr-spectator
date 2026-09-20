@@ -27,6 +27,15 @@ on:
     # than by someone trying to build.
     - cron: '17 4 * * 1'
   workflow_dispatch:
+  # Called by release.yml, which passes the tag. Everything else leaves it empty and gets
+  # a hook that says 0.0.0-dev and means it.
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to compile into the hook (AFXVR_VERSION). Empty for a development build.'
+        type: string
+        required: false
+        default: ''
 
 env:
   # The upstream revision the patches are written against. Bump deliberately: the patch
@@ -184,7 +193,9 @@ jobs:
           # Left unset here on purpose: this workflow builds main, not a release, and a
           # build from main must not claim a release number. The release workflow passes
           # -DAFXVR_VERSION=<tag>; everything else says 0.0.0-dev and means it.
-          cmake --preset x64-release -DAFXVR_OPENXR_DIR="${{ github.workspace }}/openxr/pkg"
+          $version = '${{ inputs.version }}'
+          $stamp = if ($version) { @("-DAFXVR_VERSION=$version") } else { @() }
+          cmake --preset x64-release -DAFXVR_OPENXR_DIR="${{ github.workspace }}/openxr/pkg" @stamp
 
       - name: Build
         working-directory: advancedfx

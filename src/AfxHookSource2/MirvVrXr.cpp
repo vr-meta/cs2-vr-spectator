@@ -285,6 +285,7 @@ float g_IpdScale = 1.0f;
 bool g_Calibrating = false;
 int g_EyesCopied = 0;
 bool g_ReportedFirstSubmit = false;
+bool g_ReportedFirstMenu = false;
 
 // Submitted frames per second, measured where it matters - at xrEndFrame, not at the
 // game's own frame counter, which also counts frames the headset never sees.
@@ -4377,6 +4378,17 @@ static void RenderThread_MenuFrame(ID3D11DeviceContext * pContext, ID3D11Texture
     Check(xrEndFrame_(g_Session, &endInfo), "xrEndFrame (menu)");
     g_FrameBegun = false;
     g_PanelCopied = false;
+
+    // The first frame that actually carried the sheet, said once, in words a launcher can
+    // wait for. cs2vr.exe follows console.log and stops when it sees this; without it, the
+    // most ordinary start of all - no demo, straight to CS2's own menu in the headset -
+    // never announces itself, because "submitting frames to the headset" is reported on two
+    // eyes being copied and menu mode copies none. A minute of silence and then "still
+    // nothing from the hook" is what success looked like.
+    if (!g_ReportedFirstMenu && layerCount > 0) {
+        g_ReportedFirstMenu = true;
+        advancedfx::Message("AFXVR: showing the menu in the headset. Point a controller at it.\n");
+    }
 
     ULONGLONG now = GetTickCount64();
     if (0 == g_FpsWindowStart) g_FpsWindowStart = now;

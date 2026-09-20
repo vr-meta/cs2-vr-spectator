@@ -20,3 +20,15 @@ else()
 endif()
 
 add_test(NAME mirv-vr-math COMMAND test-mirv-vr-math)
+
+# The launcher's decisions - where CS2 is, which runtime, what the command line is, whether
+# it may start at all - kept free of Windows for the same reason, and tested the same way.
+add_executable(test-launcher-logic test-launcher-logic.cpp)
+
+if(MSVC)
+    target_compile_options(test-launcher-logic PRIVATE /W4)
+else()
+    target_compile_options(test-launcher-logic PRIVATE -Wall -Wextra)
+endif()
+
+add_test(NAME launcher-logic COMMAND test-launcher-logic)

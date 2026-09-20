@@ -1,0 +1,114 @@
+name: Release
+
+# Builds the hook and the launcher, assembles the zip a stranger unpacks, and publishes it
+# as a PRE-release. Pushing a tag `v*` publishes; running it by hand builds the same zip and
+# keeps it as a workflow artifact, so the packaging can be tried without releasing anything.
+#
+# The hook is built by build-hook.yml, called from here with the version to stamp into it.
+# That workflow also stages everything the hook cannot run without, in the one layout it
+# can run from, and uploads it as the artifact `hook-tree` - so a change to what the hook
+# needs is made in the same place as the change that needed it, and this file only adds
+# what is ours: the launcher, the configs, the documents.
+#
+# Nothing Valve owns is fetched or published. THIRD-PARTY.md lists what is.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp into a dry-run build (nothing is published)'
+        required: true
+        default: '0.0.0-dryrun'
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Work out the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then v="${GITHUB_REF_NAME#v}"; else v="${{ github.event.inputs.version }}"; fi
+          [ -n "$v" ] || { echo "No version."; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "version $v"
+
+  hook:
+    name: Hook
+    needs: [version]
+    uses: ./.github/workflows/build-hook.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  package:
+    name: Launcher and zip
+    needs: [version, hook]
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      CS2VR_VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The hook tree, as build-hook.yml staged it
+        uses: actions/download-artifact@v4
+        with:
+          name: hook-tree
+          path: hooktree
+
+      - name: Build the launcher
+        shell: pwsh
+        run: |
+          # The CS2 build it announces is read out of the hook's own version header by
+          # tools/launcher/CMakeLists.txt, so the two cannot disagree.
+          cmake -S tools/launcher -B build/launcher -A x64 "-DCS2VR_VERSION=$env:CS2VR_VERSION"
+          cmake --build build/launcher --config Release
+          # It must at least start on a machine with nothing on it.
+          & build/launcher/Release/cs2vr.exe --help
+          if ($LASTEXITCODE -ne 0) { throw 'cs2vr.exe --help failed' }
+
+      - name: Assemble the release
+        shell: pwsh
+        run: |
+          ./scripts/stage-release.ps1 -HookTree hooktree `
+              -Launcher build/launcher/Release/cs2vr.exe `
+              -Version $env:CS2VR_VERSION -Out out
+          Get-ChildItem out -File | Format-Table Name, Length
+
+      - name: Keep the zip as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cs2-vr-spectator-${{ env.CS2VR_VERSION }}
+          path: |
+            out/*.zip
+            out/*.sha256
+          if-no-files-found: error
+
+      - name: Publish a pre-release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $build = (Get-Content out/cs2-build.txt -Raw).Trim()
+          $notes = @"
+          **Alpha.** Made for CS2 build (ClientVersion) **$build** - after a game update the hook refuses to move the camera until a new release exists; ``cs2vr check`` says which build you have.
+
+          Unpack anywhere (not inside OneDrive or the Steam library), put the headset on Link, close SteamVR, run ``cs2vr.exe``. The README in the zip has the rest.
+
+          CS2 is always started with ``-insecure``: own demos and offline play only. The exe is **unsigned** and loads a DLL into a game, so SmartScreen and some antivirus will object; the SHA-256 is attached.
+
+          Licence: **PolyForm Noncommercial 1.0.0** - noncommercial use, modification and sharing, keeping the notice ``Copyright 2026 butschster <butschster@gmail.com>``. Source-available rather than open source. The advancedfx (MIT) and OpenXR loader (Apache-2.0) parts keep their own terms; see THIRD-PARTY.md in the zip.
+          "@
+          $notes | Set-Content notes.md -Encoding utf8
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem out/*.zip, out/*.sha256).FullName `
+              --prerelease --title "$env:GITHUB_REF_NAME (CS2 build $build)" `
+              --notes-file notes.md --generate-notes

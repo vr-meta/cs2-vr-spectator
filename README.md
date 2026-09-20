@@ -1,219 +1,136 @@
 # CS2 VR Spectator
 
-Watch Counter-Strike 2 match replays from inside the map using a Meta Quest 3 connected to a Windows PC.
+Watch Counter-Strike 2 demos from inside the map, in a VR headset — stand next to a
+bombsite, look around, lean round a corner, fly above the round while it plays. CS2 itself
+still loads the map, plays the demo and renders the world; this project gives it two eyes
+and a head.
 
-## Status
+**Alpha.** It works and is comfortable enough to watch a match in, on the one setup it was
+built and worn on: a Meta Quest 3 over Link, Windows 11, an RTX 4070 laptop. Expect rough
+edges, and expect a CS2 update to break it until a new release is made.
 
-**CS2 renders into a Meta Quest 3.** Stereo, head tracked, at the runtime's full recommended 2528x2780 per eye, from a demo playing inside the real game, with the controllers flying the viewer around the map. The feasibility question this project existed to answer is answered. There is no installable build yet.
+> **Read this first.** This starts CS2 with `-insecure` and loads a DLL into it. That is
+> fine for watching **your own demo files** and playing **offline with bots**, and for
+> nothing else. It cannot join matchmaking or any VAC-protected server, and nothing here may
+> be changed to try. It does not contain or redistribute anything of Valve's.
 
-How it works: CS2's own stereo hooks are dead ends - the demo eye-offset convar has no effect, the multiview path is absent. Stereo comes instead from HLAE's multi-pass rendering, which re-renders one frame several times, plus a change of ours that gives each pass its own camera. The engine resolves the camera once per frame, outside the pass loop - but the object holding it is persistent and re-read by every pass, so rewriting it between passes separates the eyes. Position, orientation and field of view all go through that one lever.
+## Install and run
 
-The pair is verified: at a real 63 mm interpupillary distance it differs only by viewpoint, and with the separation set to zero on a playing demo with live smoke the two eyes stay identical - so the simulation does not advance between passes, which is the error that would be unbearable in a headset. [Look at the pair](https://claude.ai/artifact/3iESVvwPKZjiEDLX9eAC8x).
+1. Download `cs2-vr-spectator-<version>-cs2-<build>.zip` from
+   [Releases](https://github.com/vr-meta/cs2-vr-spectator/releases) and unpack it anywhere
+   — but not inside OneDrive, Documents or the Steam library, and keep its folders as they
+   are (the hook finds its files from its own location).
+2. Put the headset on **Link**. **Close SteamVR** if it is running.
+3. Run `cs2vr.exe`. CS2 starts and its own menu appears on a screen in the headset; point a
+   controller at it and pull the trigger to click. Open a demo from the *Watch* tab, or skip
+   the menu: `cs2vr.exe watch C:\path\to\match.dem`.
 
-Open work is tracked as [GitHub issues](https://github.com/vr-meta/cs2-vr-spectator/issues). Two things stand between this and something pleasant to use:
+That is the whole install. To remove it, delete the folder, and delete
+`game\csgo\cfg\cs2vr\` and `game\csgo\cs2vr_demos\` inside your CS2 installation — the only
+places anything is written outside the folder you unpacked.
 
-**Frame rate.** 38-48 frames/s where the headset wants 72, so SteamVR reprojects to fill the gap. Where it goes is now measured rather than guessed ([experiment 13](docs/experiments/13-where-the-frame-goes.md)): three scene traversals are about 11 ms of a 21-26 ms frame, so **more than half of a VR frame is not the game rendering at all** - it is the submission path and the runtime. The two levers everyone reaches for are spent: the graphics settings were already at minimum, the game having quietly auto-configured itself there, and resolution is worth 8% rather than the half it looks like. Trying Meta's runtime instead of SteamVR is now one launch argument.
+The exe is **not signed** and it loads a DLL into a game, so SmartScreen ("More info → Run
+anyway") and some antivirus will object. Each release has a SHA-256 next to it.
 
-**Everything two-dimensional.** The demo's timeline, scoreboard and menu assume one camera and a screen. Both halves are now worn and default: the eyes are captured before the UI is composited, and the HUD goes to OpenXR quad layers in space - the score up high, the radar to one side, the timeline low like a dashboard - cut out of one sheet whose world has been wiped to transparent black ([experiment 16](docs/experiments/16-the-hud-on-a-panel.md)). Player name tags are a harder case and stay off: they are world-anchored, so no flat panel can carry them, and the cheap fix was tried and [does not work](docs/experiments/15-hud-per-eye.md).
+`cs2vr.exe check` looks at the machine and starts nothing. It says what it found and, in a
+sentence each, what is in the way:
 
-- [`src/`](src/) - the C++ this project wrote: a camera pose per render pass, and the OpenXR session that consumes it.
-- [`docs/environment.md`](docs/environment.md) - the reference machine, headset runtimes, and toolchain state.
-- [`docs/01-source2-integration-points.md`](docs/01-source2-integration-points.md) - candidate integration points, licensing, and open questions. Notable finding: CS2 ships unused stereo convars in its demo playback path.
-- [`docs/02-hlae-multipass-analysis.md`](docs/02-hlae-multipass-analysis.md) - HLAE already re-renders the CS2 scene several times per frame from one simulation state, which is the core of what stereo needs.
-- [`docs/03-vr-bridge-sketch.md`](docs/03-vr-bridge-sketch.md) - where the per-eye textures would come from, and the problems that sketch has to survive.
-- [`docs/experiments/00-stereo-cvar-probe.md`](docs/experiments/00-stereo-cvar-probe.md) - the first experiment.
-- [`docs/experiments/00-results.md`](docs/experiments/00-results.md) - CS2 own stereo hooks are dead: the demo eye-offset convar has no effect, and the multiview path is absent.
-- [`docs/experiments/01-camera-control.md`](docs/experiments/01-camera-control.md) - `mirv_input` moves the camera exactly and repeatably, replacing the dead convar.
-- [`docs/experiments/02-multipass.md`](docs/experiments/02-multipass.md) - confirmed: HLAE renders one frame twice with independent settings per pass. The expensive half of stereo already exists.
-- [`docs/experiments/03-per-pass-camera.md`](docs/experiments/03-per-pass-camera.md) - the camera cannot be changed per pass from config: the view is resolved before pass commands run. Needs a change inside the render path.
-- [`docs/experiments/08-openxr-instance.md`](docs/experiments/08-openxr-instance.md) - **OpenXR comes up inside CS2.** The runtime is identified, the Quest is found through Link, and it asks for 2528x2780 per eye. Also: never kill the runtime with an instance live, and cap the game or it fights the compositor.
-- [`docs/experiments/07-eye-pose.md`](docs/experiments/07-eye-pose.md) - the per-pass code becomes one module with the interface `xrLocateViews` will drive, and the last unverified lever - **view angles** - is measured. Everything the headset needs to send into the engine now works.
-- [`docs/experiments/06-per-eye-projection.md`](docs/experiments/06-per-eye-projection.md) - **per-eye field of view works too**, through the same write that carries the camera. That settles the frame submission: a symmetric frustum per eye, reported honestly to OpenXR, is correct.
-- [`docs/experiments/05-stereo-pair.md`](docs/experiments/05-stereo-pair.md) - **the pair is correct.** At 63 mm separation it differs only by viewpoint; with separation 0 on a playing demo the eyes stay identical while consecutive frames differ by up to 98%, so nothing advances between passes.
-- [`docs/experiments/04-per-pass-camera.md`](docs/experiments/04-per-pass-camera.md) - **stereo works.** The view setup runs once per frame, outside the pass loop, but the `CViewSetup` it fills is persistent and re-read per pass. Rewriting it there gives each eye its own camera: control take 0.00% differing, test take 88.89% with correct parallax.
-
-- [`docs/workflow.md`](docs/workflow.md) - how experiments are run here: division of labour, launch, capture, and the rules that earned their place.
-- [`docs/05-view-setup-point.md`](docs/05-view-setup-point.md) - the exact function where a per-pass camera must be applied, and why the config route failed.
-- [`docs/experiments/09-frames-in-the-headset.md`](docs/experiments/09-frames-in-the-headset.md) - **frames reach the headset.** The session, the swapchains, and the two problems only a headset reveals: the world swimming when the head turns, and a followed player's aim dragging your head with it.
-- [`docs/experiments/10-frame-budget.md`](docs/experiments/10-frame-budget.md) - what it costs: 38-48 frames/s against the 72 the headset wants, and a wasted render pass removed.
-- [`docs/experiments/11-seeking.md`](docs/experiments/11-seeking.md) - **seeking works and the timeline never crashed anything.** Twenty-three seeks including full-width slider drags. Direction is not what costs: a backward seek replays from the preceding keyframe, so ten seconds back can cost more than sixty forward. And Panorama takes synthetic mouse input, which we had assumed it did not.
-- [`docs/experiments/12-openxr-runtime.md`](docs/experiments/12-openxr-runtime.md) - choosing the OpenXR runtime for CS2 alone, through `XR_RUNTIME_JSON`, instead of the machine-wide registry change. No elevation, nothing left behind.
-- [`docs/experiments/13-where-the-frame-goes.md`](docs/experiments/13-where-the-frame-goes.md) - **more than half a VR frame is not rendering.** Three traversals are 11 ms of 21-26. The graphics settings were already at minimum and nobody knew; resolution is worth 8%. Also the trap that nearly ruined the measurement: `fps_max 120` lives in a file CS2 loads after the command line.
-- [`docs/experiments/14-when-the-ui-is-drawn.md`](docs/experiments/14-when-the-ui-is-drawn.md) - the UI is composited **once per pass**, so it really is baked into both eyes, and moving the capture to HLAE's before-UI hook takes it out.
-- [`docs/experiments/15-hud-per-eye.md`](docs/experiments/15-hud-per-eye.md) - the name tags, reproduced on a monitor at last, and the cheap fix disproved: asking the engine to rebuild its matrices puts the base camera back and cancels the stereo.
-- [`docs/experiments/16-the-hud-on-a-panel.md`](docs/experiments/16-the-hud-on-a-panel.md) - **the score is back.** The world is wiped out of the main pass between the scene and the UI, so the quad carries the HUD on nothing; measured first, because a write-masked alpha channel would have made the panel invisible and looked like the feature not working. Then cut into one quad per HUD group, because a single sheet puts the score at the horizon and the timeline on the floor.
-- [`docs/experiments/17-judder-on-head-turns.md`](docs/experiments/17-judder-on-head-turns.md) - **the judder was never the frame rate.** Reprojection is exact if the reported pose is the one the image was drawn from; it was read from a global the engine thread had often already moved on from, by a different amount each frame. Each pass now carries its own. Worn verdict: none at all, at 30 frames a second.
-- [`docs/experiments/18-what-the-fov-field-means.md`](docs/experiments/18-what-the-fov-field-means.md) - **the same field means two different things at two different moments**, and three readings of the source could not tell which applied where. Settled in thirty seconds by putting the dial on the triggers and handing it to someone wearing the headset: they converged on 0.853 where the prediction was 0.848, inside one step.
-- [`docs/experiments/19-four-faults-a-desk-could-not-see.md`](docs/experiments/19-four-faults-a-desk-could-not-see.md) - the camera frozen wherever the session started, a controller pressing nothing, whoever you watched frozen in place, and the HUD panels leaning. Each passed every check available without a headset; each was found within minutes of wearing one. Pause is not a neutral condition, and neither is facing forwards.
-- [`docs/experiments/21-what-the-zip-has-to-contain.md`](docs/experiments/21-what-the-zip-has-to-contain.md) - which ten DLLs and 400 KB of resources a release actually needs, read off a running game and off the source rather than guessed. It also found the rule that fixes the layout: HLAE's folder is derived from the hook DLL's own path minus one directory, so putting the DLL one level too high leaves every shader silently unfound.
-- [`docs/07-release-plan.md`](docs/07-release-plan.md) - what has to be true before a stranger can install this: a launcher instead of PowerShell, the hook made relocatable, a tagged release, and the README rewritten only once those three lines are honest.
-- [`docs/06-vr-experience-plan.md`](docs/06-vr-experience-plan.md) - the plan for making it usable: the menu, the timeline, the controls, and why they all need to leave the back buffer.
-- [`docs/04-plan.md`](docs/04-plan.md) - the original plan, phases A to E. All of it is done; 06 is what comes next.
-- [`docs/patches/README.md`](docs/patches/README.md) - the changes made to HLAE, kept so they survive a re-clone: the build fix, and the per-pass camera itself.
-
-- [`docs/install.md`](docs/install.md) - how to get from a clean machine to CS2 rendering into a headset: build the hook, lay out the files, launch, the controls, and the shutdown order that avoids an unkillable process.
-
-- [`tests/`](tests/) - the parts that are a function of their arguments and nothing else: the geometry, the stick shaping, the plausibility check on the view struct, the steam.inf parsing. 593 checks, no engine, no headset, seconds in CI.
-- [`tools/xr-probe/`](tools/xr-probe/) - which OpenXR runtime a process would actually get. Needs no headset.
-
-Run [`scripts/check-toolchain.ps1`](scripts/check-toolchain.ps1) to see what the machine is missing; [`scripts/install-toolchain.ps1`](scripts/install-toolchain.ps1) installs it. [`scripts/check-patches.ps1`](scripts/check-patches.ps1) answers "do the patches still apply", against the pinned tag or against upstream `main`.
-
-## Goal
-
-Build a Windows VR spectator mod that integrates with CS2 itself. CS2 should continue to load maps, play demos, animate players, simulate effects, and render the world. The mod should connect the spectator camera and rendering pipeline to a VR headset.
-
-The intended experience is to stand beside a bombsite, look around naturally, lean to inspect the action, and move between spectator positions while a recorded match plays. This requires actual stereoscopic rendering and head tracking, rather than displaying the desktop on a virtual screen.
-
-## Existing reference: Portal 2 VR
-
-The organization's [Portal 2 VR integration](https://github.com/vr-meta/portal2vr) is the primary reference for this project.
-
-Its README describes a DXVK-based `d3d9.dll` that combines Direct3D 9-to-Vulkan translation with a VR mod, submits stereo frames to SteamVR, and supports head tracking and motion controllers. It also provides Windows installation, launch, build, and packaging workflows.
-
-Study that project for:
-
-- Headset pose handling, coordinate conversion, world scale, and recentering.
-- Per-eye camera setup and stereo frame submission.
-- VR lifecycle, configuration, diagnostics, and recovery.
-- Windows installation, removal, and release packaging.
-
-This is not a drop-in port. Portal 2 uses Source 1 and the reference mod builds for x86 around Direct3D 9. CS2 uses Source 2 and a different, 64-bit rendering stack. Engine interfaces, camera integration, render targets, synchronization, and loading mechanisms must be investigated independently.
-
-Review the licenses and provenance of individual components before copying code; an accessible source repository is not by itself permission to reuse every component.
-
-## Initial scope
-
-- Windows PC running a legitimate Steam installation of CS2.
-- Meta Quest 3 connected through a PC VR connection.
-- Local `.dem` playback on one initial test map.
-- A spectator camera with independent headset rotation and positional tracking.
-- Correct left-eye and right-eye images from the same simulation state.
-- Recenter, fixed observation positions, and basic spectator navigation.
-- Pause, resume, and seeking using CS2's demo playback capabilities.
-- Minimal diagnostics for compatibility, rendering, and frame timing.
-
-The first prototype does not include competitive gameplay, VR weapons or hands, standalone Quest execution, or live tournament feeds. A tabletop map view and player-follow modes can be explored after the core renderer works.
-
-## Proposed architecture
-
-```text
-CS2 local demo playback
-        |
-        v
-Spectator camera and Source 2 render integration
-        ^                         |
-        |                         v
-Headset pose                 Left/right eye textures
-        |                         |
-        +------ VR runtime -------+
-                    |
-                    v
-             Meta Quest 3
-```
-
-### Engine adapter
-
-Integrate with the spectator camera and scene-rendering lifecycle. Compose a spectator anchor with the tracked head pose and eye offsets. Render both eyes without advancing the match between them.
-
-Investigate [HLAE / AdvancedFX](https://github.com/advancedfx/advancedfx) as a reference for CS2 camera and engine integration. Do not assume it already exposes the stereo rendering path needed here.
-
-### VR bridge
-
-Receive predicted headset poses, obtain per-eye projections, manage graphics resources, and submit frames to the VR compositor.
-
-Evaluate OpenXR as the initial runtime API. Compare it with the OpenVR/SteamVR integration used by Portal 2 VR before committing to a backend. SteamVR runtime support and the choice of API are separate decisions.
-
-### Spectator controls
-
-Keep head movement independent of player aim and automatic observer camera rotations. Start with a fixed camera anchor and recentering, then add selectable positions and optional navigation with snap turning.
-
-### Launcher and diagnostics
-
-Eventually provide an explicit demo-viewing launcher, reversible installation, readable logs, and checks for supported game builds. Detect unsupported integration points and stop with an actionable error rather than continuing with invalid assumptions.
-
-## Milestones and acceptance criteria
-
-### 1. Inspect the reference and identify CS2 integration points
-
-- Trace the Portal 2 VR pose-to-camera and render-to-compositor paths.
-- Document reusable concepts and engine-specific dependencies.
-- Inspect current CS2 camera/render integration options.
-- Select one graphics backend and a VR API for the experiment.
-- Record the exact CS2 build, headset runtime, GPU, and graphics settings.
-
-**Done when:** a short technical note identifies the candidate camera and rendering integration points, remaining unknowns, and the first experiment.
-
-### 2. Head-tracked camera on a paused demo
-
-- Open a local demo and pause on a known scene.
-- Apply headset rotation and translation to a spectator camera.
-- Validate axes, handedness, world scale, and recentering.
-
-**Done when:** turning and leaning move the camera consistently while the demo remains paused. This milestone alone is not full VR.
-
-### 3. True stereo rendering
-
-- Render separate views with the runtime-provided eye poses and projections.
-- Keep both eyes on the same demo state.
-- Submit both images to the headset.
-- Check depth, clipping, visibility, shadows, particles, smoke, and temporal effects.
-
-**Done when:** a paused scene has stable binocular depth and correct head response, with no eye mismatch or simulation advancement between views.
-
-**Feasibility gate:** if the current engine cannot render two correct views without unacceptable instability or cost, document the evidence before expanding scope. Do not silently replace stereo with a flat virtual screen.
-
-### 4. Continuous demo playback
-
-- Resume the match while keeping headset tracking responsive.
-- Handle pause, seek, map reload, and VR session loss.
-- Measure CPU/GPU frame times, dropped frames, and reprojection.
-- Target stable native rendering at a selected Quest refresh rate, starting with 72 Hz; record hardware, resolution, and settings with results.
-
-**Done when:** a complete round plays with synchronized eyes, usable head tracking, and documented performance and visual limitations.
-
-### 5. Usable spectator prototype
-
-- Add observation-point selection, recentering, and basic playback controls.
-- Provide a readable VR control surface or overlay.
-- Package a reversible Windows setup and removal workflow.
-- Publish reproducible setup steps and a demonstration recording.
-
-**Done when:** another user with the documented hardware and software can install the prototype, watch a local demo in VR, and remove it.
-
-## Main technical risks
-
-| Risk | What must be verified |
+| It says | It means |
 | --- | --- |
-| Source 2 stereo integration | Two independent views can be rendered from one simulation state. |
-| Temporal rendering | History buffers, post-processing, smoke, and other effects remain correct for each eye. |
-| Visibility and camera handling | Culling and clipping use the correct eye views and support positional tracking. |
-| Performance | Rendering twice leaves enough CPU and GPU time for comfortable headset updates. |
-| Runtime synchronization | Pose prediction, texture ownership, and frame submission remain consistent. |
-| Game updates | Unsupported builds are detected; integration assumptions can be revalidated. |
-| Comfort | Camera motion stays under spectator control, with stable world scale and recentering. |
+| `build  !` …is build X but this release was made for build Y | CS2 has updated. The hook checks the game's memory layout and refuses to move the camera if it changed — the view then ignores your head. Look for a newer release. |
+| `SteamVR   RUNNING` | On a Quest over Link, SteamVR holds the headset, and a second VR program beside it is never given a frame: the game freezes. Close it. |
+| `Link      Meta's VR service is NOT running` | No headset for the game to find. Start Link first. |
+| `hook      NOT FOUND` | The zip was unpacked partly, or the folders were rearranged. |
 
-## Operating boundaries
+## Controls
 
-Development and initial use are restricted to local demo playback in a dedicated CS2 launch with `-insecure`. The project must not bypass anti-cheat, hide injected modules, or attach to competitive matchmaking sessions.
+Watching a demo (the hook prints the live table with **PgUp**, into `console.log`):
 
-This restriction is a project boundary, not a guarantee against account sanctions. `-allow_third_party_software` is not a substitute for isolating the prototype from protected online play. See [Valve's Trusted Mode documentation](https://help.steampowered.com/en/faqs/view/09A0-4879-4353-EF95).
+| Left controller | | Right controller | |
+| --- | --- | --- | --- |
+| stick | fly, in the direction you look | stick | snap turn; up/down to rise and descend |
+| stick click | camera: first person → chase → free | stick click | show / hide the HUD (hold: recentre) |
+| trigger | previous player | trigger | next player |
+| grip | free look on / off | grip | back onto the player |
+| X / Y | back / forward 10 s | A / B | pause / slow motion |
+| Menu | CS2's own menu on a screen (hold: Escape) | | |
 
-Do not redistribute CS2 binaries, maps, or other Valve assets. The user supplies their installed game and demo files.
+Your head is always free. Lean, crouch and step and the camera moves with you. The HUD —
+score, radar, timeline — hangs around you as panels that follow your position and keep
+their direction. Keyboard equivalents are in `cfg\vr_keys.cfg`; **F9 / F5** start and stop
+the headset session, and the arrow keys switch players and camera.
 
-## Future work
+Playing offline against bots works too, and is rougher: `cs2vr.exe play de_inferno`. The
+left stick walks where you look, the right controller aims like a pistol — a crosshair
+shows where the shot will really go, which trails your hand by a frame or two — the right
+trigger fires, the right stick snap-turns. Treat it as an experiment; the thinking behind
+it is in [`docs/07-release-plan.md`](docs/07-release-plan.md).
 
-Once local replay viewing works:
+## What to expect
 
-- Player-follow cameras with independent head orientation.
-- Tabletop viewing with adjustable world scale.
-- Bookmarked moments and spectator viewpoints.
-- Live spectating, subject to authorized feed access, delay, and a separately validated operating model.
+- **About 35 frames a second** on the reference machine, where the headset wants 72. Head
+  turns are smooth regardless — the pose each image was drawn from is reported exactly, so
+  the runtime's reprojection holds the world still — but the edges smear during fast turns
+  and moving through the map is not as smooth as looking around it. Most of a frame is not
+  the game rendering, so lowering the graphics settings does not help
+  ([where the frame goes](docs/experiments/13-where-the-frame-goes.md)).
+- **The game window is the size of one eye** (2528×2780 by default) and taller than most
+  monitors. Windows clips it; that is expected. It also means there is no usable console on
+  the monitor — use the menu in the headset, a key, or a config.
+- **Player name tags are off.** CS2 lays them out once per frame for a flat screen; they
+  cannot be right in two eyes ([why](docs/experiments/15-hud-per-eye.md)). The x-ray
+  outlines are drawn in the world and work.
+- **Only Meta's PC runtime has been worn.** SteamVR with other headsets should work — the
+  frame is submitted in the runtime's own frustum either way — but nobody has tried.
 
-## References
+- **Only ever start it with `cs2vr.exe`.** Do not load `hook\x64\AfxHookSource2.dll` by
+  hand into a CS2 you started from Steam. The hook checks for `-insecure` itself, and
+  without it puts up an error dialog and ends the game — and if it cannot end it, a dialog
+  that never closes. With a headset on, a dialog on the monitor is invisible: the game just
+  appears to hang. `cs2vr.exe` has no way to start the game without `-insecure`, so this
+  only happens to people who go round it.
 
-- [vr-meta/portal2vr](https://github.com/vr-meta/portal2vr) - existing integration in this organization.
-- [Gistix/portal2vr](https://github.com/Gistix/portal2vr) - upstream Portal 2 VR project.
-- [AdvancedFX](https://github.com/advancedfx/advancedfx) - engine and spectator-camera integration reference.
-- [Khronos OpenXR Guide](https://github.com/KhronosGroup/OpenXR-Guide) - runtime integration and frame submission.
+If something goes wrong, the hook's side of the story is in
+`<CS2>\game\csgo\console.log`, on the lines starting `AFXVR:`. Include them in an issue,
+with the output of `cs2vr.exe check`.
 
-This is an independent experimental project, not an official Valve or Meta product.
+## How it works
+
+CS2's own stereo hooks are dead ends. Stereo comes from [HLAE](https://www.advancedfx.org/)'s
+multi-pass rendering, which re-renders one frame several times, plus a change of ours that
+gives each pass its own camera: the engine resolves the camera once per frame, but the
+object holding it is persistent and re-read by every pass, so rewriting it between passes
+separates the eyes. The two passes go to OpenXR as one projection layer; the HUD and CS2's
+menu go separately, as panels in space.
+
+How each part was established — including the explanations that turned out wrong — is in
+[`docs/`](docs/README.md), one experiment per question.
+
+## Building it and changing it
+
+[CONTRIBUTING.md](CONTRIBUTING.md): the toolchain, how the source is laid out (our files,
+plus patches against HLAE), building the hook and the launcher, the tests, the two kinds of
+launch, and the rules that were each paid for. Open work is in the
+[issues](https://github.com/vr-meta/cs2-vr-spectator/issues); the plan is
+[`docs/07-release-plan.md`](docs/07-release-plan.md).
+
+The hook is built on [advancedfx / HLAE](https://github.com/advancedfx/advancedfx) (MIT).
+Everything else that ships in a release is listed in [THIRD-PARTY.md](THIRD-PARTY.md). The
+organisation's [Portal 2 VR](https://github.com/vr-meta/portal2vr) was the reference for
+what a VR integration of a Source game has to get right.
+
+## Licence
+
+**[PolyForm Noncommercial 1.0.0](LICENSE)** — use it, change it, share it, for any
+noncommercial purpose. Commercial use is not licensed. Keep the notice:
+
+> Required Notice: Copyright 2026 butschster \<butschster@gmail.com\>
+
+That makes this project **source-available, not open source** in the OSI sense, and it is
+worth saying plainly before anyone spends an evening on it: contributions are welcome and
+the code is here to be read and improved, but the noncommercial restriction is real and
+GitHub will show the licence as non-standard.
+
+The parts that are not ours keep their own terms regardless of that — you retain your MIT
+rights to the advancedfx code inside `AfxHookSource2.dll`, and Apache-2.0 to the OpenXR
+loader. [THIRD-PARTY.md](THIRD-PARTY.md) has the list.
