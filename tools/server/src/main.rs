@@ -173,19 +173,41 @@ fn follow(
             locate(&shared, fixed_log.as_deref(), fixed_csgo.as_deref());
         }
 
-        let path = shared.lock().unwrap().log_path.clone();
+        let mut more_to_read = false;
+        let (path, offset) = {
+            let guard = shared.lock().unwrap();
+            (guard.log_path.clone(), guard.follower.offset())
+        };
+
         if let Some(path) = path {
+            // Read with no lock held. Holding it across the read and the parse is what
+            // made a request that asked for 1200 ms take 16933 while a long log was being
+            // folded for the first time.
+            let chunk = logtail::read_chunk(&path, offset);
             let now = now_ms(start);
             let mut guard = shared.lock().unwrap();
-            match guard.follower.poll(&path, now) {
-                Ok(_) => guard.trouble = None,
+            match chunk {
+                Ok(logtail::Chunk::Nothing) => guard.trouble = None,
+                Ok(logtail::Chunk::Relaunched) => {
+                    guard.follower.relaunched();
+                    guard.trouble = None;
+                }
+                Ok(logtail::Chunk::Bytes { from, bytes }) => {
+                    more_to_read = logtail::CHUNK == bytes.len();
+                    guard.follower.absorb(from, &bytes, now);
+                    guard.trouble = None;
+                }
                 Err(error) => {
                     guard.trouble = Some(format!("{} cannot be read: {error}", path.display()));
                 }
             }
         }
 
-        std::thread::sleep(POLL);
+        // Catching up on a backlog should not be paced at the idle rate; only wait when
+        // the file has actually been drained.
+        if !more_to_read {
+            std::thread::sleep(POLL);
+        }
     }
 }
 
@@ -320,7 +342,14 @@ fn route(head: &http::Head, body: &str, shared: &Arc<Mutex<Shared>>, start: Inst
             let since = http::query_param(&head.query, "since")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            json_response(&log_json(shared, since))
+            // The hook's own lines by default, because that is what a status pane is for.
+            // `?all=1` is the whole console, which is what you want when reading a
+            // command's answer by hand.
+            let ours_only = !matches!(
+                http::query_param(&head.query, "all").as_deref(),
+                Some("1") | Some("true") | Some("")
+            );
+            json_response(&log_json(shared, since, ours_only))
         }
         ("POST", "/command") => command(body, shared, head),
         ("GET", _) => http::error(404, "no such thing here. Try /, /state or /log."),
@@ -373,9 +402,9 @@ fn state_json(shared: &Arc<Mutex<Shared>>, start: Instant) -> String {
     o.finish()
 }
 
-fn log_json(shared: &Arc<Mutex<Shared>>, since: u64) -> String {
+fn log_json(shared: &Arc<Mutex<Shared>>, since: u64, ours_only: bool) -> String {
     let guard = shared.lock().unwrap();
-    let (lines, cursor, missed) = guard.follower.since(since);
+    let (lines, cursor, missed) = guard.follower.since(since, ours_only);
     let encoded: Vec<String> = lines
         .iter()
         .map(|line| {
@@ -392,10 +421,15 @@ fn log_json(shared: &Arc<Mutex<Shared>>, since: u64) -> String {
     o.finish()
 }
 
-/// How long to keep collecting after the last line arrived before deciding the game has
-/// finished answering. Longer than the follower's own poll, or the quiet would be ours
-/// rather than the game's.
-const QUIET: Duration = Duration::from_millis(400);
+/// How long to keep collecting once the echo has been seen.
+///
+/// This was a quiet gap - stop when nothing new has arrived for a while - until a real
+/// session showed why that cannot work: a demo playing prints frame-time lines twice a
+/// second and `[Demo] Demo Skipping` lines besides, so the log is never quiet and the
+/// quiet gap only ever expired at the deadline. A fixed window after the echo is
+/// predictable whether the game is talking or silent. Longer than the follower's own poll,
+/// or the answer would be cut off by our own reading rather than by the game's finishing.
+const AFTER_ECHO: Duration = Duration::from_millis(450);
 const DEFAULT_WAIT: u64 = 1200;
 const MAX_WAIT: u64 = 5000;
 
@@ -421,34 +455,43 @@ fn command(body: &str, shared: &Arc<Mutex<Shared>>, head: &http::Head) -> Vec<u8
     // the answer can be waited for instead of slept through. Only an echo whose text is
     // the line we wrote counts: several unrelated warnings share the `pipe: ` prefix.
     let deadline = Instant::now() + Duration::from_millis(wait);
-    let mut echoed = false;
-    let mut last_change = Instant::now();
+    let mut echoed_at: Option<Instant> = None;
+    let mut echo_cursor: Option<u64> = None;
     let mut seen = before;
 
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));
-        let cursor = {
+        {
             let guard = shared.lock().unwrap();
-            let (lines, cursor, _) = guard.follower.since(seen);
+            let (lines, cursor, _) = guard.follower.since(seen, true);
             for l in &lines {
                 if let Some(afxvr::Event::PipeEcho(text)) = afxvr::parse_line(&l.text) {
-                    if text.trim() == line {
-                        echoed = true;
+                    if text.trim() == line && echo_cursor.is_none() {
+                        echo_cursor = Some(l.cursor);
+                        echoed_at = Some(Instant::now());
                     }
                 }
             }
-            cursor
-        };
-        if cursor != seen {
             seen = cursor;
-            last_change = Instant::now();
-        } else if echoed && QUIET < last_change.elapsed() {
-            break;
+        }
+        if let Some(at) = echoed_at {
+            if AFTER_ECHO < at.elapsed() {
+                break;
+            }
         }
     }
 
+    let echoed = echoed_at.is_some();
     let guard = shared.lock().unwrap();
-    let (lines, cursor, missed) = guard.follower.since(before);
+    // From the echo, not from when the line was written. The engine runs a queued command
+    // when it gets to it, and during a demo skip that was seventeen seconds later - so
+    // starting at the write buried a four-line answer under a hundred and seventy lines of
+    // the game talking to itself.
+    let from = echo_cursor.map(|c| c - 1).unwrap_or(before);
+    // Everything, not just the prefixed lines: `mirv_vr_version` answers with a plain
+    // `cs2-vr-spectator 0.0.0-dev` and three indented lines, and a reply that dropped all
+    // four while keeping the echo of the question is not a reply.
+    let (lines, cursor, missed) = guard.follower.since(from, false);
     let encoded: Vec<String> = lines
         .iter()
         .map(|line| {

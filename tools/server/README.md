@@ -23,7 +23,7 @@ cargo test --manifest-path tools/server/Cargo.toml
 |---|---|
 | `GET /` | the page: state, map picker, console, and the dials that get tuned while worn |
 | `GET /state` | mode, map, frame rate, per-eye size, session state, hook and CS2 build |
-| `GET /log?since=N` | the `AFXVR:` lines after cursor N, and the next cursor |
+| `GET /log?since=N` | the `AFXVR:` lines after cursor N, and the next cursor (`&all=1` for the whole console) |
 | `POST /command` | one console line as the body; answers with what the log gained |
 
 ```sh
@@ -68,25 +68,41 @@ There are no dependencies, on purpose. This process writes console commands into
 through a pipe ACL'd to one user; every crate would live inside that boundary, and what it
 actually needs is a socket, a file and sixty lines of JSON.
 
-## What has never run against a real session
+## What the first worn session proved, and what it broke
 
-Everything below was written from the hook's source and is covered by tests that do not
-need a game. None of it has touched a running CS2, so the first worn session is where it
-gets found out — and that is worth knowing before trusting it:
+Verified against a live `start-vr.ps1` session on 2026-09-20: the process lookup, the
+relaunch detection against a real truncation, the pipe write end to end, the echo
+correlation, and `/state` reporting `watching` on `de_mirage` at 2528x1600 per eye with the
+session `FOCUSED`.
 
-- **the success branch of `pipe::send`.** Only the "no pipe at all" error path has ever
-  executed. The connect, the write and the retry around the hook re-creating the pipe are
-  unproven.
-- **`cs2::running()`** — `CreateToolhelp32Snapshot` and `QueryFullProcessImageNameW`. With
-  no `cs2.exe` to find it has only ever returned `None`. The path derivation from an
-  executable is tested; the two syscalls are not.
-- **the echo correlation in `POST /command`** against the real hook. The waiting logic is
-  exercised by the follower's tests; the round trip through the game is not.
-- **the page against live traffic**: the sliders, the map picker and the console pane under
-  a session that is actually talking.
+It also found four faults that no test without a game could have found, all now fixed and
+all with a test of their own:
+
+- **Real lines carry `MM/DD HH:MM:SS ` in front of them** and the parser anchored at column
+  0. Of 210 hook lines it matched the four continuation lines of multi-line messages — the
+  only ones with no stamp — and missed every line that mattered. It looked from outside
+  like a cursor that was stuck. The stamp is now stripped when present and never required.
+- **console.log opens with a UTF-8 BOM**, which sits in front of the first line of a fold
+  from byte zero.
+- **A command's answer is usually not prefixed.** `mirv_vr_version` echoes
+  `AFXVR: pipe: mirv_vr_version` and then prints a plain banner with indented continuation
+  lines; keeping only prefixed lines returned the echo of a question and threw away its
+  answer. Every line is now kept, with `/log` filtering to the hook's own by default and
+  `?all=1` for the whole console.
+- **The follower held the server's lock across the whole read and parse.** Joining a
+  session whose log was already 6 MB blocked requests: a `POST /command` that asked for at
+  most 1200 ms took 16933. Reading now happens with no lock held, in 512 KB turns.
+
+Still not exercised: the **MENU -> PLAY** walk (the first session auto-played a demo, so it
+went MENU -> WATCH), and the **page under live traffic** — the sliders and the map picker
+have only been driven by hand with `curl`.
 
 ## Notes from the log it reads
 
+- `-condebug` writes `MM/DD HH:MM:SS ` in front of the **first** line of each message and
+  leaves the continuation lines of a multi-line one at column 0, and the file opens with a
+  UTF-8 BOM. A parser must strip both and require neither.
+- A command's **answer is usually not `AFXVR:`-prefixed** — only the hook's echo of it is.
 - The mode line is printed **only when the mode changes**, and nothing dumps the current
   one. So the file is folded from byte zero at startup, not tailed.
 - The frame-rate lines need `mirv_vr_xr fps 1`, which `vr.cfg` sends on every supported

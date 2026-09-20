@@ -73,10 +73,50 @@ pub enum Event {
 
 const AFXVR: &str = "AFXVR: ";
 
+/// What CS2 puts in front of a line before the hook's own text starts.
+///
+/// `-condebug` stamps `MM/DD HH:MM:SS ` on the FIRST line of each message and leaves the
+/// continuation lines of a multi-line `advancedfx::Message` at column 0. So the stamp is
+/// stripped when it is there and never required: 206 of the 210 AFXVR lines in the first
+/// real session carried one, and demanding it would have thrown away the other four -
+/// while matching at column 0 alone, as this did at first, kept ONLY those four and missed
+/// every line that mattered.
+fn strip_stamp(line: &str) -> &str {
+    let b = line.as_bytes();
+    let stamped = 15 <= b.len()
+        && b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b'/' == b[2]
+        && b[3].is_ascii_digit()
+        && b[4].is_ascii_digit()
+        && b' ' == b[5]
+        && b[6].is_ascii_digit()
+        && b[7].is_ascii_digit()
+        && b':' == b[8]
+        && b[9].is_ascii_digit()
+        && b[10].is_ascii_digit()
+        && b':' == b[11]
+        && b[12].is_ascii_digit()
+        && b[13].is_ascii_digit()
+        && b' ' == b[14];
+    if stamped {
+        &line[15..]
+    } else {
+        line
+    }
+}
+
+/// The line with everything that is not the hook's own words taken off the front: the
+/// stamp, and the UTF-8 byte order mark that console.log opens with and that therefore
+/// sits in front of the very first line of a fold from byte zero.
+pub fn strip_noise(line: &str) -> &str {
+    strip_stamp(line.trim_start_matches('\u{feff}'))
+}
+
 /// True for the lines this program keeps. Everything else in console.log belongs to the
 /// game and is none of our business.
 pub fn is_afxvr(line: &str) -> bool {
-    line.starts_with("AFXVR:")
+    strip_noise(line).starts_with("AFXVR:")
 }
 
 fn after<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
@@ -123,7 +163,9 @@ const SESSION_STATES: [&str; 9] = [
 /// One console line in, at most one fact out.
 pub fn parse_line(line: &str) -> Option<Event> {
     let line = line.trim_end_matches(['\r', '\n']);
-    let rest = after(line, AFXVR)?;
+    // Anchored, not searched. A game line that happens to quote `AFXVR: ` in the middle of
+    // itself is the game talking about us, not us talking.
+    let rest = strip_noise(line).strip_prefix(AFXVR)?;
 
     if rest.starts_with("mode ") {
         let r = after(rest, "mode ")?;
@@ -473,6 +515,57 @@ mod tests {
         );
     }
 
+    // What a line off a real disk looks like. The first fixtures this parser was built
+    // against had been run through a sed that stripped the stamp, and nobody knew: the
+    // server then matched four continuation lines out of 210 and looked, from the outside,
+    // like a cursor that was stuck.
+    #[test]
+    fn reads_a_line_with_the_timestamp_condebug_puts_on_it() {
+        match parse_line(
+            "09/20 12:14:32 AFXVR: mode MENU (map \"<empty>\", demo 0, cursor 1, button 0) - a screen",
+        ) {
+            Some(Event::Mode { mode, map, .. }) => {
+                assert_eq!(Mode::Menu, mode);
+                assert_eq!(None, map);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(is_afxvr(
+            "09/20 12:14:30 AFXVR: console pipe open at \\\\.\\pipe\\cs2vr, for this user only."
+        ));
+        assert_eq!(
+            Some(Event::PipeEcho("mirv_vr_version".to_string())),
+            parse_line("09/20 12:15:45 AFXVR: pipe: mirv_vr_version")
+        );
+    }
+
+    #[test]
+    fn a_continuation_line_has_no_timestamp_and_is_still_ours() {
+        // condebug stamps only the first line of a multi-line message, so requiring a
+        // stamp would lose these.
+        assert!(is_afxvr(
+            "AFXVR: named pipe. mirv_vr_pipe 0 closes it."
+        ));
+    }
+
+    #[test]
+    fn the_byte_order_mark_at_the_head_of_the_file_is_not_part_of_the_line() {
+        // console.log opens with EF BB BF, which lands in front of the very first line of
+        // a fold from byte zero.
+        assert!(is_afxvr("\u{feff}09/20 12:14:30 AFXVR: recentred."));
+        assert_eq!(
+            Some(Event::SessionState("FOCUSED".to_string())),
+            parse_line("\u{feff}09/20 12:14:33 AFXVR: session FOCUSED - visible and receiving input")
+        );
+    }
+
+    #[test]
+    fn the_game_quoting_us_is_not_us() {
+        assert_eq!(None, parse_line("Some game line mentioning AFXVR: mode PLAY (map \"x\", demo 0, cursor 0, button 0) - a screen"));
+        // And something stamp-shaped but not a stamp stays where it is.
+        assert_eq!(None, parse_line("12/34 56:78:90AFXVR: recentred."));
+    }
+
     #[test]
     fn ignores_the_game_and_the_unremarkable() {
         assert_eq!(None, parse_line("Host_Changelevel: de_inferno"));
@@ -484,14 +577,17 @@ mod tests {
 
     #[test]
     fn folds_a_session_down_to_what_is_true_now() {
+        // Stamped, BOM and all, the way the file actually reads.
         let lines = [
-            "AFXVR: cs2-vr-spectator 0.0.0-dev, built for CS2 2000908. https://example.invalid",
-            "AFXVR: console pipe open at \\\\.\\pipe\\cs2vr, for this user only.",
-            "AFXVR: mode MENU (map \"<empty>\", demo 0, cursor 1, button 0) - a screen",
-            "AFXVR: menu screen, 72.0 frames/s at 2560x1600",
-            "AFXVR: session FOCUSED - visible and receiving input",
-            "AFXVR: mode PLAY (map \"de_inferno\", demo 0, cursor 0, button 0) - world in both eyes",
-            "AFXVR: 71.8 frames/s submitted at 2528x2780 per eye (13.93 ms)",
+            "\u{feff}09/20 12:14:31 AFXVR: cs2-vr-spectator 0.0.0-dev, built for CS2 2000908. https://example.invalid",
+            "09/20 12:14:30 AFXVR: console pipe open at \\\\.\\pipe\\cs2vr, for this user only.",
+            "09/20 12:14:32 AFXVR: mode MENU (map \"<empty>\", demo 0, cursor 1, button 0) - a screen",
+            "09/20 12:14:34 AFXVR: menu screen, 72.0 frames/s at 2560x1600",
+            "09/20 12:14:34 AFXVR: session FOCUSED - visible and receiving input",
+            "09/20 12:15:02 AFXVR: mode PLAY (map \"de_inferno\", demo 0, cursor 0, button 0) - world in both eyes",
+            // The per-eye size is whatever the clamped client rect is - 2528x1600 on the
+            // machine this came from, not the 2780 rows the window asked for.
+            "09/20 12:15:04 AFXVR: 71.8 frames/s submitted at 2528x1600 per eye (13.93 ms)",
         ];
         let mut state = State::default();
         for line in lines {
@@ -505,7 +601,7 @@ mod tests {
         assert_eq!(Some("2000908".to_string()), state.cs2_build_tested);
         assert_eq!(Some(true), state.pipe_open);
         assert_eq!(Some(71.8), state.fps(1_000));
-        assert_eq!(Some((2528, 2780)), state.per_eye(1_000));
+        assert_eq!(Some((2528, 1600)), state.per_eye(1_000));
     }
 
     #[test]
