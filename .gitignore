@@ -6,3 +6,7 @@
 # What the experiment scripts leave behind.
 *.tga
 *.log
+
+# Headset recordings pulled off the Quest. Hundreds of megabytes each, and they are
+# captures of the operator's own sessions - never the repository's business.
+recordings/
