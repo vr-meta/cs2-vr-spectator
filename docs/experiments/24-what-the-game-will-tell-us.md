@@ -25,16 +25,42 @@ because it means this whole question cost the operator nothing.
   `launch-cs2-experiment.ps1 -SelfBuilt -Demo pro_mirage -ExecCfg exp24_gsi`
 - **Run 2, PLAY.** Eight bots on de_dust2. `-ExecCfg exp24_gsi_play`
 
-Both at 2560x1600 **on purpose**: `setting.fullscreen 1` is still in `cs2_video.txt`, so
-`-windowed` is ignored and the game takes the display. Asking for the resolution the desktop
-is already in makes that a no-op instead of rearranging every window on the machine
-(experiment 22). CS2 duly rewrote `setting.defaultresheight` from 2780 to 1600 on exit, as it
-always does; harmless only because every launcher states the size explicitly.
+Both ran at **2560x1600**, and that number is a technique rather than a detail of these two
+runs — see below.
 
 Receiving side: `scratchpad/gsi-listen.ps1`, a raw `TcpListener` on 127.0.0.1:57448. A raw
 socket rather than `HttpListener` because that wants a urlacl reservation or elevation, and
 CS2 sends an ordinary POST with `Content-Length`. It answers `200 OK` *before* writing
 anything to disk, because CS2 treats a slow consumer as a timeout.
+
+## A technique: launch at the desktop's own resolution when the measurement is not about pixels
+
+Worth stating on its own, because it applies to every future desk run and not just to this
+one.
+
+`setting.fullscreen 1` in CS2's own `cs2_video.txt` makes the game ignore `-windowed` and take
+the display. Any per-eye size no monitor offers snaps to the driver's nearest legal mode, the
+desktop mode changes with it, and every window on the machine is rearranged — experiment 22
+spent a whole investigation on the consequences of that, and experiment 23's "fix" for it cost
+about 31° of vertical FOV before being reverted.
+
+The usual responses are to fight it: set `setting.fullscreen 0` (measured expensive), or edit
+the file and restore it afterwards (CS2 rewrites the file on exit, so the restore has to be
+sequenced after the process ends, and a crash leaves it wrong).
+
+**A third option removes the variable instead of fighting it: ask for the resolution the
+desktop is already in.** Then the snap-to-nearest-mode is a no-op, nothing on the desktop
+moves, and the file is left alone. It costs nothing, needs no cleanup, and cannot leave the
+machine in a worse state than it started.
+
+The condition is that the measurement must not be *about* the render size — true here, where
+the data arrives over a socket and the picture is irrelevant. It is not true for any stereo,
+crop or FOV experiment, and those still need a stated size.
+
+CS2 duly rewrote `setting.defaultresheight` from 2780 to 1600 on exit, as it always does.
+Harmless only because every launcher in this project states the size explicitly; it is exactly
+the path by which a size typed once at a desk ended up running a worn session at a quarter of
+the pixels.
 
 ## Does GSI work with `-insecure` and a DLL injected
 
