@@ -351,6 +351,74 @@ void FollowLog(const std::string & path, HANDLE process, int seconds) {
     Say("", "Still nothing from the hook. The lines above, and game\\csgo\\console.log, say why.");
 }
 
+// --- talking to a session that is already running ----------------------------------------
+
+// The hook opens \\.\pipe\cs2vr and runs whatever line arrives on the engine thread. It is
+// the only way to reach a worn session: the game window is taller than the display, Windows
+// clamps it, and Panorama puts the console's input line off the bottom of the screen.
+//
+// One line, one command, no reply - the answer appears in console.log.
+bool SendToSession(const std::string & line, std::string & why) {
+    HANDLE pipe = CreateFileW(L"\\\\.\\pipe\\cs2vr", GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (INVALID_HANDLE_VALUE == pipe) {
+        DWORD e = GetLastError();
+        why = (ERROR_FILE_NOT_FOUND == e)
+            ? "no session is listening. Is CS2 running, started by this program?"
+            : LastErrorText(e);
+        return false;
+    }
+    std::string payload = line + "\n";
+    DWORD written = 0;
+    bool ok = 0 != WriteFile(pipe, payload.c_str(), (DWORD)payload.size(), &written, nullptr);
+    if (!ok) why = LastErrorText(GetLastError());
+    CloseHandle(pipe);
+    return ok;
+}
+
+// Whether there is a person at a keyboard. Piped or redirected, there is not, and asking a
+// question nobody can answer would hang a script instead of failing it.
+bool HaveConsoleInput() {
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    if (INVALID_HANDLE_VALUE == in || nullptr == in) return false;
+    DWORD mode = 0;
+    return 0 != GetConsoleMode(in, &mode);
+}
+
+// The maps a bot match is worth starting on: CS2's own active duty group, which is what
+// `map <name>` accepts without a workshop subscription. Anything else can still be typed.
+const char * const kMaps[] = {
+    "de_inferno", "de_mirage", "de_nuke", "de_ancient",
+    "de_anubis", "de_dust2", "de_train", "de_overpass",
+};
+
+// Choosing a map without CS2's menu.
+//
+// This exists because CS2's own menu, shown on a panel in the headset, is the awkward part
+// of this whole program: its PLAY page is longer than any window, the start button sits
+// below the fold, and getting to it with a controller ray is a fight. None of that matters
+// if the match is already chosen before the game starts - so it is, here, where there is a
+// keyboard and a screen and no headset on anybody's face yet.
+std::string AskForMap() {
+    printf("\n  Which map?\n\n");
+    for (size_t i = 0; i < sizeof(kMaps) / sizeof(kMaps[0]); i++) {
+        printf("    %u  %s\n", (unsigned)(i + 1), kMaps[i]);
+    }
+    printf("\n  A number, or a map name: ");
+    fflush(stdout);
+
+    char line[128] = "";
+    if (!fgets(line, sizeof(line), stdin)) return std::string();
+    std::string answer(line);
+    while (!answer.empty() && ('\n' == answer.back() || '\r' == answer.back() || ' ' == answer.back())) {
+        answer.pop_back();
+    }
+    if (answer.empty()) return std::string();
+
+    int pick = atoi(answer.c_str());
+    if (pick >= 1 && pick <= (int)(sizeof(kMaps) / sizeof(kMaps[0]))) return kMaps[pick - 1];
+    return answer;
+}
+
 // --- the command line ------------------------------------------------------------------
 
 struct Arguments {
@@ -644,6 +712,61 @@ int wmain(int argc, wchar_t ** argv) {
     ResumeThread(child.hThread);
     Say("", "CS2 is starting with the hook in it.");
     if (args.follow) FollowLog(cs2.consoleLog, child.hProcess, 240);
+
+    // Stay, and be the one thing the person in the headset can be helped with.
+    //
+    // A headset session can end without the game ending: the runtime takes the session
+    // away when the headset sleeps or its dashboard comes up, and autostart only tries for
+    // the first half minute. Until now the only way back was a keypress into a window whose
+    // console cannot be reached, or somebody writing to the named pipe by hand - which is
+    // exactly what had to be done, twice, on the day this was first worn. Nobody who
+    // downloaded a zip could have done either.
+    //
+    // So the program does not exit. Whoever is helping - and there usually is somebody,
+    // because a headset makes you dependent on the room - has a key for it.
+    if (HaveConsoleInput()) {
+        printf("\n  The game is running. This window is now the remote control:\n\n"
+               "    r  put the picture back in the headset  (mirv_vr_xr start)\n"
+               "    s  stop the headset session, leave the game running\n"
+               "    c  type a console command straight into the game\n"
+               "    q  leave the game running and close this window\n\n");
+        for (;;) {
+            if (WAIT_OBJECT_0 == WaitForSingleObject(child.hProcess, 0)) {
+                Say("", "CS2 has exited.");
+                break;
+            }
+            printf("  > ");
+            fflush(stdout);
+
+            char line[512] = "";
+            if (!fgets(line, sizeof(line), stdin)) break;
+            std::string answer(line);
+            while (!answer.empty() && ('\n' == answer.back() || '\r' == answer.back())) answer.pop_back();
+
+            std::string command;
+            if ("r" == answer || "R" == answer)      command = "mirv_vr_xr start";
+            else if ("s" == answer || "S" == answer) command = "mirv_vr_xr stop";
+            else if ("q" == answer || "Q" == answer) break;
+            else if ("c" == answer || "C" == answer) {
+                printf("  command: ");
+                fflush(stdout);
+                char typed[512] = "";
+                if (!fgets(typed, sizeof(typed), stdin)) break;
+                command = typed;
+                while (!command.empty() && ('\n' == command.back() || '\r' == command.back())) command.pop_back();
+            } else if (!answer.empty()) {
+                command = answer;   // anything else is a console command; no reason to refuse it
+            }
+
+            if (command.empty()) continue;
+            std::string refused;
+            if (SendToSession(command, refused)) {
+                Say("  sent  ", command + "   (the answer is in console.log)");
+            } else {
+                Say("  no    ", refused);
+            }
+        }
+    }
 
     CloseHandle(child.hThread);
     CloseHandle(child.hProcess);
