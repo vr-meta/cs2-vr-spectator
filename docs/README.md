@@ -14,6 +14,12 @@ The experiments are the core. Each is one question put to the engine or the runt
 method, and the answer - including the confident explanations that turned out wrong. Read
 the relevant ones before changing what they settled.
 
+[`docs/how-this-was-built.md`](how-this-was-built.md) reads the experiments in the order they
+happened rather than the order they make sense in — the dead end that took one experiment, why
+SteamVR was dropped and what that broke, the field of view settled by a person wearing the
+headset, and the resolution fight that had more separate causes than it looked. Written to be
+quoted from; every figure links to the note it came from.
+
 ## How it works, in one paragraph
 
 CS2's own stereo hooks are dead ends: the demo eye-offset convar has no effect and the
