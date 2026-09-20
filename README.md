@@ -125,6 +125,10 @@ brings up CS2's own menu on a screen either way.
 
 ### Watching a demo
 
+![Controller layout for watching a demo: left stick flies, left grip toggles free look, X and Y seek ten seconds, left menu shows CS2's own window and a long press sends Escape; right stick snap-turns and rises, its click shows or hides the HUD and a long click recentres, the triggers change player, right grip returns to the player, A pauses and B is slow motion](docs/images/controls-watching.png)
+
+The same thing as text:
+
 | Left controller | | Right controller | |
 | --- | --- | --- | --- |
 | stick | fly, in the direction you look | stick | snap turn; up/down to rise and descend |
@@ -156,6 +160,10 @@ for anyone who shoots back properly.
 
 The controls change with the mode, because the same twelve buttons cannot mean the same
 things in both:
+
+![Controller layout for playing against bots: left stick walks relative to your body and its click toggles slow walk, left trigger is use, left grip is crouch, X and Y pick a team; right stick turns your body and its click reloads, right trigger fires, right grip jumps, A is next weapon and B is alternative fire. Aim by pointing the right controller while looking around independently](docs/images/controls-playing.png)
+
+The same thing as text:
 
 | Left controller | | Right controller | |
 | --- | --- | --- | --- |

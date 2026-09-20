@@ -1704,7 +1704,7 @@ void PrintControls() {
         "  aim               %s\n"
         "\n"
         "EITHER WAY\n"
-        "    left menu        CS2's own menu on a screen, and Escape with it\n"
+        "    left menu        short: CS2's own window on a screen.  long: Escape\n"
         "\n"
         "What the triggers do while watching is mirv_vr_triggers: players, seek or fov.\n"
         "Aiming is mirv_vr_aim hand|stick|off; vr.cfg asks for hand.\n"
@@ -2773,27 +2773,25 @@ void ProcessInput(const AfxVrMath::ModeResult & mode) {
     if (b && !g_PrevFreeLook) { AfxVr_SetFreeLook(!AfxVr_GetFreeLook()); if (AfxVr_GetFreeLook()) AfxVr_Recenter(); }
     g_PrevFreeLook = b;
 
+    // The menu button used to be handled again here, the old way: one press toggling the
+    // screen AND sending Escape. It had been dead for a while and nobody had noticed.
+    //
+    // Both copies read the same action and both wrote g_PrevMenuButton, and the one above -
+    // which runs in every mode, before this branch - got there first each frame. So by the
+    // time this one tested `b && !g_PrevMenuButton`, the flag already equalled b and the
+    // condition could never be true. Dead code that still described itself confidently in
+    // a comment, which is how it survived: it was read as the explanation of a behaviour
+    // that was actually coming from somewhere else entirely, and the printed control table
+    // was written from it and was wrong.
+    //
+    // Found by checking a diagram against the source rather than against the table.
+
     // Right stick click: a short press hides and shows the HUD, a long one recentres.
     //
     // The frequent action goes on the short press and the rare one on the long, which is
     // the only way round that does not surprise anybody. Hiding does not re-place: a
     // hide and a show must bring the panels back exactly where they were, or it is not a
     // hide, it is a move. Re-placing is the Menu button and F11.
-    // The game's own menu, on a screen, without taking the headset off.
-    //
-    // Escape as well as the screen: with a map loaded the window shows the game, and what
-    // was asked for is the settings. Escape is what puts CS2's menu in front of it, and
-    // the same press takes it away again.
-    b = GetPressed(g_MenuButtonAction);
-    if (b && !g_PrevMenuButton) {
-        g_MenuOverride = !g_MenuOverride;
-        QueueKeyTap(VK_ESCAPE);
-        advancedfx::Message("AFXVR: %s\n", g_MenuOverride
-            ? "the game's own menu, on a screen. Point at it and pull the trigger."
-            : "back to the world.");
-    }
-    g_PrevMenuButton = b;
-
     b = GetPressed(g_RecenterAction);
 
     if (b && !g_PrevRecenter) {
