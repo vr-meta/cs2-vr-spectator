@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/cs2-vr-banner.png" alt="Counter-Strike 2 VR — Watch demos · Play offline. Illustrated operator wearing a VR headset and holding motion controllers." width="100%">
+</p>
+
 # CS2 VR Spectator
 
 Counter-Strike 2 in a VR headset. **Watch** a demo from inside the map — stand next to a
