@@ -9,6 +9,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::afxvr::{self, State};
+use crate::noise;
 
 /// One kept line and the cursor a client uses to ask for what came after it.
 #[derive(Debug, Clone)]
@@ -43,10 +44,18 @@ pub struct Follower {
     next_cursor: u64,
     pub state: State,
     pub restarts: u64,
+    /// Whether known engine chatter is collapsed. Off with --raw, for the session where a
+    /// puzzle turns out to live in a line the denylist covers.
+    filter: bool,
+    /// The noise seen since the last line that was kept, as (pattern, count). Held rather
+    /// than reported line by line, so that two patterns interleaving do not produce more
+    /// markers than they replace.
+    pending: Vec<(usize, u64)>,
+    pub suppressed: u64,
 }
 
 impl Follower {
-    pub fn new() -> Follower {
+    pub fn new(filter: bool) -> Follower {
         Follower {
             offset: 0,
             partial: String::new(),
@@ -54,6 +63,9 @@ impl Follower {
             next_cursor: 1,
             state: State::default(),
             restarts: 0,
+            filter,
+            pending: Vec::new(),
+            suppressed: 0,
         }
     }
 
@@ -68,6 +80,9 @@ impl Follower {
         self.partial.clear();
         self.ring.clear();
         self.state = State::default();
+        // Counted against the session that went, not carried into the next one.
+        self.pending.clear();
+        self.suppressed = 0;
         self.restarts += 1;
         self.push(
             "--- console.log was recreated: the game restarted ---".to_string(),
@@ -106,6 +121,18 @@ impl Follower {
 
     fn take(&mut self, line: String, now_ms: u64) {
         let ours = afxvr::is_afxvr(&line);
+
+        if !ours && self.filter {
+            if let Some(pattern) = noise::matches(&line) {
+                self.suppressed += 1;
+                match self.pending.iter_mut().find(|(p, _)| *p == pattern) {
+                    Some((_, count)) => *count += 1,
+                    None => self.pending.push((pattern, 1)),
+                }
+                return;
+            }
+        }
+
         if ours {
             if let Some(event) = afxvr::parse_line(&line) {
                 self.state.apply(&event, now_ms);
@@ -115,7 +142,25 @@ impl Follower {
             // output out of the ring and say nothing.
             return;
         }
+
+        self.flush_pending();
         self.push(line, ours);
+    }
+
+    /// What was suppressed, said out loud before the next line that was kept.
+    ///
+    /// Never a silent drop. A `CopyResource` that silently did nothing cost this project a
+    /// black screen in a headset and an afternoon, and the reason it was expensive is that
+    /// nothing anywhere said it had happened. A filter that quietly eats lines is the same
+    /// failure wearing a friendlier face - and if a suppressed line ever turns out to
+    /// matter, the count is what tells the next person where to look.
+    fn flush_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        for (pattern, count) in std::mem::take(&mut self.pending) {
+            self.push(noise::suppressed_note(pattern, count), false);
+        }
     }
 
     /// Everything after `cursor`, and where to ask from next time. With `ours_only`, just
@@ -217,7 +262,7 @@ pub fn read_chunk(path: &Path, offset: u64) -> std::io::Result<Chunk> {
 
 impl Default for Follower {
     fn default() -> Follower {
-        Follower::new()
+        Follower::new(true)
     }
 }
 
@@ -232,7 +277,7 @@ mod tests {
         // and stamped hook lines, and a multi-line message whose continuation starts at
         // column 0. Matching at column 0 alone kept the continuation and lost every line
         // that mattered, which read from outside as a server whose cursor was stuck.
-        let mut f = Follower::new();
+        let mut f = Follower::new(true);
         f.feed(
             "\u{feff}09/20 12:14:24 [RenderSystem] Loaded\n\
              09/20 12:14:30 AFXVR: console pipe open at \\\\.\\pipe\\cs2vr, for this user only.\n\
@@ -261,7 +306,7 @@ mod tests {
         // This is what `mirv_vr_version` actually prints: the echo carries the prefix and
         // the answer does not. Keeping only prefixed lines returned the echo of a command
         // and threw its reply away, which is most of the point of POST /command.
-        let mut f = Follower::new();
+        let mut f = Follower::new(true);
         f.feed(
             "09/20 12:19:31 AFXVR: pipe: mirv_vr_version\n\
              09/20 12:19:31 cs2-vr-spectator 0.0.0-dev\n\
@@ -278,8 +323,60 @@ mod tests {
     }
 
     #[test]
+    fn collapses_the_line_that_is_ninety_nine_percent_of_the_file() {
+        // 172143 of 173754 lines in a real session were this one. The point of collapsing
+        // rather than dropping is the note: the count is what tells the next person to
+        // look, if a suppressed line ever turns out to have mattered.
+        let mut f = Follower::new(true);
+        let noise = "09/20 12:35:40 [Client] Ignoring CSVCMsg_UserCommands_t: Missing command to delta from\n";
+        for _ in 0..172 {
+            f.feed(noise.as_bytes(), 0);
+        }
+        // Nothing is reported while the run is still going - the note needs its final count.
+        assert!(f.since(0, false).0.is_empty());
+        assert_eq!(172, f.suppressed);
+
+        f.feed(b"09/20 12:35:41 AFXVR: pipe: mirv_vr_crop\n", 0);
+        let (lines, _, _) = f.since(0, false);
+        assert_eq!(2, lines.len());
+        assert_eq!(
+            "[172 lines suppressed: [Client] Ignoring CSVCMsg_UserCommands_t]",
+            lines[0].text
+        );
+        assert!(lines[1].text.ends_with("AFXVR: pipe: mirv_vr_crop"));
+        // The note belongs to the full view, not to the hook's own pane - there was never
+        // a gap there to explain.
+        assert_eq!(1, f.since(0, true).0.len());
+    }
+
+    #[test]
+    fn two_patterns_interleaving_do_not_make_more_notes_than_they_replace() {
+        let mut f = Follower::new(true);
+        for _ in 0..3 {
+            f.feed(b"09/20 12:35:40 [Client] Ignoring CSVCMsg_UserCommands_t: x\n", 0);
+            f.feed(b"09/20 12:35:40 [Shooting] cl: ReadFrameInput - Presented data has no mod info\n", 0);
+        }
+        f.feed(b"09/20 12:35:41 AFXVR: recentred.\n", 0);
+        let (lines, _, _) = f.since(0, false);
+        assert_eq!(3, lines.len());
+        assert!(lines[0].text.starts_with("[3 lines suppressed:"));
+        assert!(lines[1].text.starts_with("[3 lines suppressed:"));
+        assert_eq!(6, f.suppressed);
+    }
+
+    #[test]
+    fn raw_keeps_every_byte_the_game_wrote() {
+        // --raw, for the session where the puzzle turns out to live in a line the denylist
+        // covers. A filter nobody can turn off is a filter that eventually hides the answer.
+        let mut f = Follower::new(false);
+        f.feed(b"09/20 12:35:40 [Client] Ignoring CSVCMsg_UserCommands_t: x\n", 0);
+        assert_eq!(1, f.since(0, false).0.len());
+        assert_eq!(0, f.suppressed);
+    }
+
+    #[test]
     fn keeps_only_our_own_lines() {
-        let mut f = Follower::new();
+        let mut f = Follower::new(true);
         f.feed(
             b"Host_Changelevel: de_inferno\nAFXVR: recentred.\nsome game noise\n",
             0,
@@ -298,7 +395,7 @@ mod tests {
         // The game is writing while we read, so a read ending mid-line is the normal case
         // rather than the exception. Parsing the half would report a wrong mode, not a
         // late one.
-        let mut f = Follower::new();
+        let mut f = Follower::new(true);
         f.feed(b"AFXVR: mode PLAY (map \"de_in", 0);
         assert_eq!(None, f.state.mode);
         assert!(f.since(0, true).0.is_empty());
@@ -310,7 +407,7 @@ mod tests {
 
     #[test]
     fn a_cursor_asks_for_what_came_after_it() {
-        let mut f = Follower::new();
+        let mut f = Follower::new(true);
         f.feed(b"AFXVR: one\nAFXVR: two\n", 0);
         let (lines, cursor, _) = f.since(0, true);
         assert_eq!(2, lines.len());
@@ -323,7 +420,7 @@ mod tests {
 
     #[test]
     fn a_client_that_fell_behind_is_told_so() {
-        let mut f = Follower::new();
+        let mut f = Follower::new(true);
         for i in 0..RING + 50 {
             f.feed(format!("AFXVR: line {i}\n").as_bytes(), 0);
         }
@@ -334,7 +431,7 @@ mod tests {
 
     #[test]
     fn a_restart_clears_what_is_no_longer_true() {
-        let mut f = Follower::new();
+        let mut f = Follower::new(true);
         f.feed(
             b"AFXVR: mode PLAY (map \"de_inferno\", demo 0, cursor 0, button 0) - world in both eyes\n",
             0,
@@ -355,7 +452,7 @@ mod tests {
 
     #[test]
     fn a_line_that_never_ends_is_not_held_for_ever() {
-        let mut f = Follower::new();
+        let mut f = Follower::new(true);
         let long = format!("AFXVR: {}", "x".repeat(MAX_PARTIAL + 10));
         f.feed(long.as_bytes(), 0);
         assert_eq!(1, f.since(0, true).0.len());
@@ -363,7 +460,7 @@ mod tests {
 
     #[test]
     fn bytes_that_are_not_text_do_not_stop_the_follower() {
-        let mut f = Follower::new();
+        let mut f = Follower::new(true);
         f.feed(b"AFXVR: \xff\xfe broken\nAFXVR: recentred.\n", 0);
         assert_eq!(2, f.since(0, true).0.len());
     }

@@ -15,6 +15,7 @@ mod cs2;
 mod http;
 mod json;
 mod logtail;
+mod noise;
 mod paths;
 mod pipe;
 mod vdf;
@@ -36,6 +37,9 @@ cs2vr-server - drive and watch a running cs2-vr-spectator session over HTTP.
   --port <n>      listen on 127.0.0.1:<n>. Default 8731.
   --cs2 <folder>  where CS2 is, if the game is not running and Steam cannot be asked.
   --log <file>    console.log itself, if it is somewhere unusual.
+  --raw           keep every line the game wrote, including the known chatter that is
+                  otherwise collapsed to a counted note. 99% of console.log is one
+                  repeated line; this is for the day the answer is in it.
   --help
 
 It attaches to a session that is already running and never starts one.
@@ -45,6 +49,7 @@ struct Args {
     port: u16,
     csgo: Option<String>,
     log: Option<String>,
+    filter: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -52,6 +57,7 @@ fn parse_args() -> Result<Args, String> {
         port: DEFAULT_PORT,
         csgo: None,
         log: None,
+        filter: true,
     };
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -68,6 +74,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--cs2" => args.csgo = Some(paths::csgo_from_folder(&value()?)),
             "--log" => args.log = Some(value()?),
+            "--raw" => args.filter = false,
             "--help" | "-h" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -86,6 +93,9 @@ struct Shared {
     trouble: Option<String>,
     session: Option<cs2::Session>,
     cs2_build_installed: Option<String>,
+    /// Kept here because a new session gets a new follower, and it has to be built the way
+    /// the one before it was.
+    filter: bool,
 }
 
 fn main() {
@@ -98,11 +108,12 @@ fn main() {
     };
 
     let shared = Arc::new(Mutex::new(Shared {
-        follower: logtail::Follower::new(),
+        follower: logtail::Follower::new(args.filter),
         log_path: None,
         trouble: None,
         session: None,
         cs2_build_installed: None,
+        filter: args.filter,
     }));
 
     // Bound to loopback, and that is not a detail of the deployment. Every request that
@@ -259,7 +270,7 @@ fn locate(shared: &Arc<Mutex<Shared>>, fixed_log: Option<&str>, fixed_csgo: Opti
     // a game that is not this one.
     if guard.log_path != log {
         guard.log_path = log;
-        guard.follower = logtail::Follower::new();
+        guard.follower = logtail::Follower::new(guard.filter);
     }
 }
 
@@ -366,8 +377,16 @@ fn state_json(shared: &Arc<Mutex<Shared>>, start: Instant) -> String {
     let guard = shared.lock().unwrap();
     let state = &guard.follower.state;
 
+    // What the log last said is only true while the game that said it is running. With CS2
+    // gone, the fold still holds `watching de_mirage`, `FOCUSED` and an open pipe - all of
+    // which were true, and none of which are now. This is the same fault as reporting 72
+    // fps for a session that died, and it gets the same answer: say nothing rather than
+    // something that was true once.
+    let live = guard.session.is_some();
+    let fps_note = state.fps_note(now);
+
     let mut o = json::Object::new();
-    o.bool("cs2_running", guard.session.is_some())
+    o.bool("cs2_running", live)
         .opt_num("pid", guard.session.as_ref().map(|s| s.pid as f64))
         .opt_str("exe", guard.session.as_ref().map(|s| s.exe.as_str()))
         .opt_str(
@@ -375,20 +394,31 @@ fn state_json(shared: &Arc<Mutex<Shared>>, start: Instant) -> String {
             guard.log_path.as_ref().and_then(|p| p.to_str()),
         )
         .opt_str("trouble", guard.trouble.as_deref())
-        .opt_str("mode", state.mode.map(|m| m.as_str()))
-        .opt_str("map", state.map.as_deref())
-        .bool("demo", state.demo)
-        .bool("cursor_showing", state.cursor)
-        .bool("world_in_eyes", state.world_in_eyes)
-        .bool("sheet_over", state.sheet_over)
-        .opt_num("fps", state.fps(now).map(|f| f as f64))
-        .opt_str("fps_note", state.fps_note(now).as_deref())
-        .opt_size("per_eye", state.per_eye(now))
-        .opt_size("back_buffer", state.back_buffer)
-        .opt_str("session_state", state.session_state.as_deref())
+        .opt_str("mode", state.mode.filter(|_| live).map(|m| m.as_str()))
+        .opt_str("map", state.map.as_deref().filter(|_| live))
+        .bool("demo", live && state.demo)
+        .bool("cursor_showing", live && state.cursor)
+        .bool("world_in_eyes", live && state.world_in_eyes)
+        .bool("sheet_over", live && state.sheet_over)
+        .opt_num("fps", state.fps(now).filter(|_| live).map(|f| f as f64))
+        .opt_str(
+            "fps_note",
+            if live {
+                fps_note.as_deref()
+            } else {
+                Some("CS2 is not running")
+            },
+        )
+        .opt_size("per_eye", state.per_eye(now).filter(|_| live))
+        .opt_size("back_buffer", state.back_buffer.filter(|_| live))
+        .opt_str(
+            "session_state",
+            state.session_state.as_deref().filter(|_| live),
+        )
         .raw(
             "pipe_open",
             match state.pipe_open {
+                _ if !live => "null",
                 Some(true) => "true",
                 Some(false) => "false",
                 None => "null",
@@ -398,7 +428,11 @@ fn state_json(shared: &Arc<Mutex<Shared>>, start: Instant) -> String {
         .opt_str("cs2_build_tested", state.cs2_build_tested.as_deref())
         .opt_str("cs2_build_installed", guard.cs2_build_installed.as_deref())
         .num("cursor", guard.follower.cursor() as f64)
-        .num("restarts", guard.follower.restarts as f64);
+        .num("restarts", guard.follower.restarts as f64)
+        // What the filter took away, so that its effect is a number somebody can see
+        // rather than an absence nobody can.
+        .bool("filtering", guard.filter)
+        .num("suppressed", guard.follower.suppressed as f64);
     o.finish()
 }
 
