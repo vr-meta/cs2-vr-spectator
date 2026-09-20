@@ -155,12 +155,16 @@ when the picker comes up — all without taking the headset off. That menu is a 
 this project rather than a fallback, and it is the same screen the **Menu** button brings up
 over a running game, so settings and the buy menu are reachable too.
 
-Over a running game that button is the **only** thing that raises it, and pressing it again
-puts it away. Team select and the buy menu do not bring the screen up by themselves: press
-**Menu** when you want them. It used to appear on its own whenever Windows was showing a
-mouse cursor anywhere, which meant it arrived uninvited in the middle of a demo, replaced the
-three HUD panels with one window, and took the sticks away — and, because the cursor outvoted
-the button, there was then no way to dismiss it.
+Over a running game, team select and the buy menu bring the screen up by themselves, and the
+**Menu** button both raises it and puts it away — the button always has the last word, so
+whatever opened it, you can dismiss it. Over a live world the screen is transparent: the game
+stays visible underneath, which is the only way to stay oriented while you buy.
+
+It used to be worse in both directions. The trigger was the state of the Windows mouse cursor
+**anywhere on the desktop**, so any window on the machine that showed a pointer would raise
+the screen in front of you mid-demo, replace the three HUD panels with one window and take the
+sticks away — and because the cursor outvoted the button, there was then no way to put it
+down. It is now the cursor's *edge*, and only while the game has the foreground.
 
 Bots are not a limitation of either route. They are the point: the input path is too slow
 for anyone who shoots back properly.

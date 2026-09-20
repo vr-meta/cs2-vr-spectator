@@ -83,6 +83,13 @@ Building the hook itself: `docs/install.md` and `docs/patches/README.md`. CI
 - **Report what was measured, and say when something was not.** Several confident
   explanations in this project's history were wrong; the experiments directory is the
   record of finding out.
+- **Do not take the foreground while somebody is wearing the headset.** It is not a courtesy.
+  CS2's own screen is raised in the headset by the Windows cursor becoming visible with the
+  game in front, so a console, an editor or a dialog of ours coming to the front *is* the
+  trigger: the tool watching a session moved the panel in front of the person wearing it
+  twelve times in twenty-four seconds, during the very demo whose complaint was being
+  investigated. The instrument was disturbing the measurement and looked like a bug in the
+  hook. Run without raising a window; if one must come up, say so first.
 - **A problem that is not fixed now becomes a GitHub issue, not a sentence in chat.** A
   message evaporates at the next compaction and a TODO reaches nobody; an issue survives
   both and is the only way a stranger can pick the work up — which is what the README's
@@ -127,7 +134,11 @@ Building the hook itself: `docs/install.md` and `docs/patches/README.md`. CI
   and the vertical follows from the image's shape. Neither value is free; experiment 22 has
   the measurements. **CS2 rewrites `cs2_video.txt` on exit**, so nothing may be built on
   restoring it at exit: restore at *launch* if a backup exists, then take a fresh one. That
-  makes a crash, a kill and a clean exit one case.
+  makes a crash, a kill and a clean exit one case. **`setting.fullscreen_min_on_focus_loss`
+  belongs to the same problem and the same file**: at `1` the back buffer drops out of full
+  size on any focus loss, which rebuilds the swapchains and moves the panel's geometry under
+  the operator mid-session. At `0`, `back buffer is now` appeared zero times in a whole
+  session against three before.
 - `CreateProcessW` needs `bInheritHandles = TRUE`, or `SteamAPI_Init` cannot build its IPC
   pipe and CS2 prints "Steam is probably not running" with Steam plainly running, then
   closes. HLAE passes TRUE; every other flag already matched.

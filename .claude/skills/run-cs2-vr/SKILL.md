@@ -99,13 +99,18 @@ is worse:
 - **Health and ammo may be in the wrong place or missing.** Those two HUD rectangles are
   estimates, not measurements — see step 6, where fixing them is a two-minute job if they are
   willing.
-- **The left Menu button is the only thing that brings CS2's own screen up, and it puts it
-  away again.** Team select and the buy menu do not raise it by themselves any more, so when
-  they need to pick a team or buy, that is the button. It used to appear on its own whenever
-  Windows was showing a cursor anywhere — which meant it arrived uninvited mid-demo, replaced
-  the three HUD panels with one window and took the sticks away, and could not be dismissed
-  because the cursor outvoted the button. Tell them it is a button now, or they will wait for
-  the buy menu to appear and it will not.
+- **The left Menu button puts CS2's own screen away as well as bringing it up.** Team select
+  and the buy menu raise it by themselves; the button always has the last word, so whatever
+  opened it, they can dismiss it. Tell them the button exists — the failure it was added for
+  is a screen they did not ask for and could not get rid of.
+
+**And a rule for you, not for them: do not take the foreground while they are wearing the
+headset.** The screen above is triggered by the Windows cursor becoming visible with the game
+in front. A console, an editor or a dialog of yours coming to the front is itself a cursor
+event, and it moved the panel in front of a person mid-demo twelve times in twenty-four
+seconds before anybody realised the tool watching the session was the thing disturbing it.
+Run what you need without raising a window, and if something must come to the front, say so
+first.
 
 If the weapon model looks oversized, swims against the world, or follows their head instead
 of their hands, that is the known viewmodel bug: send `r_drawviewmodel 0`. Most sessions so
@@ -130,10 +135,16 @@ A minimised window gets no present events, CS2's swap chain spins on
 two frames a second. It is indistinguishable from a hang from inside the headset, it has
 happened during a real session, and restoring the window fixes it immediately.
 
-**Say you are about to restore it, and why, before you do.** It is very often minimised
-because *they* minimised it — to type to you, which is the one thing they can do without
-taking the headset off — and a window that comes back by itself while they are describing a
-problem is you reaching into their machine unannounced. Tell them, then restore:
+**Ask them to restore it rather than doing it for them.** It is very often minimised because
+*they* minimised it — to type to you, which is the one thing they can do without taking the
+headset off — and a window that comes back by itself while they are describing a problem is
+you reaching into their machine unannounced. They are at the keyboard; the taskbar is one
+click.
+
+If you do have to do it yourself, say so first, and know that the handle below is not
+reliable: `MainWindowHandle` on `cs2` has been measured returning a hidden 160x28 window at
+-32000,-32000 rather than the game's swap-chain window, so this can restore nothing and
+report success.
 
 ```powershell
 $h = (Get-Process cs2).MainWindowHandle
