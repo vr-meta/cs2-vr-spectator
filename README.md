@@ -6,6 +6,25 @@ bombsite, look around, lean round a corner, fly above the round while it plays. 
 controller, look wherever you like while you do it. CS2 itself still loads the map, runs
 the game and renders the world; this project gives it two eyes, a head and a pair of hands.
 
+## Why this exists
+
+I like watching played matches. At some point I wanted to watch a recording in VR, just for
+fun, and wondered whether it was even possible. I had already run
+[Portal 2 in VR](https://github.com/vr-meta/portal2vr), and there are examples of how
+[Left 4 Dead 2](https://github.com/sd805/l4d2vr) was done — so I tried it for CS2, and it
+turned out rather well. This repository is the result.
+
+Then I tried adding a play mode as well. It has its own downsides, and one of them is not
+fixable: **you will not play a real match in this.** There is not enough reaction speed —
+between a synthetic mouse, a servo learning what it is worth, and half the frame rate the
+headset wants, you are a beat behind anyone playing flat. Running around and shooting at
+bots, though, works fine, and is good fun.
+
+It is a hobby project, and that is the honest frame for everything below: one person, one
+headset, one machine, and a list of things found out the hard way.
+
+## Where it is now
+
 **Alpha**, on the one setup it was built and worn on: a Meta Quest 3 over Link, Windows 11,
 an RTX 4070 laptop. Expect a CS2 update to break it until a new release is made.
 
@@ -15,15 +34,22 @@ start:
 - **Watching works and is comfortable.** Stereo, head tracking, leaning, sound that follows
   your head, the HUD on panels around you. This is what the project was built for and what
   has had the most hours in a headset.
-- **Playing works, with bugs.** You can walk, shoot, reload, crouch, jump, defuse and
-  finish a round against bots. But **shooting is not yet steady and the in-game HUD is not
-  yet right** — see [Playing](#playing-against-bots) for exactly what is wrong. It is
-  playable, and it is not yet good.
+- **Playing is for bots, and has bugs.** You can walk, shoot, reload, crouch, jump, defuse
+  and finish a round. You cannot be competitive at it — see above — and today **shooting is
+  not yet steady and the in-game HUD is not yet right**; see
+  [Playing](#playing-against-bots) for exactly what is wrong.
 
 > **Read this first.** This starts CS2 with `-insecure` and loads a DLL into it. That is
-> fine for watching **your own demo files** and playing **offline with bots**, and for
-> nothing else. It cannot join matchmaking or any VAC-protected server, and nothing here may
-> be changed to try. It does not contain or redistribute anything of Valve's.
+> for watching **your own demo files** and playing **offline against bots**, and for nothing
+> else. `-insecure` is what keeps you off VAC-secured servers; `cs2vr.exe` always passes it
+> and has no way not to, and nothing here may be changed to get round that.
+>
+> **I have never tried this on a real match and I have not tested what VAC makes of it.**
+> Do not find out. Do not load the hook into a CS2 you started normally, and do not play
+> matchmaking with any of this on your machine. If you go around the launcher and get
+> yourself banned, that is yours, not mine.
+>
+> It does not contain or redistribute anything of Valve's.
 
 ## Install and run
 
@@ -78,7 +104,10 @@ the headset session, and the arrow keys switch players and camera.
 ### Playing against bots
 
 `cs2vr.exe play de_inferno` — an offline casual game, `sv_lan 1`, six bots, nothing on the
-internet. The controls change with it, because the same twelve buttons cannot mean the same
+internet. Bots are not a limitation of the launcher, they are the point: the input path is
+too slow for anyone who shoots back properly.
+
+The controls change with the mode, because the same twelve buttons cannot mean the same
 things in both:
 
 | Left controller | | Right controller | |
@@ -167,10 +196,17 @@ launch, and the rules that were each paid for. Open work is in the
 [issues](https://github.com/vr-meta/cs2-vr-spectator/issues); the plan is
 [`docs/07-release-plan.md`](docs/07-release-plan.md).
 
+**If you feel like improving it, you are welcome.** It is one person's hobby project and
+there is plenty left: steadying the aim, measuring the two HUD rectangles that are still
+guesses, the weapon model's own field of view, and whatever a headset that is not a Quest 3
+turns out to do. Issues and pull requests are both fine, and so is just telling me what it
+did wrong — a paste of the `AFXVR:` lines from `console.log` is worth more than a careful
+description.
+
 The hook is built on [advancedfx / HLAE](https://github.com/advancedfx/advancedfx) (MIT).
-Everything else that ships in a release is listed in [THIRD-PARTY.md](THIRD-PARTY.md). The
-organisation's [Portal 2 VR](https://github.com/vr-meta/portal2vr) was the reference for
-what a VR integration of a Source game has to get right.
+Everything else that ships in a release is listed in [THIRD-PARTY.md](THIRD-PARTY.md).
+[Portal 2 VR](https://github.com/vr-meta/portal2vr) was the reference for what a VR
+integration of a Source game has to get right.
 
 ## Licence
 
