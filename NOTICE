@@ -1,0 +1,44 @@
+cs2-vr-spectator
+Copyright 2026 butschster <butschster@gmail.com>
+
+This product includes software developed as part of the cs2-vr-spectator project
+(https://github.com/vr-meta/cs2-vr-spectator).
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+Section 4(d) of that licence is why this file exists: anyone who distributes this
+work, or a work derived from it, has to carry these attribution notices with it.
+Keep this file, or reproduce what is in it.
+
+--------------------------------------------------------------------------------
+
+Software from other people, which keeps its own terms
+
+  Apache 2.0 on this project's own code changes nothing about the components
+  below. Each was licensed to you by its own authors, on their terms, and those
+  terms travel with it no matter what this project says.
+
+  advancedfx / HLAE            MIT          https://github.com/advancedfx/advancedfx
+    The hook is built from it. Most of AfxHookSource2.dll is their code, and it
+    is MIT in your hands. A copy of their licence ships beside the binary in a
+    release.
+
+  OpenXR loader (Khronos)      Apache-2.0   https://github.com/KhronosGroup/OpenXR-SDK
+  OpenEXR and Imath (ASWF)     BSD-3-Clause https://github.com/AcademySoftwareFoundation/openexr
+  Microsoft Visual C++ runtime              Microsoft's redistributable terms
+
+  THIRD-PARTY.md has the full list and says where each file sits in a release.
+
+--------------------------------------------------------------------------------
+
+Nothing of Valve's
+
+  No Counter-Strike 2 binaries, maps, models, sounds or demo files are included
+  here or in any release, and nothing here may be used to redistribute them.
+  Counter-Strike 2 is installed from Steam by whoever runs this.
+
+  This software starts CS2 with -insecure and loads a DLL into it. That is for
+  your own demo files and offline play against bots. It is not for matchmaking
+  and not for any VAC-protected server. The Apache licence grants you broad
+  rights over this code; it grants you nothing at all over Valve's service, and
+  breaking their rules with it is on you.

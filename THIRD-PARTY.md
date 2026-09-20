@@ -5,12 +5,12 @@ A release zip contains this project's own files — `cs2vr.exe`, the VR parts of
 licence texts ship inside `hook\`: `LICENSE-advancedfx.txt` in a zip built by CI, or a
 whole `LICENSES\` folder when one is staged from a full HLAE install.
 
-**Our licence does not reach any of it.** This project is
-[PolyForm Noncommercial](LICENSE), and nothing about that changes the terms below or takes
-anything away from you: the advancedfx code compiled into `AfxHookSource2.dll` is MIT and
-stays MIT in your hands, the OpenXR loader is Apache-2.0 and stays Apache-2.0. A
-noncommercial licence on a combined work restricts what we grant over our own part of it,
-and cannot restrict what somebody else already granted over theirs.
+**Our licence does not reach any of it.** This project is [Apache 2.0](LICENSE), and that
+governs our own code and nothing else: the advancedfx code compiled into
+`AfxHookSource2.dll` is MIT and stays MIT in your hands, OpenEXR stays BSD-3-Clause, the
+OpenXR loader stays Apache-2.0 under its own copyright. A licence on a combined work speaks
+for the part its authors wrote, and cannot alter what somebody else already granted over
+theirs — in either direction.
 
 | Component | Where it is in the zip | Licence | What it is here for |
 | --- | --- | --- | --- |

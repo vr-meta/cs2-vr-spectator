@@ -107,9 +107,20 @@ $cfgs = Get-ChildItem (Join-Path $repo 'scripts\cs2') -Filter 'vr*.cfg'
 if (-not $cfgs) { throw 'No vr*.cfg in scripts\cs2.' }
 $cfgs | ForEach-Object { Copy-Item $_.FullName (Join-Path $stage 'cfg') -Force }
 
-foreach ($doc in @('README.md', 'LICENSE', 'THIRD-PARTY.md')) {
+# NOTICE is not optional decoration: Apache 2.0 section 4(d) requires it to travel with
+# every distribution, and a zip is a distribution.
+foreach ($doc in @('README.md', 'LICENSE', 'NOTICE', 'THIRD-PARTY.md')) {
     $p = Join-Path $repo $doc
-    if (Test-Path $p) { Copy-Item $p $stage -Force } else { Write-Warning "$doc is missing from the repository; the release will not carry it." }
+    if (Test-Path $p) {
+        Copy-Item $p $stage -Force
+    } elseif ($doc -in @('LICENSE', 'NOTICE')) {
+        # Not a warning. Publishing a zip without these is distributing the work without
+        # the terms it is distributed under, which is the one mistake here that cannot be
+        # fixed by uploading a better zip afterwards.
+        throw "$doc is missing from the repository. A release cannot be made without it."
+    } else {
+        Write-Warning "$doc is missing from the repository; the release will not carry it."
+    }
 }
 
 Set-Content -Path (Join-Path $stage 'VERSION.txt') -Encoding utf8 -Value @(

@@ -106,7 +106,7 @@ jobs:
 
           CS2 is always started with ``-insecure``: own demos and offline play only. The exe is **unsigned** and loads a DLL into a game, so SmartScreen and some antivirus will object; the SHA-256 is attached.
 
-          Licence: **PolyForm Noncommercial 1.0.0** - noncommercial use, modification and sharing, keeping the notice ``Copyright 2026 butschster <butschster@gmail.com>``. Source-available rather than open source. The advancedfx (MIT) and OpenXR loader (Apache-2.0) parts keep their own terms; see THIRD-PARTY.md in the zip.
+          Licence: **Apache 2.0** - use, change and ship it, commercially or not, keeping the ``NOTICE`` file (``Copyright 2026 butschster <butschster@gmail.com>``) with anything you distribute. The advancedfx (MIT), OpenEXR (BSD-3-Clause) and OpenXR loader (Apache-2.0) parts keep their own terms; see THIRD-PARTY.md in the zip.
           "@
           $notes | Set-Content notes.md -Encoding utf8
           gh release create $env:GITHUB_REF_NAME (Get-ChildItem out/*.zip, out/*.sha256).FullName `

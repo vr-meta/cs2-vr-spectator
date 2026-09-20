@@ -157,17 +157,20 @@ when the values stop looking like a camera; re-measuring is described in
 [`docs/05-view-setup-point.md`](docs/05-view-setup-point.md), and a release is tied to one
 CS2 build for exactly this reason.
 
-## The licence, before you spend an evening
+## The licence
 
-This project is under [PolyForm Noncommercial 1.0.0](LICENSE), with the notice
-`Copyright 2026 butschster <butschster@gmail.com>`. You may use, change and share it for
-any noncommercial purpose; commercial use is not licensed. By sending a change you are
-offering it under those same terms.
+[Apache License 2.0](LICENSE). Use it, change it, ship it, sell it; keep the
+[`NOTICE`](NOTICE) file with whatever you distribute, say which files you changed, and
+leave the copyright headers you found alone. **By sending a change you are offering it
+under the same licence** — that is Apache 2.0 section 5, and there is no separate CLA to
+sign.
 
-That makes this **source-available, not open source** by the OSI definition, and you should
-know it before rather than after: some people will not contribute to a project with a
-noncommercial restriction, and that is a fair position. The restriction is on this
-project's own code only. The advancedfx code that the hook is built from is MIT and stays
-MIT, the OpenXR loader stays Apache-2.0, and a patch you write against advancedfx's own
-files under `docs/patches/` is a change to an MIT project — if it is worth upstreaming,
-upstream it, and nothing here stands in the way.
+Two things that follow and are easy to get wrong:
+
+- **Do not paste in code you did not write** unless its licence allows it and you add it to
+  [THIRD-PARTY.md](THIRD-PARTY.md) in the same change. A file with somebody else's
+  copyright in it is not covered by our LICENSE and the whole point of that file is that
+  the list is true.
+- **A patch under `docs/patches/` changes advancedfx, which is MIT and not ours.** If it is
+  worth having upstream, offer it upstream; nothing here stands in the way, and a fix that
+  lands in HLAE is one this project stops having to carry.

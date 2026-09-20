@@ -121,16 +121,18 @@ what a VR integration of a Source game has to get right.
 
 ## Licence
 
-**[PolyForm Noncommercial 1.0.0](LICENSE)** — use it, change it, share it, for any
-noncommercial purpose. Commercial use is not licensed. Keep the notice:
+**[Apache License 2.0](LICENSE).** Use it, change it, ship it, sell it. What you owe in
+return is attribution: keep the [`NOTICE`](NOTICE) file with anything you distribute, so
 
-> Required Notice: Copyright 2026 butschster \<butschster@gmail.com\>
+> Copyright 2026 butschster \<butschster@gmail.com\>
 
-That makes this project **source-available, not open source** in the OSI sense, and it is
-worth saying plainly before anyone spends an evening on it: contributions are welcome and
-the code is here to be read and improved, but the noncommercial restriction is real and
-GitHub will show the licence as non-standard.
+travels with the code. Say which files you changed, and keep the licence and copyright
+headers you found. That is the whole of it.
 
-The parts that are not ours keep their own terms regardless of that — you retain your MIT
-rights to the advancedfx code inside `AfxHookSource2.dll`, and Apache-2.0 to the OpenXR
-loader. [THIRD-PARTY.md](THIRD-PARTY.md) has the list.
+The parts that are not ours keep their own terms regardless — you retain your MIT rights to
+the advancedfx code inside `AfxHookSource2.dll`, BSD-3-Clause to OpenEXR, and Apache-2.0 to
+the OpenXR loader. [THIRD-PARTY.md](THIRD-PARTY.md) has the list.
+
+A licence is not permission to break Valve's rules. It grants you rights over **this** code
+and none whatsoever over Counter-Strike 2 or Valve's services: own demos and offline play,
+never matchmaking, never a VAC-protected server.
